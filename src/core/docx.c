@@ -6,13 +6,16 @@
 // IXmlReader), both documented and both already on every machine this runs on.
 // Neither the zip container nor the XML parser is code this project owns.
 //
-// Reading converts WordprocessingML to RTF and hands it to the rich text view
-// that already exists. That is deliberate -- see docx.h.
+// Since v0.7 both directions go through the document model in doctree.h rather
+// than through RTF. The reader builds a model; the writer serialises one. RTF
+// is produced only when a model needs to reach the view, by doctree_rtf.c.
 
 #define COBJMACROS
 
 #include "supernote.h"
 #include "core/docx.h"
+#include "core/doctree.h"
+#include "core/strbuf.h"
 #include "ui/editor_rich.h"
 
 #include <msopc.h>
@@ -23,12 +26,13 @@
 #pragma comment(lib, "ole32.lib")
 #pragma comment(lib, "oleaut32.lib")
 
-// Relationship type identifying the package's main document part.
 #define REL_OFFICE_DOCUMENT \
     L"http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument"
 
 #define CT_MAIN_DOCUMENT \
     L"application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"
+
+#define WML_NS "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
 
 static WCHAR g_lastError[512] = {0};
 
@@ -47,177 +51,6 @@ BOOL Docx_IsDocxPath(const WCHAR* path) {
 }
 
 // ---------------------------------------------------------------------------
-// A growable byte string, used to build RTF and XML
-// ---------------------------------------------------------------------------
-
-typedef struct {
-    char*  buf;
-    size_t len;
-    size_t cap;
-    BOOL   failed;
-} Str;
-
-static void StrFree(Str* s) {
-    free(s->buf);
-    s->buf = NULL;
-    s->len = s->cap = 0;
-}
-
-static BOOL StrReserve(Str* s, size_t extra) {
-    if (s->failed) return FALSE;
-    if (s->len + extra + 1 <= s->cap) return TRUE;
-
-    size_t want = s->cap ? s->cap * 2 : 8192;
-    while (want < s->len + extra + 1) want *= 2;
-
-    char* grown = (char*)realloc(s->buf, want);
-    if (!grown) {
-        s->failed = TRUE;
-        return FALSE;
-    }
-    s->buf = grown;
-    s->cap = want;
-    return TRUE;
-}
-
-static void StrAdd(Str* s, const char* text) {
-    if (!text) return;
-    size_t n = strlen(text);
-    if (!StrReserve(s, n)) return;
-    memcpy(s->buf + s->len, text, n);
-    s->len += n;
-    s->buf[s->len] = '\0';
-}
-
-static void StrAddF(Str* s, const char* fmt, ...) {
-    char tmp[512];
-    va_list ap;
-    va_start(ap, fmt);
-    int n = vsnprintf(tmp, sizeof(tmp), fmt, ap);
-    va_end(ap);
-    if (n > 0) StrAdd(s, tmp);
-}
-
-// Text into RTF. Braces and backslashes are control characters; anything above
-// ASCII goes out as \uN with a '?' fallback for readers that do not do Unicode.
-static void StrAddRtfText(Str* s, const WCHAR* text, int len) {
-    if (!text) return;
-    if (len < 0) len = (int)wcslen(text);
-
-    for (int i = 0; i < len; i++) {
-        WCHAR c = text[i];
-        switch (c) {
-            case L'\\': StrAdd(s, "\\\\"); break;
-            case L'{':  StrAdd(s, "\\{");  break;
-            case L'}':  StrAdd(s, "\\}");  break;
-            case L'\t': StrAdd(s, "\\tab "); break;
-            case L'\r': case L'\n': break;   // paragraph breaks are structural
-            default:
-                if (c >= 0x20 && c < 0x80) {
-                    if (!StrReserve(s, 1)) return;
-                    s->buf[s->len++] = (char)c;
-                    s->buf[s->len] = '\0';
-                } else if (c >= 0x80) {
-                    // RTF wants a signed 16-bit value here.
-                    StrAddF(s, "\\u%d?", (int)(short)c);
-                }
-                break;
-        }
-    }
-}
-
-// XML text escaping, for the writer.
-static void StrAddXmlText(Str* s, const WCHAR* text, int len) {
-    if (!text) return;
-    if (len < 0) len = (int)wcslen(text);
-
-    // UTF-8 is what the part declares, so convert then escape.
-    int u8len = WideCharToMultiByte(CP_UTF8, 0, text, len, NULL, 0, NULL, NULL);
-    if (u8len <= 0) return;
-
-    char* u8 = (char*)malloc((size_t)u8len + 1);
-    if (!u8) return;
-    WideCharToMultiByte(CP_UTF8, 0, text, len, u8, u8len, NULL, NULL);
-    u8[u8len] = '\0';
-
-    for (int i = 0; i < u8len; i++) {
-        char c = u8[i];
-        switch (c) {
-            case '&':  StrAdd(s, "&amp;");  break;
-            case '<':  StrAdd(s, "&lt;");   break;
-            case '>':  StrAdd(s, "&gt;");   break;
-            case '"':  StrAdd(s, "&quot;"); break;
-            case '\'': StrAdd(s, "&apos;"); break;
-            default:
-                if ((unsigned char)c < 0x20 && c != '\t') break;  // illegal in XML 1.0
-                if (!StrReserve(s, 1)) { free(u8); return; }
-                s->buf[s->len++] = c;
-                s->buf[s->len] = '\0';
-                break;
-        }
-    }
-    free(u8);
-}
-
-// ---------------------------------------------------------------------------
-// Font and colour tables
-// ---------------------------------------------------------------------------
-
-#define MAX_FONTS  64
-#define MAX_COLORS 64
-
-typedef struct {
-    WCHAR    fonts[MAX_FONTS][LF_FACESIZE];
-    int      fontCount;
-    COLORREF colors[MAX_COLORS];
-    int      colorCount;
-} Tables;
-
-static int TableFont(Tables* t, const WCHAR* name) {
-    if (!name || !name[0]) return 0;
-    for (int i = 0; i < t->fontCount; i++) {
-        if (_wcsicmp(t->fonts[i], name) == 0) return i;
-    }
-    if (t->fontCount >= MAX_FONTS) return 0;
-    wcsncpy_s(t->fonts[t->fontCount], LF_FACESIZE, name, _TRUNCATE);
-    return t->fontCount++;
-}
-
-// Colour 0 in an RTF colour table is "default", so real colours start at 1.
-static int TableColor(Tables* t, COLORREF c) {
-    for (int i = 0; i < t->colorCount; i++) {
-        if (t->colors[i] == c) return i + 1;
-    }
-    if (t->colorCount >= MAX_COLORS) return 0;
-    t->colors[t->colorCount] = c;
-    return ++t->colorCount;
-}
-
-// ---------------------------------------------------------------------------
-// Formatting carried while walking the document
-// ---------------------------------------------------------------------------
-
-typedef struct {
-    BOOL bold, italic, underline, strike;
-    BOOL superscript, subscript;
-    int  halfPoints;     // w:sz is in half-points; 0 means unspecified
-    int  colorIndex;     // into the RTF colour table; 0 = default
-    int  fontIndex;
-    BOOL hasFont;
-} RunFmt;
-
-typedef struct {
-    int  align;          // 0 left, 1 centre, 2 right, 3 justify
-    int  indentTwips;
-    int  spaceBeforeTw;
-    int  spaceAfterTw;
-    BOOL isList;
-    BOOL bullet;
-    int  listIndent;
-    BOOL inTable;
-} ParaFmt;
-
-// ---------------------------------------------------------------------------
 // XmlLite helpers
 // ---------------------------------------------------------------------------
 
@@ -226,8 +59,6 @@ static BOOL NameIs(const WCHAR* local, UINT len, const WCHAR* want) {
     return len == wl && wcsncmp(local, want, wl) == 0;
 }
 
-// Read one attribute of the current element by local name. Returns FALSE when
-// the attribute is absent.
 static BOOL GetAttr(IXmlReader* r, const WCHAR* name, WCHAR* out, size_t outChars) {
     out[0] = L'\0';
 
@@ -393,112 +224,35 @@ static IStream* OpenMainDocumentPart(const WCHAR* path, IOpcPackage** packageOut
 }
 
 // ---------------------------------------------------------------------------
-// WordprocessingML -> RTF
+// WordprocessingML -> DocModel
 // ---------------------------------------------------------------------------
 
-static void EmitRunProps(Str* body, const RunFmt* f) {
-    StrAdd(body, "\\plain");
-    if (f->bold)        StrAdd(body, "\\b");
-    if (f->italic)      StrAdd(body, "\\i");
-    if (f->underline)   StrAdd(body, "\\ul");
-    if (f->strike)      StrAdd(body, "\\strike");
-    if (f->superscript) StrAdd(body, "\\super");
-    if (f->subscript)   StrAdd(body, "\\sub");
-    if (f->hasFont)     StrAddF(body, "\\f%d", f->fontIndex);
-    if (f->halfPoints)  StrAddF(body, "\\fs%d", f->halfPoints);
-    if (f->colorIndex)  StrAddF(body, "\\cf%d", f->colorIndex);
-    StrAdd(body, " ");
-}
-
-static void EmitParaProps(Str* body, const ParaFmt* p) {
-    StrAdd(body, "\\pard");
-    if (p->inTable) StrAdd(body, "\\intbl");
-
-    switch (p->align) {
-        case 1: StrAdd(body, "\\qc"); break;
-        case 2: StrAdd(body, "\\qr"); break;
-        case 3: StrAdd(body, "\\qj"); break;
-        default: StrAdd(body, "\\ql"); break;
-    }
-
-    if (p->isList) {
-        // A hanging indent, so the marker sits left of the text rather than on
-        // top of it. 360 twips is a quarter inch, which is what Word uses.
-        int li = p->listIndent > 0 ? p->listIndent : 720;
-        StrAddF(body, "\\fi-360\\li%d", li);
-        if (p->bullet) {
-            StrAdd(body, "{\\pntext\\f0 \\'B7\\tab}"
-                         "{\\*\\pn\\pnlvlblt\\pnf0\\pnindent0{\\pntxtb\\'B7}}");
-        } else {
-            StrAdd(body, "{\\pntext\\f0 1.\\tab}"
-                         "{\\*\\pn\\pnlvlbody\\pnf0\\pnindent0\\pnstart1\\pndec{\\pntxta.}}");
-        }
-    } else if (p->indentTwips > 0) {
-        StrAddF(body, "\\li%d", p->indentTwips);
-    }
-
-    if (p->spaceBeforeTw > 0) StrAddF(body, "\\sb%d", p->spaceBeforeTw);
-    if (p->spaceAfterTw > 0)  StrAddF(body, "\\sa%d", p->spaceAfterTw);
-}
-
-#define MAX_GRID_COLS 32
-
 typedef struct {
-    Str     body;
-    Tables  tables;
-    RunFmt  run;
-    // Formatting a paragraph style implies for every run inside it. Runs reset
-    // to this rather than to nothing, or a heading would lose its weight the
-    // moment its first run opened.
-    RunFmt  paraDefaultRun;
-    ParaFmt para;
-    BOOL    inRunProps;
-    BOOL    inParaProps;
-    BOOL    inPreserveText;
-    BOOL    paraOpen;
-    int     tableDepth;
-    int     cellsThisRow;
-    BOOL    rowOpen;
-    BOOL    sawDeleted;      // inside w:del -- text that is not in the document
-    int     skipDepth;       // >0 while inside content to ignore entirely
+    DocModel* doc;
 
-    // Column edges for the table being read, taken from w:tblGrid so that
-    // \cellx can be emitted before the row's content as RTF expects.
-    int     gridEdges[MAX_GRID_COLS];
-    int     gridCount;
-    int     gridAccum;
-    BOOL    inTblGrid;
+    // Where paragraphs are currently being added. Inside a table that is a
+    // cell; otherwise it is the document itself.
+    DocBlock* table;
+    DocRow*   row;
+    DocCell*  cell;
 
-    // A paragraph inside a cell is terminated by \cell, not \par. The mark is
-    // therefore held back and only emitted if another paragraph follows in the
-    // same cell.
-    BOOL    pendingCellPara;
-    BOOL    inCell;
-} Walk;
+    DocPara*  para;
+    CharProps run;
+    CharProps paraDefaultRun;   // what the paragraph's style implies for its runs
 
-static void StartParagraph(Walk* w) {
-    if (w->paraOpen) return;
-    EmitParaProps(&w->body, &w->para);
-    w->paraOpen = TRUE;
+    BOOL inParaProps;
+    BOOL inRunProps;
+    BOOL inTblGrid;
+    BOOL inText;
+
+    int  skipDepth;             // >0 inside content that is not document text
+} Build;
+
+static DocPara* NewParagraph(Build* b) {
+    return b->cell ? Doc_AddCellPara(b->cell) : Doc_AddPara(b->doc);
 }
 
-static void EndParagraph(Walk* w) {
-    if (!w->paraOpen) {
-        // An empty w:p is a blank line and still needs its mark.
-        EmitParaProps(&w->body, &w->para);
-    }
-
-    if (w->inCell) {
-        // Held back: \cell ends the cell's final paragraph. If another
-        // paragraph follows in this cell, the mark is emitted then.
-        w->pendingCellPara = TRUE;
-    } else {
-        StrAdd(&w->body, "\\par\n");
-    }
-    w->paraOpen = FALSE;
-}
-
-static BOOL ConvertDocument(IStream* stream, Str* out) {
+static BOOL BuildModel(IStream* stream, DocModel* doc) {
     IXmlReader* reader = NULL;
     if (FAILED(CreateXmlReader(&IID_IXmlReader, (void**)&reader, NULL))) {
         SetError(L"The XML reader could not be created.");
@@ -513,11 +267,8 @@ static BOOL ConvertDocument(IStream* stream, Str* out) {
     // XmlLite stops at 256 levels by default; deeply nested tables exceed it.
     IXmlReader_SetProperty(reader, XmlReaderProperty_MaxElementDepth, 0);
 
-    Walk w = {0};
-    w.para.align = 0;
-
-    // Font 0 is the document default; everything else is added as encountered.
-    TableFont(&w.tables, L"Calibri");
+    Build b = {0};
+    b.doc = doc;
 
     XmlNodeType nt;
     while (S_OK == IXmlReader_Read(reader, &nt)) {
@@ -533,248 +284,204 @@ static BOOL ConvertDocument(IStream* stream, Str* out) {
 
             // Content inside a deletion is revision history, not the document.
             if (NameIs(local, len, L"del")) {
-                if (!empty) w.skipDepth++;
+                if (!empty) b.skipDepth++;
                 continue;
             }
-            if (w.skipDepth > 0) continue;
+            if (b.skipDepth > 0) continue;
 
             if (NameIs(local, len, L"p")) {
-                memset(&w.para, 0, sizeof(w.para));
-                memset(&w.run, 0, sizeof(w.run));
-                memset(&w.paraDefaultRun, 0, sizeof(w.paraDefaultRun));
-                w.para.inTable = (w.tableDepth > 0);
-                w.paraOpen = FALSE;
-
-                // A held-back cell paragraph mark means this is the second or
-                // later paragraph in the cell, so the previous one ends here.
-                if (w.pendingCellPara) {
-                    StrAdd(&w.body, "\\par ");
-                    w.pendingCellPara = FALSE;
-                }
+                b.para = NewParagraph(&b);
+                memset(&b.run, 0, sizeof(b.run));
+                memset(&b.paraDefaultRun, 0, sizeof(b.paraDefaultRun));
             } else if (NameIs(local, len, L"pPr")) {
-                w.inParaProps = TRUE;
+                b.inParaProps = TRUE;
             } else if (NameIs(local, len, L"rPr")) {
-                w.inRunProps = TRUE;
+                b.inRunProps = TRUE;
             } else if (NameIs(local, len, L"r")) {
-                w.run = w.paraDefaultRun;
+                b.run = b.paraDefaultRun;
             }
 
             // --- paragraph properties ---
-            else if (w.inParaProps && NameIs(local, len, L"jc")) {
+            else if (b.inParaProps && b.para && NameIs(local, len, L"jc")) {
                 WCHAR val[32];
                 if (GetAttr(reader, L"val", val, 32)) {
-                    if (_wcsicmp(val, L"center") == 0)       w.para.align = 1;
-                    else if (_wcsicmp(val, L"right") == 0)   w.para.align = 2;
+                    if (_wcsicmp(val, L"center") == 0)       b.para->props.align = ALIGN_CENTER;
+                    else if (_wcsicmp(val, L"right") == 0)   b.para->props.align = ALIGN_RIGHT;
                     else if (_wcsicmp(val, L"both") == 0 ||
-                             _wcsicmp(val, L"justify") == 0) w.para.align = 3;
-                    else                                     w.para.align = 0;
+                             _wcsicmp(val, L"justify") == 0) b.para->props.align = ALIGN_JUSTIFY;
+                    else                                     b.para->props.align = ALIGN_LEFT;
                 }
-            } else if (w.inParaProps && NameIs(local, len, L"ind")) {
+            } else if (b.inParaProps && b.para && NameIs(local, len, L"ind")) {
                 int left = AttrInt(reader, L"left", -1);
                 if (left < 0) left = AttrInt(reader, L"start", -1);
-                if (left > 0) w.para.indentTwips = left;
-            } else if (w.inParaProps && NameIs(local, len, L"spacing")) {
+                if (left > 0) b.para->props.indentLeft = left;
+                int first = AttrInt(reader, L"firstLine", 0);
+                int hang  = AttrInt(reader, L"hanging", 0);
+                if (hang > 0)       b.para->props.indentFirst = -hang;
+                else if (first > 0) b.para->props.indentFirst = first;
+            } else if (b.inParaProps && b.para && NameIs(local, len, L"spacing")) {
                 int before = AttrInt(reader, L"before", 0);
                 int after  = AttrInt(reader, L"after", 0);
-                if (before > 0) w.para.spaceBeforeTw = before;
-                if (after > 0)  w.para.spaceAfterTw = after;
-            } else if (w.inParaProps && NameIs(local, len, L"numPr")) {
-                w.para.isList = TRUE;
+                if (before > 0) b.para->props.spaceBefore = before;
+                if (after > 0)  b.para->props.spaceAfter = after;
+            } else if (b.inParaProps && b.para && NameIs(local, len, L"numPr")) {
                 // Which marker a list uses lives in numbering.xml behind two
-                // levels of indirection. Bulleted is overwhelmingly the common
-                // case, so that is the default until numbering.xml is read.
-                w.para.bullet = TRUE;
-            } else if (w.inParaProps && NameIs(local, len, L"ilvl")) {
-                int lvl = AttrInt(reader, L"val", 0);
-                w.para.listIndent = 720 + lvl * 360;
-            } else if (w.inParaProps && NameIs(local, len, L"pStyle")) {
+                // levels of indirection, which v0.9 follows. Bulleted is the
+                // common case and is what is assumed until then.
+                b.para->props.list = LIST_BULLET;
+            } else if (b.inParaProps && b.para && NameIs(local, len, L"ilvl")) {
+                b.para->props.listLevel = AttrInt(reader, L"val", 0);
+            } else if (b.inParaProps && b.para && NameIs(local, len, L"pStyle")) {
                 WCHAR val[64];
                 if (GetAttr(reader, L"val", val, 64)) {
-                    // Heading styles carry their weight in styles.xml. Rather
-                    // than resolving the style graph, give headings the shape
-                    // readers expect: bold and larger, scaled by level.
+                    // Heading styles carry their weight in styles.xml. Until
+                    // that is resolved (v0.9), headings are given the shape
+                    // readers expect, scaled by level.
                     if (_wcsnicmp(val, L"Heading", 7) == 0) {
                         int level = _wtoi(val + 7);
                         if (level < 1) level = 1;
                         if (level > 6) level = 6;
-                        w.paraDefaultRun.bold = TRUE;
-                        w.paraDefaultRun.halfPoints = 36 - (level - 1) * 4;
-                        if (w.paraDefaultRun.halfPoints < 22) w.paraDefaultRun.halfPoints = 22;
-                        w.run = w.paraDefaultRun;
-                        w.para.spaceBeforeTw = 240;
-                        w.para.spaceAfterTw = 120;
+                        b.para->props.headingLevel = level;
+                        b.paraDefaultRun.bold = TRUE;
+                        b.paraDefaultRun.halfPoints = 36 - (level - 1) * 4;
+                        if (b.paraDefaultRun.halfPoints < 22) b.paraDefaultRun.halfPoints = 22;
+                        b.run = b.paraDefaultRun;
+                        if (!b.para->props.spaceBefore) b.para->props.spaceBefore = 240;
+                        if (!b.para->props.spaceAfter)  b.para->props.spaceAfter = 120;
                     }
                 }
             }
 
             // --- run properties ---
-            else if (w.inRunProps && NameIs(local, len, L"b")) {
-                w.run.bold = AttrIsOn(reader);
-            } else if (w.inRunProps && NameIs(local, len, L"i")) {
-                w.run.italic = AttrIsOn(reader);
-            } else if (w.inRunProps && NameIs(local, len, L"u")) {
+            else if (b.inRunProps && NameIs(local, len, L"b")) {
+                b.run.bold = AttrIsOn(reader);
+            } else if (b.inRunProps && NameIs(local, len, L"i")) {
+                b.run.italic = AttrIsOn(reader);
+            } else if (b.inRunProps && NameIs(local, len, L"u")) {
                 WCHAR val[32];
-                w.run.underline = !GetAttr(reader, L"val", val, 32) ||
+                b.run.underline = !GetAttr(reader, L"val", val, 32) ||
                                   _wcsicmp(val, L"none") != 0;
-            } else if (w.inRunProps && NameIs(local, len, L"strike")) {
-                w.run.strike = AttrIsOn(reader);
-            } else if (w.inRunProps && NameIs(local, len, L"sz")) {
+            } else if (b.inRunProps && NameIs(local, len, L"strike")) {
+                b.run.strike = AttrIsOn(reader);
+            } else if (b.inRunProps && NameIs(local, len, L"sz")) {
                 int sz = AttrInt(reader, L"val", 0);
-                if (sz > 0) w.run.halfPoints = sz;
-            } else if (w.inRunProps && NameIs(local, len, L"color")) {
+                if (sz > 0) b.run.halfPoints = sz;
+            } else if (b.inRunProps && NameIs(local, len, L"color")) {
                 WCHAR val[32];
                 if (GetAttr(reader, L"val", val, 32)) {
                     BOOL ok = FALSE;
                     COLORREF c = ParseHexColor(val, &ok);
-                    if (ok) w.run.colorIndex = TableColor(&w.tables, c);
+                    if (ok) {
+                        b.run.hasColor = TRUE;
+                        b.run.color = c;
+                    }
                 }
-            } else if (w.inRunProps && NameIs(local, len, L"vertAlign")) {
+            } else if (b.inRunProps && NameIs(local, len, L"vertAlign")) {
                 WCHAR val[32];
                 if (GetAttr(reader, L"val", val, 32)) {
-                    w.run.superscript = (_wcsicmp(val, L"superscript") == 0);
-                    w.run.subscript   = (_wcsicmp(val, L"subscript") == 0);
+                    b.run.superscript = (_wcsicmp(val, L"superscript") == 0);
+                    b.run.subscript   = (_wcsicmp(val, L"subscript") == 0);
                 }
-            } else if (w.inRunProps && NameIs(local, len, L"rFonts")) {
+            } else if (b.inRunProps && NameIs(local, len, L"rFonts")) {
                 WCHAR val[LF_FACESIZE];
                 if (GetAttr(reader, L"ascii", val, LF_FACESIZE) && val[0]) {
-                    w.run.fontIndex = TableFont(&w.tables, val);
-                    w.run.hasFont = TRUE;
+                    wcsncpy_s(b.run.font, LF_FACESIZE, val, _TRUNCATE);
                 }
             }
 
             // --- content ---
             else if (NameIs(local, len, L"t")) {
-                StartParagraph(&w);
-                EmitRunProps(&w.body, &w.run);
-                w.inPreserveText = TRUE;
+                b.inText = TRUE;
             } else if (NameIs(local, len, L"br")) {
-                StartParagraph(&w);
-                StrAdd(&w.body, "\\line ");
+                if (b.para) {
+                    DocRun* r = Doc_AddRun(b.para, L"", 0, &b.run);
+                    if (r) r->lineBreak = TRUE;
+                }
             } else if (NameIs(local, len, L"tab")) {
-                StartParagraph(&w);
-                StrAdd(&w.body, "\\tab ");
-            } else if (NameIs(local, len, L"tbl")) {
-                w.tableDepth++;
-                w.gridCount = 0;
-                w.gridAccum = 0;
+                if (b.para) {
+                    DocRun* r = Doc_AddRun(b.para, L"", 0, &b.run);
+                    if (r) r->tab = TRUE;
+                }
+            }
+
+            // --- tables ---
+            else if (NameIs(local, len, L"tbl")) {
+                // Nested tables are not modelled yet; an inner table's rows are
+                // read as further rows of the outer one rather than lost.
+                if (!b.table) {
+                    b.table = Doc_AddTable(b.doc);
+                    b.row = NULL;
+                    b.cell = NULL;
+                    b.para = NULL;
+                }
             } else if (NameIs(local, len, L"tblGrid")) {
-                w.inTblGrid = TRUE;
-                w.gridCount = 0;
-                w.gridAccum = 0;
-            } else if (w.inTblGrid && NameIs(local, len, L"gridCol")) {
+                b.inTblGrid = TRUE;
+                if (b.table) b.table->table.gridCount = 0;
+            } else if (b.inTblGrid && b.table && NameIs(local, len, L"gridCol")) {
                 int cw = AttrInt(reader, L"w", 0);
                 if (cw <= 0) cw = 2000;
-                if (w.gridCount < MAX_GRID_COLS) {
-                    w.gridAccum += cw;
-                    w.gridEdges[w.gridCount++] = w.gridAccum;
+                int n = b.table->table.gridCount;
+                if (n < 32) {
+                    int prev = n ? b.table->table.gridEdges[n - 1] : 0;
+                    b.table->table.gridEdges[n] = prev + cw;
+                    b.table->table.gridCount = n + 1;
                 }
             } else if (NameIs(local, len, L"tr")) {
-                w.cellsThisRow = 0;
-                w.rowOpen = TRUE;
-
-                // RTF wants the row definition before the row's content. The
-                // grid read above supplies it; without one, fall back to equal
-                // columns once the cell count is known at \row.
-                StrAdd(&w.body, "\\trowd\\trgaph108");
-                for (int i = 0; i < w.gridCount; i++) {
-                    StrAddF(&w.body, "\\cellx%d", w.gridEdges[i]);
+                if (b.table) {
+                    b.row = Doc_AddRow(b.table);
+                    b.cell = NULL;
                 }
-                StrAdd(&w.body, "\n");
             } else if (NameIs(local, len, L"tc")) {
-                w.cellsThisRow++;
-                w.inCell = TRUE;
-                w.pendingCellPara = FALSE;
+                if (b.row) {
+                    b.cell = Doc_AddCell(b.row);
+                    b.para = NULL;
+                }
             }
 
         } else if (nt == XmlNodeType_Text || nt == XmlNodeType_Whitespace) {
-            if (w.skipDepth > 0 || !w.inPreserveText) continue;
+            if (b.skipDepth > 0 || !b.inText || !b.para) continue;
 
             const WCHAR* val = NULL;
             UINT vlen = 0;
-            if (SUCCEEDED(IXmlReader_GetValue(reader, &val, &vlen))) {
-                StrAddRtfText(&w.body, val, (int)vlen);
+            if (SUCCEEDED(IXmlReader_GetValue(reader, &val, &vlen)) && vlen) {
+                Doc_AddRun(b.para, val, (int)vlen, &b.run);
             }
 
         } else if (nt == XmlNodeType_EndElement) {
             if (NameIs(local, len, L"del")) {
-                if (w.skipDepth > 0) w.skipDepth--;
+                if (b.skipDepth > 0) b.skipDepth--;
                 continue;
             }
-            if (w.skipDepth > 0) continue;
+            if (b.skipDepth > 0) continue;
 
-            if (NameIs(local, len, L"t"))          w.inPreserveText = FALSE;
-            else if (NameIs(local, len, L"pPr"))   w.inParaProps = FALSE;
-            else if (NameIs(local, len, L"rPr"))   w.inRunProps = FALSE;
-            else if (NameIs(local, len, L"tblGrid")) w.inTblGrid = FALSE;
-            else if (NameIs(local, len, L"p"))     EndParagraph(&w);
-            else if (NameIs(local, len, L"tc")) {
-                // \cell terminates the cell's last paragraph; a \par before it
-                // would leave an empty line in every cell.
-                w.pendingCellPara = FALSE;
-                w.inCell = FALSE;
-                StrAdd(&w.body, "\\cell ");
+            if (NameIs(local, len, L"t"))            b.inText = FALSE;
+            else if (NameIs(local, len, L"pPr"))     b.inParaProps = FALSE;
+            else if (NameIs(local, len, L"rPr"))     b.inRunProps = FALSE;
+            else if (NameIs(local, len, L"tblGrid")) b.inTblGrid = FALSE;
+            else if (NameIs(local, len, L"p")) {
+                // An empty paragraph is a blank line and keeps its node; it
+                // simply has no runs.
+                b.para = NULL;
             }
-            else if (NameIs(local, len, L"tr")) {
-                // Only needed when the table had no w:tblGrid to read.
-                if (w.gridCount == 0 && w.cellsThisRow > 0) {
-                    StrAdd(&w.body, "\\trowd\\trgaph108");
-                    for (int i = 1; i <= w.cellsThisRow; i++) {
-                        StrAddF(&w.body, "\\cellx%d", (9000 * i) / w.cellsThisRow);
-                    }
-                }
-                StrAdd(&w.body, "\\row\n");
-                w.rowOpen = FALSE;
-            }
+            else if (NameIs(local, len, L"tc")) b.cell = NULL;
+            else if (NameIs(local, len, L"tr")) b.row = NULL;
             else if (NameIs(local, len, L"tbl")) {
-                if (w.tableDepth > 0) w.tableDepth--;
-                w.gridCount = 0;
-                StrAdd(&w.body, "\\pard\n");
+                b.table = NULL;
+                b.row = NULL;
+                b.cell = NULL;
+                b.para = NULL;
             }
         }
     }
 
     IXmlReader_Release(reader);
-
-    if (w.body.failed) {
-        StrFree(&w.body);
-        SetError(L"Ran out of memory building the document.");
-        return FALSE;
-    }
-
-    // Assemble: header, font table, colour table, then the body.
-    StrAdd(out, "{\\rtf1\\ansi\\ansicpg1252\\deff0{\\fonttbl");
-    for (int i = 0; i < w.tables.fontCount; i++) {
-        StrAddF(out, "{\\f%d\\fnil ", i);
-        char name[LF_FACESIZE * 2];
-        WideCharToMultiByte(CP_UTF8, 0, w.tables.fonts[i], -1,
-                            name, sizeof(name), NULL, NULL);
-        StrAdd(out, name);
-        StrAdd(out, ";}");
-    }
-    StrAdd(out, "}\n");
-
-    StrAdd(out, "{\\colortbl;");
-    for (int i = 0; i < w.tables.colorCount; i++) {
-        StrAddF(out, "\\red%d\\green%d\\blue%d;",
-                GetRValue(w.tables.colors[i]),
-                GetGValue(w.tables.colors[i]),
-                GetBValue(w.tables.colors[i]));
-    }
-    StrAdd(out, "}\n\\viewkind4\\uc1\n");
-
-    if (w.body.buf) StrAdd(out, w.body.buf);
-    StrAdd(out, "}\n");
-
-    StrFree(&w.body);
-    return !out->failed;
+    return TRUE;
 }
 
-char* Docx_ReadToRtf(const WCHAR* path) {
+DocModel* Docx_ReadToModel(const WCHAR* path) {
     if (!path) return NULL;
     SetError(NULL);
 
-    // The packaging API is COM. Initialising per call keeps this independent of
-    // whatever the calling thread has already done.
     HRESULT init = CoInitializeEx(NULL, COINIT_APARTMENTTHREADED);
     BOOL needUninit = SUCCEEDED(init);
 
@@ -785,271 +492,193 @@ char* Docx_ReadToRtf(const WCHAR* path) {
         return NULL;
     }
 
-    Str rtf = {0};
-    BOOL ok = ConvertDocument(docStream, &rtf);
+    DocModel* doc = Doc_New();
+    BOOL ok = doc && BuildModel(docStream, doc);
 
     IStream_Release(docStream);
     IOpcPackage_Release(package);
     if (needUninit) CoUninitialize();
 
     if (!ok) {
-        StrFree(&rtf);
+        Doc_Free(doc);
         return NULL;
     }
-    return rtf.buf;
+    return doc;
+}
+
+char* Docx_ReadToRtf(const WCHAR* path) {
+    DocModel* doc = Docx_ReadToModel(path);
+    if (!doc) return NULL;
+
+    char* rtf = DocRtf_Emit(doc);
+    Doc_Free(doc);
+
+    if (!rtf) SetError(L"The document could not be converted for display.");
+    return rtf;
 }
 
 // ---------------------------------------------------------------------------
-// Rich text view -> WordprocessingML
-//
-// The document's structure is read back out of the control: paragraphs are
-// separated by a single carriage return in its raw text, and within a
-// paragraph a run is a maximal span whose character formatting does not
-// change. Nothing here parses RTF -- the control is the model.
+// DocModel -> WordprocessingML
 // ---------------------------------------------------------------------------
 
-// Raw text, meaning paragraph marks stay as a single \r so that offsets match
-// the ones the control itself uses. GT_DEFAULT would expand them to \r\n and
-// every offset after the first paragraph would be wrong.
-static WCHAR* GetRawText(HWND h, int* lenOut) {
-    GETTEXTLENGTHEX gtl = { GTL_NUMCHARS | GTL_PRECISE, 1200 };
-    int len = (int)SendMessageW(h, EM_GETTEXTLENGTHEX, (WPARAM)&gtl, 0);
-    if (len < 0) len = 0;
-
-    WCHAR* buf = (WCHAR*)malloc(((size_t)len + 2) * sizeof(WCHAR));
-    if (!buf) return NULL;
-
-    GETTEXTEX gt = {
-        .cb = (DWORD)(((size_t)len + 1) * sizeof(WCHAR)),
-        .flags = GT_RAWTEXT,
-        .codepage = 1200,
-        .lpDefaultChar = NULL,
-        .lpUsedDefChar = NULL
-    };
-    int got = (int)SendMessageW(h, EM_GETTEXTEX, (WPARAM)&gt, (LPARAM)buf);
-    if (got < 0) got = 0;
-    buf[got] = L'\0';
-
-    if (lenOut) *lenOut = got;
-    return buf;
-}
-
-// RichEdit marks table structure with characters in the U+FFF9..U+FFFC range
-// and separates cells with BEL. They are structure, not content, and writing
-// them into a .docx puts unreadable characters in the document -- which is
-// exactly what happened before this existed.
-//
-// ponytail: table structure is not rebuilt on write in this version. A table
-// flattens to its text, cells separated by tabs and rows by paragraphs, which
-// is what Word's own "convert table to text" does. Losing the grid is a
-// documented limitation; losing the words would be a bug. Emitting real
-// <w:tbl> needs the table model the DirectWrite engine brings in v0.7.
-typedef enum {
-    CHAR_NORMAL,
-    CHAR_DROP,        // structure with no textual meaning
-    CHAR_CELL_BREAK,  // becomes a tab
-    CHAR_ROW_BREAK    // becomes a paragraph break
-} CharKind;
-
-static CharKind ClassifyChar(WCHAR c) {
-    switch (c) {
-        case 0x0007: return CHAR_CELL_BREAK;   // BEL, cell separator
-        case 0xFFF9: return CHAR_DROP;         // start of a table row
-        case 0xFFFA: return CHAR_DROP;
-        case 0xFFFB: return CHAR_ROW_BREAK;    // end of a table row
-        case 0xFFFC: return CHAR_DROP;         // embedded object placeholder
-        default: break;
-    }
-    // Any other C0 control that is not a tab or a paragraph mark is not text.
-    if (c < 0x20 && c != L'\t' && c != L'\r' && c != L'\n') return CHAR_DROP;
-    return CHAR_NORMAL;
-}
-
-static void GetFormatAt(HWND h, int pos, CHARFORMAT2W* cf) {
-    CHARRANGE cr = { pos, pos + 1 };
-    SendMessageW(h, EM_EXSETSEL, 0, (LPARAM)&cr);
-
-    memset(cf, 0, sizeof(*cf));
-    cf->cbSize = sizeof(*cf);
-    SendMessageW(h, EM_GETCHARFORMAT, SCF_SELECTION, (LPARAM)cf);
-}
-
-static BOOL SameFormat(const CHARFORMAT2W* a, const CHARFORMAT2W* b) {
-    DWORD mask = CFM_BOLD | CFM_ITALIC | CFM_UNDERLINE | CFM_STRIKEOUT |
-                 CFM_SUBSCRIPT | CFM_SUPERSCRIPT;
-    if ((a->dwEffects & mask) != (b->dwEffects & mask)) return FALSE;
-    if (a->yHeight != b->yHeight) return FALSE;
-    if (a->crTextColor != b->crTextColor) return FALSE;
-    if ((a->dwEffects & CFE_AUTOCOLOR) != (b->dwEffects & CFE_AUTOCOLOR)) return FALSE;
-    return wcscmp(a->szFaceName, b->szFaceName) == 0;
-}
-
-static void EmitRunPropsXml(Str* x, const CHARFORMAT2W* cf) {
-    BOOL any = (cf->dwEffects & (CFE_BOLD | CFE_ITALIC | CFE_UNDERLINE |
-                                 CFE_STRIKEOUT | CFE_SUBSCRIPT | CFE_SUPERSCRIPT)) ||
-               cf->yHeight || cf->szFaceName[0] ||
-               !(cf->dwEffects & CFE_AUTOCOLOR);
+static void EmitRunProps(StrBuf* x, const CharProps* p) {
+    BOOL any = p->bold || p->italic || p->underline || p->strike ||
+               p->superscript || p->subscript || p->halfPoints ||
+               p->hasColor || p->font[0];
     if (!any) return;
 
-    StrAdd(x, "<w:rPr>");
+    SB_Add(x, "<w:rPr>");
 
-    if (cf->szFaceName[0]) {
-        StrAdd(x, "<w:rFonts w:ascii=\"");
-        StrAddXmlText(x, cf->szFaceName, -1);
-        StrAdd(x, "\" w:hAnsi=\"");
-        StrAddXmlText(x, cf->szFaceName, -1);
-        StrAdd(x, "\"/>");
+    if (p->font[0]) {
+        SB_Add(x, "<w:rFonts w:ascii=\"");
+        SB_AddXmlText(x, p->font, -1);
+        SB_Add(x, "\" w:hAnsi=\"");
+        SB_AddXmlText(x, p->font, -1);
+        SB_Add(x, "\"/>");
     }
-    if (cf->dwEffects & CFE_BOLD)      StrAdd(x, "<w:b/>");
-    if (cf->dwEffects & CFE_ITALIC)    StrAdd(x, "<w:i/>");
-    if (cf->dwEffects & CFE_STRIKEOUT) StrAdd(x, "<w:strike/>");
-    if (cf->dwEffects & CFE_UNDERLINE) StrAdd(x, "<w:u w:val=\"single\"/>");
+    if (p->bold)      SB_Add(x, "<w:b/>");
+    if (p->italic)    SB_Add(x, "<w:i/>");
+    if (p->strike)    SB_Add(x, "<w:strike/>");
+    if (p->underline) SB_Add(x, "<w:u w:val=\"single\"/>");
 
-    if (!(cf->dwEffects & CFE_AUTOCOLOR)) {
-        StrAddF(x, "<w:color w:val=\"%02X%02X%02X\"/>",
-                GetRValue(cf->crTextColor),
-                GetGValue(cf->crTextColor),
-                GetBValue(cf->crTextColor));
+    if (p->hasColor) {
+        SB_AddF(x, "<w:color w:val=\"%02X%02X%02X\"/>",
+                GetRValue(p->color), GetGValue(p->color), GetBValue(p->color));
     }
-    if (cf->yHeight > 0) {
-        // yHeight is twips, w:sz is half-points: 20 twips per point.
-        int halfPoints = cf->yHeight / 10;
-        if (halfPoints < 2) halfPoints = 2;
-        StrAddF(x, "<w:sz w:val=\"%d\"/><w:szCs w:val=\"%d\"/>", halfPoints, halfPoints);
+    if (p->halfPoints > 0) {
+        SB_AddF(x, "<w:sz w:val=\"%d\"/><w:szCs w:val=\"%d\"/>",
+                p->halfPoints, p->halfPoints);
     }
-    if (cf->dwEffects & CFE_SUPERSCRIPT) StrAdd(x, "<w:vertAlign w:val=\"superscript\"/>");
-    if (cf->dwEffects & CFE_SUBSCRIPT)   StrAdd(x, "<w:vertAlign w:val=\"subscript\"/>");
+    if (p->superscript) SB_Add(x, "<w:vertAlign w:val=\"superscript\"/>");
+    if (p->subscript)   SB_Add(x, "<w:vertAlign w:val=\"subscript\"/>");
 
-    StrAdd(x, "</w:rPr>");
+    SB_Add(x, "</w:rPr>");
 }
 
-static void EmitParaPropsXml(Str* x, const PARAFORMAT2* pf) {
-    Str inner = {0};
+static void EmitParaProps(StrBuf* x, const ParaProps* p) {
+    StrBuf inner = {0};
 
-    if (pf->dwMask & PFM_ALIGNMENT) {
-        switch (pf->wAlignment) {
-            case PFA_CENTER:  StrAdd(&inner, "<w:jc w:val=\"center\"/>"); break;
-            case PFA_RIGHT:   StrAdd(&inner, "<w:jc w:val=\"right\"/>");  break;
-            case PFA_JUSTIFY: StrAdd(&inner, "<w:jc w:val=\"both\"/>");   break;
-            default: break;
-        }
+    if (p->headingLevel > 0) {
+        SB_AddF(&inner, "<w:pStyle w:val=\"Heading%d\"/>", p->headingLevel);
+    }
+    if (p->list != LIST_NONE) {
+        SB_AddF(&inner, "<w:numPr><w:ilvl w:val=\"%d\"/><w:numId w:val=\"1\"/></w:numPr>",
+                p->listLevel);
     }
 
-    // A numbered or bulleted paragraph needs a numbering definition to point
-    // at. Rather than emit a numbering part, the marker is kept as an indent so
-    // the text still lands where the author put it; Word shows it as an
-    // indented paragraph rather than losing it.
-    LONG indent = (pf->dwMask & PFM_STARTINDENT) ? pf->dxStartIndent : 0;
-    if ((pf->dwMask & PFM_NUMBERING) && pf->wNumbering) {
-        if (indent < 720) indent = 720;
+    switch (p->align) {
+        case ALIGN_CENTER:  SB_Add(&inner, "<w:jc w:val=\"center\"/>"); break;
+        case ALIGN_RIGHT:   SB_Add(&inner, "<w:jc w:val=\"right\"/>");  break;
+        case ALIGN_JUSTIFY: SB_Add(&inner, "<w:jc w:val=\"both\"/>");   break;
+        default: break;
     }
-    if (indent > 0) StrAddF(&inner, "<w:ind w:left=\"%ld\"/>", indent);
+
+    if (p->indentLeft || p->indentFirst) {
+        SB_Add(&inner, "<w:ind");
+        if (p->indentLeft) SB_AddF(&inner, " w:left=\"%d\"", p->indentLeft);
+        if (p->indentFirst < 0) SB_AddF(&inner, " w:hanging=\"%d\"", -p->indentFirst);
+        else if (p->indentFirst > 0) SB_AddF(&inner, " w:firstLine=\"%d\"", p->indentFirst);
+        SB_Add(&inner, "/>");
+    }
+
+    if (p->spaceBefore || p->spaceAfter) {
+        SB_Add(&inner, "<w:spacing");
+        if (p->spaceBefore) SB_AddF(&inner, " w:before=\"%d\"", p->spaceBefore);
+        if (p->spaceAfter)  SB_AddF(&inner, " w:after=\"%d\"", p->spaceAfter);
+        SB_Add(&inner, "/>");
+    }
 
     if (inner.len) {
-        StrAdd(x, "<w:pPr>");
-        StrAdd(x, inner.buf);
-        StrAdd(x, "</w:pPr>");
+        SB_Add(x, "<w:pPr>");
+        SB_Add(x, inner.buf);
+        SB_Add(x, "</w:pPr>");
     }
-    StrFree(&inner);
+    SB_Free(&inner);
 }
 
-static BOOL BuildDocumentXml(HWND h, Str* x) {
-    int textLen = 0;
-    WCHAR* text = GetRawText(h, &textLen);
-    if (!text) {
-        SetError(L"The document text could not be read.");
-        return FALSE;
+static void EmitPara(StrBuf* x, const DocPara* para) {
+    SB_Add(x, "<w:p>");
+    EmitParaProps(x, &para->props);
+
+    for (const DocRun* r = para->runs; r; r = r->next) {
+        SB_Add(x, "<w:r>");
+        EmitRunProps(x, &r->props);
+
+        if (r->tab) {
+            SB_Add(x, "<w:tab/>");
+        } else if (r->lineBreak) {
+            SB_Add(x, "<w:br/>");
+        } else {
+            SB_Add(x, "<w:t xml:space=\"preserve\">");
+            SB_AddXmlText(x, r->text, -1);
+            SB_Add(x, "</w:t>");
+        }
+        SB_Add(x, "</w:r>");
     }
 
-    // Walking the document moves the selection about; put it back afterwards
-    // and keep the control from repainting while it happens.
-    CHARRANGE saved = {0};
-    SendMessageW(h, EM_EXGETSEL, 0, (LPARAM)&saved);
-    SendMessageW(h, WM_SETREDRAW, FALSE, 0);
+    SB_Add(x, "</w:p>");
+}
 
-    StrAdd(x, "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>\r\n"
-              "<w:document xmlns:w=\"http://schemas.openxmlformats.org/"
-              "wordprocessingml/2006/main\"><w:body>");
+static void EmitTable(StrBuf* x, const DocBlock* block) {
+    SB_Add(x, "<w:tbl><w:tblPr><w:tblW w:w=\"0\" w:type=\"auto\"/></w:tblPr>");
 
-    int pos = 0;
-    while (pos <= textLen) {
-        int paraEnd = pos;
-        while (paraEnd < textLen && text[paraEnd] != L'\r' && text[paraEnd] != L'\n') {
-            paraEnd++;
+    if (block->table.gridCount > 0) {
+        SB_Add(x, "<w:tblGrid>");
+        int prev = 0;
+        for (int i = 0; i < block->table.gridCount; i++) {
+            SB_AddF(x, "<w:gridCol w:w=\"%d\"/>", block->table.gridEdges[i] - prev);
+            prev = block->table.gridEdges[i];
         }
-
-        StrAdd(x, "<w:p>");
-
-        CHARRANGE pr = { pos, pos };
-        SendMessageW(h, EM_EXSETSEL, 0, (LPARAM)&pr);
-
-        PARAFORMAT2 pf = {0};
-        pf.cbSize = sizeof(pf);
-        SendMessageW(h, EM_GETPARAFORMAT, 0, (LPARAM)&pf);
-        EmitParaPropsXml(x, &pf);
-
-        // Split the paragraph into runs of unchanging character formatting.
-        int runStart = pos;
-        while (runStart < paraEnd) {
-            CHARFORMAT2W base;
-            GetFormatAt(h, runStart, &base);
-
-            int runEnd = runStart + 1;
-            while (runEnd < paraEnd) {
-                CHARFORMAT2W next;
-                GetFormatAt(h, runEnd, &next);
-                if (!SameFormat(&base, &next)) break;
-                runEnd++;
-            }
-
-            StrAdd(x, "<w:r>");
-            EmitRunPropsXml(x, &base);
-            StrAdd(x, "<w:t xml:space=\"preserve\">");
-
-            // Tabs are their own element in WordprocessingML, so a run has to
-            // be broken around them rather than carrying them as text. The
-            // same goes for the structural characters classified above.
-            int seg = runStart;
-            for (int i = runStart; i < runEnd; i++) {
-                CharKind kind = ClassifyChar(text[i]);
-                if (text[i] != L'\t' && kind == CHAR_NORMAL) continue;
-
-                if (i > seg) StrAddXmlText(x, text + seg, i - seg);
-                seg = i + 1;
-
-                if (text[i] == L'\t' || kind == CHAR_CELL_BREAK) {
-                    StrAdd(x, "</w:t><w:tab/><w:t xml:space=\"preserve\">");
-                } else if (kind == CHAR_ROW_BREAK) {
-                    StrAdd(x, "</w:t><w:br/><w:t xml:space=\"preserve\">");
-                }
-                // CHAR_DROP contributes nothing.
-            }
-            if (runEnd > seg) StrAddXmlText(x, text + seg, runEnd - seg);
-
-            StrAdd(x, "</w:t></w:r>");
-            runStart = runEnd;
-        }
-
-        StrAdd(x, "</w:p>");
-
-        if (paraEnd >= textLen) break;
-        // Step past the paragraph mark, allowing for a CRLF pair.
-        pos = paraEnd + 1;
-        if (pos < textLen && text[paraEnd] == L'\r' && text[pos] == L'\n') pos++;
+        SB_Add(x, "</w:tblGrid>");
     }
 
-    // A section is required for Word to consider the document well formed.
-    // Letter paper, one inch margins.
-    StrAdd(x, "<w:sectPr><w:pgSz w:w=\"12240\" w:h=\"15840\"/>"
-              "<w:pgMar w:top=\"1440\" w:right=\"1440\" w:bottom=\"1440\" "
-              "w:left=\"1440\" w:header=\"720\" w:footer=\"720\" w:gutter=\"0\"/>"
-              "</w:sectPr></w:body></w:document>");
+    for (const DocRow* row = block->table.rows; row; row = row->next) {
+        SB_Add(x, "<w:tr>");
+        for (const DocCell* c = row->cells; c; c = c->next) {
+            SB_Add(x, "<w:tc>");
+            // A cell must contain at least one paragraph to be valid.
+            if (!c->paras) SB_Add(x, "<w:p/>");
+            for (const DocPara* p = c->paras; p; p = p->next) EmitPara(x, p);
+            SB_Add(x, "</w:tc>");
+        }
+        SB_Add(x, "</w:tr>");
+    }
 
-    SendMessageW(h, EM_EXSETSEL, 0, (LPARAM)&saved);
-    SendMessageW(h, WM_SETREDRAW, TRUE, 0);
-    InvalidateRect(h, NULL, TRUE);
+    SB_Add(x, "</w:tbl>");
+}
 
-    free(text);
+static BOOL BuildDocumentXml(const DocModel* doc, StrBuf* x) {
+    SB_Add(x, "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>\r\n"
+              "<w:document xmlns:w=\"" WML_NS "\"><w:body>");
+
+    BOOL any = FALSE;
+    for (const DocBlock* b = doc->blocks; b; b = b->next) {
+        if (b->kind == BLOCK_PARA) {
+            for (const DocPara* p = b->para; p; p = p->next) {
+                EmitPara(x, p);
+                any = TRUE;
+            }
+        } else {
+            EmitTable(x, b);
+            any = TRUE;
+
+            // Word requires a paragraph after a table; without one the table
+            // and whatever follows it run together.
+            if (!b->next || b->next->kind == BLOCK_TABLE) SB_Add(x, "<w:p/>");
+        }
+    }
+
+    // A body with no paragraph at all is not a document Word will open.
+    if (!any) SB_Add(x, "<w:p/>");
+
+    SB_AddF(x, "<w:sectPr><w:pgSz w:w=\"%d\" w:h=\"%d\"/>"
+               "<w:pgMar w:top=\"%d\" w:right=\"%d\" w:bottom=\"%d\" w:left=\"%d\" "
+               "w:header=\"720\" w:footer=\"720\" w:gutter=\"0\"/></w:sectPr>",
+            doc->section.pageWidth, doc->section.pageHeight,
+            doc->section.marginTop, doc->section.marginRight,
+            doc->section.marginBottom, doc->section.marginLeft);
+
+    SB_Add(x, "</w:body></w:document>");
 
     if (x->failed) {
         SetError(L"Ran out of memory building the document.");
@@ -1058,13 +687,13 @@ static BOOL BuildDocumentXml(HWND h, Str* x) {
     return TRUE;
 }
 
-BOOL Docx_WriteFromEditor(HWND hRichEdit, const WCHAR* path) {
-    if (!hRichEdit || !path) return FALSE;
+BOOL Docx_WriteModel(const DocModel* doc, const WCHAR* path) {
+    if (!doc || !path) return FALSE;
     SetError(NULL);
 
-    Str xml = {0};
-    if (!BuildDocumentXml(hRichEdit, &xml)) {
-        StrFree(&xml);
+    StrBuf xml = {0};
+    if (!BuildDocumentXml(doc, &xml)) {
+        SB_Free(&xml);
         return FALSE;
     }
 
@@ -1147,11 +776,26 @@ done:
     if (factory) IOpcFactory_Release(factory);
     if (needUninit) CoUninitialize();
 
-    StrFree(&xml);
+    SB_Free(&xml);
+    return ok;
+}
+
+BOOL Docx_WriteFromEditor(HWND hRichEdit, const WCHAR* path) {
+    if (!hRichEdit || !path) return FALSE;
+
+    DocModel* doc = DocView_Capture(hRichEdit);
+    if (!doc) {
+        SetError(L"The document could not be read out of the editor.");
+        return FALSE;
+    }
+
+    BOOL ok = Docx_WriteModel(doc, path);
+    Doc_Free(doc);
 
     if (ok) SendMessageW(hRichEdit, EM_SETMODIFY, FALSE, 0);
     return ok;
 }
+
 
 // ---------------------------------------------------------------------------
 // Self-check. Run with: OpenNote.exe --selftest

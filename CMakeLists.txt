@@ -48,6 +48,10 @@ set(SUPERNOTE_SOURCES
     src/core/document.c
     src/core/fileio.c
     src/core/search.c
+    src/core/strbuf.c
+    src/core/doctree.c
+    src/core/doctree_rtf.c
+    src/core/doctree_view.c
     src/core/docx.c
     src/db/database.c
     src/db/notes_repo.c

@@ -29,6 +29,7 @@ static int RunSelfTest(void) {
         { "crypto", Crypto_SelfTest },
         { "oauth",  OAuth_SelfTest  },
         { "rich",   Rich_SelfTest   },
+        { "doctree",Doc_SelfTest    },
         { "docx",   Docx_SelfTest   },
     };
 
@@ -153,6 +154,12 @@ static int RunDocxCheck(int argc, WCHAR** argv) {
 
     int files = 0, checks = 0, failures = 0;
 
+    // Fidelity is reported separately from pass/fail: a property that does not
+    // survive a round trip is a measurement, and the point is that it is a
+    // number which can get worse.
+    int serCompared = 0, serLost = 0;
+    int edCompared = 0, edLost = 0;
+
     for (int fi = 0; fi < fileCount; fi++) {
         const WCHAR* fileName = names[fi];
         files++;
@@ -222,79 +229,125 @@ static int RunDocxCheck(int argc, WCHAR** argv) {
             fclose(ef);
         }
 
-        // Round trip through the writer: load the converted RTF into a real
-        // rich text control, write it back out as .docx, and read that. The
-        // output is kept beside the source so it can be inspected, or checked
-        // by something other than this program.
-        Rich_EnsureLoaded();
-        HWND rt = CreateWindowExW(0, MSFTEDIT_CLASS, NULL,
-                                  WS_POPUP | ES_MULTILINE | ES_NOHIDESEL,
-                                  0, 0, 100, 100, HWND_MESSAGE, NULL,
-                                  GetModuleHandleW(NULL), NULL);
-        if (!rt) {
-            // Silently skipping here would let the writer go unchecked while
-            // the harness still reported success.
-            wprintf(L"FAIL  %s: could not create a control for the round trip\n",
-                    fileName);
-            checks++;
-            failures++;
-        }
-        if (rt) {
-            SendMessageW(rt, EM_SETTEXTMODE, TM_RICHTEXT, 0);
-            SendMessageW(rt, EM_EXLIMITTEXT, 0, 0x7FFFFFFF);
+        // ------------------------------------------------------------------
+        // Round trips, measured against the document model.
+        //
+        // Two separate questions, and conflating them hides which half broke:
+        //
+        //   serializer  model -> .docx -> model, with no editor involved
+        //   editor      model -> RTF -> the control -> model
+        //
+        // Doc_Compare reports how many properties did not survive, so the
+        // result is a number that can get worse rather than a pass.
+        // ------------------------------------------------------------------
+        DocModel* source = Docx_ReadToModel(docPath);
 
+        checks++;
+        if (!source) {
+            wprintf(L"FAIL  %s: could not be read into a model\n", fileName);
+            failures++;
+        } else {
             WCHAR outPath[MAX_PATH];
             swprintf_s(outPath, MAX_PATH, L"%s\\%s.out.docx", outDir, fileName);
 
+            // --- serializer ---
+            WCHAR serPath[MAX_PATH];
+            swprintf_s(serPath, MAX_PATH, L"%s\\%s.model.docx", outDir, fileName);
+
             checks++;
-            if (!Rich_SetRtf(rt, rtf)) {
-                wprintf(L"FAIL  %s: converted RTF was rejected by the control\n",
-                        fileName);
-                failures++;
-            } else if (!Docx_WriteFromEditor(rt, outPath)) {
-                wprintf(L"FAIL  %s: could not be written back as .docx\n", fileName);
+            if (!Docx_WriteModel(source, serPath)) {
+                wprintf(L"FAIL  %s: the model could not be written as .docx\n", fileName);
                 failures++;
             } else {
-                char* again = Docx_ReadToRtf(outPath);
-                if (!again) {
-                    wprintf(L"FAIL  %s: the written .docx could not be read back\n",
+                DocModel* back = Docx_ReadToModel(serPath);
+                checks++;
+                if (!back) {
+                    wprintf(L"FAIL  %s: the written model could not be read back\n",
                             fileName);
                     failures++;
                 } else {
-                    // Text has to survive the round trip. Formatting fidelity is
-                    // checked per document above; this is the floor beneath it.
-                    WCHAR* before = Rich_GetText(rt);
-                    HWND rt2 = CreateWindowExW(0, MSFTEDIT_CLASS, NULL,
-                                               WS_POPUP | ES_MULTILINE | ES_NOHIDESEL,
-                                               0, 0, 100, 100, HWND_MESSAGE, NULL,
-                                               GetModuleHandleW(NULL), NULL);
-                    if (rt2 && before) {
-                        SendMessageW(rt2, EM_SETTEXTMODE, TM_RICHTEXT, 0);
-                        SendMessageW(rt2, EM_EXLIMITTEXT, 0, 0x7FFFFFFF);
-                        Rich_SetRtf(rt2, again);
-                        WCHAR* after = Rich_GetText(rt2);
+                    DocDiff diff;
+                    Doc_Compare(source, back, &diff);
+                    serCompared += diff.compared;
+                    serLost += diff.differences;
 
-                        // Compare content, not layout. Writing flattens a
-                        // table to tab-separated text, which changes the
-                        // whitespace but must not change a single word --
-                        // losing structure is a documented limitation, losing
-                        // text is a bug. Both sides are stripped of whitespace
-                        // and of the control characters RichEdit uses to mark
-                        // table structure.
+                    if (diff.differences) {
+                        wprintf(L"LOSS  %s: %d of %d properties lost through .docx\n",
+                                fileName, diff.differences, diff.compared);
+                        for (int k = 0; k < diff.firstCount; k++) {
+                            wprintf(L"        %hs\n", diff.first[k]);
+                        }
+                    }
+                    Doc_Free(back);
+                }
+            }
+
+            // --- editor ---
+            Rich_EnsureLoaded();
+            HWND rt = CreateWindowExW(0, MSFTEDIT_CLASS, NULL,
+                                      WS_POPUP | ES_MULTILINE | ES_NOHIDESEL,
+                                      0, 0, 100, 100, HWND_MESSAGE, NULL,
+                                      GetModuleHandleW(NULL), NULL);
+            checks++;
+            if (!rt) {
+                // Silently skipping here would let the editor path go unchecked
+                // while the harness still reported success.
+                wprintf(L"FAIL  %s: could not create a control for the round trip\n",
+                        fileName);
+                failures++;
+            } else {
+                SendMessageW(rt, EM_SETTEXTMODE, TM_RICHTEXT, 0);
+                SendMessageW(rt, EM_EXLIMITTEXT, 0, 0x7FFFFFFF);
+
+                checks++;
+                if (!Rich_SetRtf(rt, rtf)) {
+                    wprintf(L"FAIL  %s: converted RTF was rejected by the control\n",
+                            fileName);
+                    failures++;
+                } else if (!Docx_WriteFromEditor(rt, outPath)) {
+                    wprintf(L"FAIL  %s: could not be written back as .docx\n", fileName);
+                    failures++;
+                } else {
+                    DocModel* viaEditor = Docx_ReadToModel(outPath);
+                    checks++;
+                    if (!viaEditor) {
+                        wprintf(L"FAIL  %s: the editor's .docx could not be read back\n",
+                                fileName);
+                        failures++;
+                    } else {
+                        DocDiff diff;
+                        Doc_Compare(source, viaEditor, &diff);
+                        edCompared += diff.compared;
+                        edLost += diff.differences;
+
+                        if (diff.differences) {
+                            wprintf(L"LOSS  %s: %d of %d properties lost through the editor\n",
+                                    fileName, diff.differences, diff.compared);
+                            for (int k = 0; k < diff.firstCount; k++) {
+                                wprintf(L"        %hs\n", diff.first[k]);
+                            }
+                        }
+
+                        // Text is the floor: structure may be approximated by
+                        // the editor, but a word must never go missing.
+                        WCHAR* a = Doc_GetText(source);
+                        WCHAR* b = Doc_GetText(viaEditor);
                         checks++;
-                        if (!after || !SameContent(before, after)) {
-                            wprintf(L"FAIL  %s: text was lost across the .docx round trip\n",
+                        if (!a || !b || !SameContent(a, b)) {
+                            wprintf(L"FAIL  %s: text was lost through the editor\n",
                                     fileName);
                             failures++;
                         }
-                        free(after);
+                        free(a);
+                        free(b);
+
+                        Doc_Free(viaEditor);
                     }
-                    if (rt2) DestroyWindow(rt2);
-                    free(before);
-                    free(again);
                 }
+                DestroyWindow(rt);
             }
-            DestroyWindow(rt);
+
+            Doc_Free(source);
         }
 
         free(rtf);
@@ -302,6 +355,10 @@ static int RunDocxCheck(int argc, WCHAR** argv) {
 
     wprintf(L"\ndocx conformance: %d/%d checks passed across %d documents\n",
             checks - failures, checks, files);
+    wprintf(L"model fidelity:   %d/%d properties survive .docx -> model -> .docx\n",
+            serCompared - serLost, serCompared);
+    wprintf(L"editor fidelity:  %d/%d properties survive a load, edit and save\n",
+            edCompared - edLost, edCompared);
 
     return failures ? 1 : 0;
 }

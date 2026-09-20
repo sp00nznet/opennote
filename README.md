@@ -28,7 +28,7 @@ payware, read the published spec it is hiding behind, give it away.
 
 ## Status
 
-**v0.6.1 — alpha. Reads and writes `.docx`.** Downloads are on the
+**v0.7.0 — alpha. Reads and writes `.docx`, through a real document model.** Downloads are on the
 [releases page](https://github.com/sp00nznet/opennote/releases/latest): a bare executable
 and an installer, with the release notes saying what each one does and does not give you.
 
@@ -44,11 +44,12 @@ container, and Windows ships the API for exactly that shape (`IOpcFactory`) alon
 pull XML reader (`IXmlReader`). The container and the parser were never this project's
 code to own.
 
-**Conformance:** `54/54 checks across 5 documents` — see [Conformance](#conformance) below.
+**Conformance:** `79/79 checks across 5 documents`, and fidelity is measured rather than claimed — see
+[Conformance](#conformance) below.
 
-Tables are read into the document but flatten to tab-separated text when saving back to
-`.docx`; rebuilding the grid on write needs the table model the layout engine brings in
-v0.7. Text is never lost, and the harness enforces that.
+As of v0.7 a document is a real tree (sections, paragraphs, runs, tables, cells) rather
+than whatever the editor control happens to be holding, and every format is a serializer
+over it. **Tables now survive being saved back to `.docx`**, which they did not before.
 
 ### The WordPad replacement
 
@@ -193,13 +194,30 @@ Do not pass the OAuth CMake variables for a normal build — see
 
 ## Conformance
 
-`.docx` reading is checked against a corpus on every build, and the count is reported
-rather than a bare "tests passed":
+`.docx` handling is checked against a corpus on every build. The count is reported rather
+than a bare "tests passed", and **fidelity is a number, not a claim**:
 
 ```
 > OpenNote.exe --docx-check build/corpus
-docx conformance: 54/54 checks across 5 documents
+docx conformance: 79/79 checks across 5 documents
+model fidelity:   2445/2445 properties survive .docx -> model -> .docx
+editor fidelity:  2440/2442 properties survive a load, edit and save
 ```
+
+Fidelity counts what the *source document stated* and the round trip failed to preserve.
+A document that never named a font and comes back saying Calibri has lost nothing — the
+reader resolved a default — so that is not counted. A font it did name and lost, is.
+
+The two numbers are kept apart because conflating them hides which half broke: the first
+is the serializer with no editor involved, the second is a real load-edit-save through
+the control.
+
+**The two properties the editor currently loses, both named by the harness:**
+
+| Loss | Why | Fixed by |
+|---|---|---|
+| A paragraph's heading *level* | RichEdit has no notion of named styles, so `Heading1` comes back as bold 18pt body text. The appearance survives; the style does not | v0.9, `styles.xml` |
+| A table's column widths | The control does not give them back, so the reader auto-sizes | v0.8, the layout engine's table model |
 
 The corpus is **generated, not committed**, so the repository carries no binary Office
 documents:
@@ -209,6 +227,10 @@ python tests/make_fixtures.py build/corpus     # build the corpus
 .\build\bin\OpenNote.exe --docx-check build/corpus
 python tests/validate_docx.py build/corpus/out # check what the writer produced
 ```
+
+`Doc_Compare` is itself covered by `--selftest`: it deliberately breaks a model and
+requires each change to be noticed. A comparison that never reported anything would make
+every fidelity number above a lie.
 
 Each document has a `.expect` file listing what the converted RTF must and must not
 contain — that a tracked deletion is absent, that a heading keeps its weight, that cell
@@ -226,7 +248,7 @@ document comes out wrong.
 
 ```
 src/ui/      Window, tabs, editors (plain + rich), toolbar, dialogs
-src/core/    Document, file I/O, search, .docx
+src/core/    Document model, serializers (.docx, RTF), file I/O, search
 src/db/      SQLite, notes and links repositories
 src/sync/    OAuth, GitHub and Google Drive sync
 res/         Icons, dialogs, manifest

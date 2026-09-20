@@ -5,6 +5,59 @@ All notable changes to this project are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.7.0] - 2026-09-20
+
+**The document model.** A document is now a tree rather than whatever the editor control
+happens to be holding, and every file format is a serializer over that one structure.
+This ships no new feature on purpose; it is what the layout engine in v0.8 needs to exist
+before it can be written, and it fixes a real defect on the way.
+
+### Added
+- **`src/core/doctree.*`** - sections, paragraphs, runs, tables, rows and cells, with
+  character and paragraph properties on each.
+- **`Doc_Compare`** - compares two models property by property and reports what did not
+  survive. Fidelity counts what the *source stated* and the round trip lost; a default
+  the reader resolved is not a loss, which is the distinction that makes the number mean
+  anything.
+- **`src/core/doctree_view.c`** - captures the editor's contents back into a model,
+  including table structure, which the control does expose (PFE_TABLE, U+FFF9/U+FFFB row
+  markers, BEL between cells).
+- **`src/core/doctree_rtf.c`** - the only place RTF is now generated.
+- **`src/core/strbuf.*`** - the growable string builder, previously private to docx.c.
+- Fidelity reporting in the conformance harness, split between the serializer and the
+  editor so a regression says which half broke:
+  `model fidelity: 2445/2445` and `editor fidelity: 2440/2442`.
+- A self-check for `Doc_Compare` itself, which deliberately breaks a model and requires
+  each change to be detected. The fidelity numbers are worthless if the comparison cannot
+  see a change.
+
+### Fixed
+- **Tables survive being saved to `.docx`.** They previously flattened to tab-separated
+  text, because the reader produced RTF and the writer walked the control - there was
+  nowhere to keep a table in between. Measured consequence: the serializer now loses
+  nothing at all, and the editor path loses two named properties instead of every table
+  in the document.
+- A row's trailing cell separator produced a phantom empty cell, so every captured table
+  had one column too many.
+
+### Changed
+- `.docx` reading and writing go through the model. `Docx_ReadToRtf` is now a convenience
+  over `Docx_ReadToModel` plus `DocRtf_Emit`.
+- `_RICHEDIT_VER` raised to 0x0800, which exposes EM_GETTABLEPARMS. Safe because this
+  targets Windows 10 and 11, where the control behind MSFTEDIT_CLASS is RichEdit 8
+  regardless of the 4.1-era class name.
+- `tests/validate_docx.py` checks every package the writer produced, not only the ones
+  that came through the editor.
+
+### Known issues
+- The editor loses a paragraph's heading *level* (RichEdit has no named styles; the
+  appearance survives) and a table's column widths (the control does not return them).
+  Both are named by the harness on every run, and both are fixed by v0.8 and v0.9.
+- `.rtf` files still load and save through the control directly rather than through the
+  model. That path is already lossless in both directions - RichEdit is both the reader
+  and the writer - so replacing it with an RTF parser would be work for no fidelity gain.
+- Nested tables are read as further rows of the outer table rather than as nested ones.
+
 ## [0.6.1] - 2026-09-18
 
 ### Fixed

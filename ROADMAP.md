@@ -102,9 +102,9 @@ onto pages, and right now nothing lays anything out. RichEdit flows text into a 
 
 So the ordering below is not a wish list in priority order. It is a dependency chain.
 
-### v0.7.0 — The document model
+### v0.7.0 — The document model — **done**
 
-**The unglamorous one, and the one that should come first.**
+**The unglamorous one, and the one that came first.**
 
 Today a document *is* whatever the RichEdit control happens to be holding, and `.docx`
 round-trips through RTF. That is why a table survives being read and then flattens when
@@ -116,12 +116,20 @@ and fixes the flattening as a side effect. It is also the thing the layout engin
 to exist before it can be written, so building it first turns v0.8 from
 "model *and* renderer" into "renderer".
 
-- [ ] Document tree: sections, paragraphs, runs, tables, with properties on each
-- [ ] `.docx` reader and writer against the model rather than through RTF
-- [ ] `.rtf` reader and writer against the model
-- [ ] Lossless round-trip harness: read, write, read again, diff the two models and
-      report what was lost as a number, not a pass
-- [ ] RichEdit becomes a view *onto* the model, so editing keeps working throughout
+- [x] Document tree: sections, paragraphs, runs, tables, with properties on each
+- [x] `.docx` reader and writer against the model rather than through RTF
+- [x] Round-trip harness reporting what was lost as a number, not a pass:
+      **2445/2445** through the serializer, **2440/2442** through the editor
+- [x] The editor's contents captured back into a model, tables included
+- [ ] `.rtf` against the model. Deferred deliberately: that path already round-trips
+      losslessly because RichEdit is both its reader and its writer, so writing an RTF
+      parser to replace it would be work for no fidelity gain. It becomes worthwhile
+      when the layout engine replaces the control.
+
+The two properties the editor still loses are named by the harness on every run: a
+paragraph's heading level, which RichEdit has no way to represent, and a table's column
+widths, which it does not hand back. They are fixed by the two versions below, and until
+then they are measured rather than assumed away.
 
 ### v0.8.0 — The layout engine
 

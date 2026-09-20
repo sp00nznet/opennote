@@ -10,10 +10,14 @@
 #include <shellapi.h>
 #include <shlwapi.h>
 #include <shlobj.h>
-// RichEdit 4.1 (Msftedit.dll). Needed before richedit.h for CHARFORMAT2W,
-// PARAFORMAT2 and EM_SETTEXTMODE, which the rich text view in editor_rich.c
-// uses throughout.
-#define _RICHEDIT_VER 0x0500
+// RichEdit, declared at the Windows 8 level before richedit.h. That exposes
+// CHARFORMAT2W, PARAFORMAT2 and EM_SETTEXTMODE for the view in editor_rich.c,
+// and additionally TABLEROWPARMS / EM_GETTABLEPARMS, which is how
+// doctree_view.c recovers a table's real column widths instead of guessing.
+//
+// Safe here because this targets Windows 10 and 11, where the control behind
+// MSFTEDIT_CLASS is RichEdit 8 regardless of the 4.1-era class name.
+#define _RICHEDIT_VER 0x0800
 #include <richedit.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -24,7 +28,7 @@
 
 // Application info
 #define APP_NAME        L"OpenNote"
-#define APP_VERSION     L"0.6.1"
+#define APP_VERSION     L"0.7.0"
 #define APP_CLASS_NAME  L"OpenNoteMainWindow"
 
 // Limits
@@ -73,6 +77,10 @@ typedef struct AppState AppState;
 #include "ui/statusbar.h"
 #include "ui/dialogs.h"
 #include "core/document.h"
+#include "core/strbuf.h"
+#include "core/doctree.h"
+#include "core/doctree_rtf.h"
+#include "core/doctree_view.h"
 #include "core/docx.h"
 #include "core/fileio.h"
 #include "core/search.h"

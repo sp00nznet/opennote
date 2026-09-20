@@ -18,11 +18,18 @@
 // when it is opened, where a failure can be reported.
 BOOL Docx_IsDocxPath(const WCHAR* path);
 
-// Read a .docx and produce RTF. Caller frees with free().
+// Read a .docx into a document model. Caller frees with Doc_Free().
 // Returns NULL if the file is not a readable WordprocessingML package.
+DocModel* Docx_ReadToModel(const WCHAR* path);
+
+// Read a .docx and produce RTF for the view. Convenience over
+// Docx_ReadToModel + DocRtf_Emit. Caller frees with free().
 char* Docx_ReadToRtf(const WCHAR* path);
 
-// Write the contents of a rich text editor window out as a .docx.
+// Write a model out as a .docx.
+BOOL Docx_WriteModel(const DocModel* doc, const WCHAR* path);
+
+// Capture a rich text editor window into a model and write that.
 BOOL Docx_WriteFromEditor(HWND hRichEdit, const WCHAR* path);
 
 // Human-readable reason the last read or write failed, for the message box.

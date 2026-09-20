@@ -18,7 +18,10 @@ PR = "{http://schemas.openxmlformats.org/package/2006/relationships}"
 failures = 0
 checked = 0
 
-for path in sorted(glob.glob(sys.argv[1] + "/*.out.docx")):
+# Everything the writer produced: .out.docx came through the editor,
+# .model.docx straight from the serializer. Both are packages a reader
+# other than OpenNote has to accept.
+for path in sorted(glob.glob(sys.argv[1] + "/*.docx")):
     name = path.split("\\")[-1].split("/")[-1]
 
     def bad(msg):
