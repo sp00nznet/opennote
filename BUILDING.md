@@ -12,7 +12,7 @@
 
 ```bash
 # Clone the repository
-git clone https://github.com/sp00nznet/OpenNote.git
+git clone https://github.com/sp00nznet/opennote.git
 cd OpenNote
 
 # Configure with CMake
