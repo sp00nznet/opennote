@@ -93,27 +93,109 @@ three separate efforts in one entry, so they are now three versions.
 - [x] Corpus generated rather than committed
 - [ ] `styles.xml` resolution, `numbering.xml` list markers, images
 
-## v0.7.0 — The layout engine
+## The road to a Word replacement
 
-- [ ] DirectWrite layout engine — pagination, floats, text wrap, proper tables
-- [ ] Real table support on write, which needs that table model
-- [ ] Ruler and tab stops
-- [ ] Print-to-PDF export via the in-box PDF printer
+Everything from here is one problem wearing several hats. Pagination, headers and
+footers, footnotes, real tables, columns, print preview and faithful PDF export are not
+seven features — they are seven things you cannot have until the document is laid out
+onto pages, and right now nothing lays anything out. RichEdit flows text into a window.
 
-## v0.8.0 and beyond — `.doc`, and the rest of Word
+So the ordering below is not a wish list in priority order. It is a dependency chain.
 
-- [ ] `.doc` read and write — [MS-DOC] over [MS-CFB]. Twenty-five years of files that
-      nothing free reads well, and the last in-box reader left with WordPad
-- [ ] Track changes, comments, footnotes, table of contents
+### v0.7.0 — The document model
 
-Everything needed for the layout is already in Windows and already paid for: DirectWrite
-for shaping, line breaking, justification and font fallback; `ISpellChecker` for spelling;
-Microsoft Print to PDF for export.
+**The unglamorous one, and the one that should come first.**
 
-The honest risk is fidelity. LibreOffice has worked on `.docx` for twenty years and still
-mangles complex documents. The discipline is scope: be excellent on the documents people
-actually exchange — letters, reports, resumes, contracts — and state plainly what is not
-proven rather than letting a feature list imply it.
+Today a document *is* whatever the RichEdit control happens to be holding, and `.docx`
+round-trips through RTF. That is why a table survives being read and then flattens when
+it is written: there is nowhere to keep a table between the two.
+
+A real tree — sections holding paragraphs and tables, tables holding rows and cells,
+paragraphs holding runs — makes every file format a serializer over the same structure
+and fixes the flattening as a side effect. It is also the thing the layout engine needs
+to exist before it can be written, so building it first turns v0.8 from
+"model *and* renderer" into "renderer".
+
+- [ ] Document tree: sections, paragraphs, runs, tables, with properties on each
+- [ ] `.docx` reader and writer against the model rather than through RTF
+- [ ] `.rtf` reader and writer against the model
+- [ ] Lossless round-trip harness: read, write, read again, diff the two models and
+      report what was lost as a number, not a pass
+- [ ] RichEdit becomes a view *onto* the model, so editing keeps working throughout
+
+### v0.8.0 — The layout engine
+
+The big one. Windows supplies the hard half: `IDWriteTextLayout` does shaping, line
+breaking, justification, bidi and font fallback. What has to be written is the part
+above it — flowing those laid-out lines into columns and pages.
+
+- [ ] Block layout: measure and flow paragraphs into a page, break, continue
+- [ ] Page model: paper size, margins, widow and orphan control
+- [ ] **Table layout** — fixed and auto column widths, merged cells, rows that break
+      across pages. Honestly the nastiest part of the whole project
+- [ ] Rendering through Direct2D, to the screen and to a printer DC
+- [ ] Hit testing, caret movement and selection across the laid-out model. Routinely
+      underestimated; comparable in size to layout itself
+- [ ] Editing against the model, with undo
+- [ ] Ruler and tab stops, which need a page width to mean anything
+- [ ] Print preview, which is just the page renderer in a window
+- [ ] Print-to-PDF through the in-box printer, which becomes almost free once paginated
+
+Once this lands, Scintilla can go: the plain text view becomes a degenerate case of the
+rich one, and roughly a thousand vendored files leave with it.
+
+### v0.9.0 — Document fidelity
+
+The things real `.docx` files contain that are currently dropped or approximated.
+
+- [ ] `styles.xml` — named styles, inheritance, document defaults, instead of the
+      current approximation of what a heading ought to look like
+- [ ] `numbering.xml` — real numbered and multi-level lists, instead of reading every
+      list as bulleted
+- [ ] Images: DrawingML and VML, read and written
+- [ ] Headers and footers, which need pagination to place
+- [ ] Sections, page breaks and columns
+- [ ] Footnotes and endnotes
+
+### v0.10.0 — The business tier
+
+The reason a company cannot leave Word, as distinct from the reason a person cannot.
+
+- [ ] Track changes as model state, with accept and reject. Deletions are currently
+      dropped on read, which is correct for display and lossy for a round-trip
+- [ ] Comments
+- [ ] Fields: page numbers, dates, cross-references
+- [ ] Table of contents
+
+### v1.0.0 — `.doc`
+
+Legacy binary `.doc`: [MS-DOC] over [MS-CFB]. Compound file storage, the FIB, piece
+tables, formatting run arrays. Both specifications are published.
+
+This is the one that needs format archaeology rather than careful reading, and it is
+also the widest gap: twenty-five years of files, nothing free reads them well, and the
+last in-box reader left with WordPad. Microsoft's own abandoned converters
+(`msconv97.dll`, `mswrd632.wpc`) are small, self-contained and do exactly this
+conversion — useful as a tie-breaker where the specification is vague, under the rule in
+`CONTRIBUTING.md` that nothing derived from them is ever committed.
+
+---
+
+## What "Word replacement" actually means
+
+Not feature parity. Nobody is waiting on mail merge.
+
+The bar is: **someone emails you a `.docx`, you open it, it looks right, you edit it, you
+save it, and the person who gets it back cannot tell which program touched it.** That is
+v0.7 through v0.9. The business tier (v0.10) is what a company needs on top. `.doc` is a
+separate gift to everyone with an archive.
+
+The honest risk remains fidelity. LibreOffice has worked on `.docx` for twenty years and
+still mangles complex documents, and it has far more people on it than this has. The
+discipline is scope — be excellent on the documents people actually exchange, letters,
+reports, resumes and contracts — and measure the loss rather than claim there is none.
+That is what the round-trip harness in v0.7 is for: a number in the README that can get
+worse, and a build that fails when it does.
 
 ---
 
