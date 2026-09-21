@@ -28,7 +28,7 @@
 
 // Application info
 #define APP_NAME        L"OpenNote"
-#define APP_VERSION     L"0.8.0"
+#define APP_VERSION     L"0.9.0"
 #define APP_CLASS_NAME  L"OpenNoteMainWindow"
 
 // Limits

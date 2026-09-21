@@ -5,6 +5,80 @@ All notable changes to this project are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.9.0] - 2026-09-20
+
+**Document fidelity.** The reader used to guess at a good deal of what a `.docx` says: a
+heading was recognised by its style being called "Heading1", every list was assumed to be
+bulleted, pictures were dropped, the page setup was ignored, and headers, footers and
+footnotes did not exist. All of it is read now, laid out, and written back out.
+
+The measure of this version is a number rather than a claim: **51158/51158 properties
+survive a document going through the model and back to a file**, pictures compared byte
+for byte, across a corpus of ten documents and 196 conformance checks.
+
+### Added
+- **`styles.xml`** - document defaults, the style table, and `basedOn` resolved to the
+  root, so a style based on a style based on Normal comes out with what each of them
+  stated. Paragraphs carry the resolved properties; the table is kept beside them so a
+  document written back out says "Quote" where it said "Quote".
+- **`numbering.xml`** - `w:numId` to abstract numbering to level, which is where the
+  format and the marker pattern live. The engine counts: a list restarts when another
+  begins, a deeper level starts again under each parent, letters run a, b, c and then aa,
+  roman numerals work, and "%1.%2)" names both levels.
+- **Pictures**, in both spellings: DrawingML and VML. The bytes go into the model exactly
+  as the file had them -- a PNG stays a PNG -- so a round trip cannot re-encode them. The
+  layout engine places them, and the page view, the printer and the PDF all draw them
+  through WIC.
+- **The page a document is set on**: paper size, orientation, margins and columns, from
+  `w:sectPr`, which the reader had been ignoring entirely. A page is a row of columns
+  now; the one-column case is the same code with the loop running once.
+- **Page breaks**, both spellings: `w:pageBreakBefore` on a paragraph and a
+  `w:br w:type="page"` run.
+- **Headers and footers**, read from their own parts and placed on every page once
+  pagination has decided how many there are.
+- **Footnotes and endnotes.** A footnote goes at the foot of the page its reference
+  landed on: the page owes it the room, and a paragraph that no longer fits because of
+  its own footnote is taken back off the page and laid out again on the next one.
+  Endnotes go after everything else. The marks are numbered from the order the references
+  appear in, which is where they come from in a `.docx` too -- the file does not hold
+  them.
+- **`src/core/imagedib.c`**, **`src/layout/layoutimage.cpp`** and **`src/ui/richole.c`**:
+  decoding a picture for the view, for the page, and giving the control somewhere to keep
+  one.
+- Five new corpus fixtures -- styles and numbering, pictures, the page setup, headers and
+  footers, notes -- and self-checks for the counting, the columns, the page breaks, the
+  picture placement and the footnote placement.
+
+### Fixed
+- **`SB_AddF` truncated anything longer than 512 characters without a word**, which cut a
+  picture's drawing in half and produced XML no reader would accept.
+- A list paragraph's left indent came back 360 twips short, because the control reports
+  where the first line starts rather than where the paragraph does.
+- Two lists in one document were written out as one, so a bulleted list following a
+  numbered one rewrote the numbered one's format.
+- A model captured from the editor now takes its page, its margins, its header, its
+  footer, its pictures and its notes from the document it was loaded from. The control
+  holds none of those, so without it, saving an A4 document from the editor put it
+  quietly onto Letter and dropped everything else.
+
+### Known issues
+- Three things the RichEdit view cannot hold, so the editor path loses them and the
+  harness names them on every run: a paragraph's style and heading level, a lettered or
+  roman list (which comes back numbered -- the control's RTF reader takes `\pndec` and
+  nothing else), and a page-break run in the middle of a paragraph.
+- A picture in a paragraph whose text was edited in that view is lost on the way back
+  out: the control displays a picture and then will not say where it is, so a picture is
+  matched to the paragraph it came from and an edited paragraph has nowhere to put it.
+- One page setup per document: a document with several sections keeps the last one, and
+  the section breaks become page breaks.
+- One header and one footer: not a different first page, not different left and right
+  pages. Both are per-section.
+- Tab stops are every half inch for the whole document; per-paragraph `w:tabs` are not
+  carried.
+- Nested tables still read as further rows of the outer table.
+- Fields -- page numbers, dates, cross-references -- are not read, so a footer that says
+  "Page 1 of 12" arrives as whatever text was last saved with it. That is v0.10.
+
 ## [0.8.0] - 2026-09-20
 
 **The layout engine.** The document is laid out onto pages - paragraphs measured and

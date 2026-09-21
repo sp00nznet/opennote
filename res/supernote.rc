@@ -7,8 +7,8 @@ IDI_SUPERNOTE ICON "icon.ico"
 
 // Version info
 VS_VERSION_INFO VERSIONINFO
-FILEVERSION     0,8,0,0
-PRODUCTVERSION  0,8,0,0
+FILEVERSION     0,9,0,0
+PRODUCTVERSION  0,9,0,0
 FILEFLAGSMASK   VS_FFI_FILEFLAGSMASK
 FILEFLAGS       0
 FILEOS          VOS_NT_WINDOWS32
@@ -21,12 +21,12 @@ BEGIN
         BEGIN
             VALUE "CompanyName",      "OpenNote"
             VALUE "FileDescription",  "OpenNote - Tabbed Notepad with SQLite"
-            VALUE "FileVersion",      "0.8.0.0"
+            VALUE "FileVersion",      "0.9.0.0"
             VALUE "InternalName",     "OpenNote"
             VALUE "LegalCopyright",   "Copyright (C) 2026"
             VALUE "OriginalFilename", "OpenNote.exe"
             VALUE "ProductName",      "OpenNote"
-            VALUE "ProductVersion",   "0.8.0.0"
+            VALUE "ProductVersion",   "0.9.0.0"
         END
     END
     BLOCK "VarFileInfo"
@@ -89,7 +89,7 @@ CAPTION "About OpenNote"
 FONT 8, "MS Shell Dlg"
 BEGIN
     LTEXT           "OpenNote", IDC_STATIC, 60, 15, 100, 12
-    LTEXT           "Version 0.8.0", IDC_STATIC, 60, 30, 100, 10
+    LTEXT           "Version 0.9.0", IDC_STATIC, 60, 30, 100, 10
     LTEXT           "A tabbed text editor with SQLite note storage", IDC_STATIC, 60, 45, 150, 10
     LTEXT           "Copyright (C) 2026", IDC_STATIC, 60, 60, 100, 10
     DEFPUSHBUTTON   "OK", IDOK, 85, 78, 50, 14

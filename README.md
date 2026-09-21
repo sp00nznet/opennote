@@ -28,7 +28,7 @@ payware, read the published spec it is hiding behind, give it away.
 
 ## Status
 
-**v0.8.0 — alpha. Lays a document out onto real pages, and edits it there.** Downloads are on the
+**v0.9.0 — alpha. Reads what a `.docx` actually contains: styles, numbering, pictures, headers, footnotes.** Downloads are on the
 [releases page](https://github.com/sp00nznet/opennote/releases/latest): a bare executable
 and an installer, with the release notes saying what each one does and does not give you.
 
@@ -44,7 +44,7 @@ container, and Windows ships the API for exactly that shape (`IOpcFactory`) alon
 pull XML reader (`IXmlReader`). The container and the parser were never this project's
 code to own.
 
-**Conformance:** `79/79 checks across 5 documents`, and fidelity is measured rather than claimed — see
+**Conformance:** `196/196 checks across 10 documents`, and fidelity is measured rather than claimed — see
 [Conformance](#conformance) below.
 
 As of v0.7 a document is a real tree (sections, paragraphs, runs, tables, cells) rather
@@ -76,6 +76,12 @@ off the page, tables boxed with the column widths the file states, pages sized b
 Setup. `IDWriteTextLayout` does the shaping, line breaking and font fallback; what
 OpenNote adds is the part above it, and it knows nothing about windows — the same
 geometry draws the page view, the printout and the PDF, so they cannot disagree.
+
+As of v0.9 the engine lays out what documents actually contain: named styles resolved
+through `basedOn` to the document defaults, real numbered lists that count (including
+letters and roman numerals, and `1.2.` for a nested level), pictures, columns, page
+breaks, headers and footers on every page, and footnotes at the foot of the page their
+reference landed on.
 
 **The page view edits** (View > Page Layout, or Ctrl+Shift+L). A click names a
 character, the arrows walk the laid-out lines rather than the runs behind them, Home and
@@ -220,9 +226,9 @@ than a bare "tests passed", and **fidelity is a number, not a claim**:
 
 ```
 > OpenNote.exe --docx-check build/corpus
-docx conformance: 79/79 checks across 5 documents
-model fidelity:   2445/2445 properties survive .docx -> model -> .docx
-editor fidelity:  2440/2442 properties survive a load, edit and save
+docx conformance: 196/196 checks across 10 documents
+model fidelity:   51158/51158 properties survive .docx -> model -> .docx
+editor fidelity:  51032/51041 properties survive a load, edit and save
 ```
 
 Fidelity counts what the *source document stated* and the round trip failed to preserve.
@@ -233,12 +239,20 @@ The two numbers are kept apart because conflating them hides which half broke: t
 is the serializer with no editor involved, the second is a real load-edit-save through
 the control.
 
-**The two properties the editor currently loses, both named by the harness:**
+**What the editor path still loses, all named by the harness on every run.** Every one of
+them is something the RichEdit control has no way to hold; nothing is lost going through
+the model, which is why the two numbers are kept apart.
 
-| Loss | Why | Fixed by |
-|---|---|---|
-| A paragraph's heading *level* | RichEdit has no notion of named styles, so `Heading1` comes back as bold 18pt body text. The appearance survives; the style does not | v0.9, `styles.xml` |
-| A table's column widths | The control does not give them back, so the reader auto-sizes | v0.8, the layout engine's table model |
+| Loss | Why |
+|---|---|
+| A paragraph's style, and its heading *level* | The control has no notion of named styles, so `Heading 1` comes back as bold 18pt body text. The appearance survives; the name does not |
+| A table's column widths | The control does not give them back, so the reader auto-sizes |
+| A lettered or roman list, which comes back numbered | Its RTF reader takes `\pndec` and nothing else. Given `\pnlcltr` it drops the numbering and leaves the marker behind as text, which is worse |
+| A page-break *run* in the middle of a paragraph | `\page` reaches the control and does not come back out |
+
+Pictures, headers, footers, footnotes, the page setup and the numbering behind a list are
+all things the control cannot hold either — those survive because a document opened from
+a file keeps its model beside the view, and what the view cannot say is taken from there.
 
 The corpus is **generated, not committed**, so the repository carries no binary Office
 documents:

@@ -6,7 +6,7 @@ The short version: **Windows shipped a rich text editor for thirty years and rem
 in 2024.** WordPad is gone from Windows 11 24H2 and from Windows Server 2025. The
 replacement Microsoft points you at is a subscription. OpenNote is aiming at that hole.
 
-**v0.8.0.** Published binaries — a bare executable and an installer — are built by CI
+**v0.9.0.** Published binaries — a bare executable and an installer — are built by CI
 from the tagged commit.
 
 Nothing below is a promise of a date.
@@ -180,18 +180,31 @@ character formatting, spell check, images and find-and-replace all move across w
 which is v0.9 work and is what finally retires Scintilla — roughly a thousand vendored
 files leaving with it.
 
-### v0.9.0 — Document fidelity
+### v0.9.0 — Document fidelity — **done**
 
-The things real `.docx` files contain that are currently dropped or approximated.
+The things real `.docx` files contain that used to be dropped or approximated. The
+measure of this version is a number: 51158/51158 properties survive a document going
+through the model and back to a file, across ten documents and 196 conformance checks.
 
-- [ ] `styles.xml` — named styles, inheritance, document defaults, instead of the
-      current approximation of what a heading ought to look like
-- [ ] `numbering.xml` — real numbered and multi-level lists, instead of reading every
-      list as bulleted
-- [ ] Images: DrawingML and VML, read and written
-- [ ] Headers and footers, which need pagination to place
-- [ ] Sections, page breaks and columns
-- [ ] Footnotes and endnotes
+- [x] `styles.xml` — named styles, inheritance through `basedOn`, document defaults,
+      instead of the reader's guess at what a heading ought to look like
+- [x] `numbering.xml` — real numbered and multi-level lists that count: decimal, letters,
+      roman numerals, and `1.2.` for a nested level, instead of reading every list as
+      bulleted
+- [x] Images: DrawingML and VML, read and written, carried as the bytes the file held so
+      nothing is re-encoded on the way through. Drawn by the page view, the printer and
+      the PDF
+- [x] Headers and footers, placed once pagination has decided how many pages there are
+- [x] Sections, page breaks and columns. One page setup per document: several sections
+      keep the last one, and the section breaks become page breaks
+- [x] Footnotes and endnotes. A footnote goes at the foot of the page its reference
+      landed on, which means the page owes it the room before the text may use it
+
+What none of this changes is where typing happens. The RichEdit view cannot hold a
+picture's bytes, a style's name, a header or a note, so a document opened from a file
+keeps its model beside the view and hands back what the view cannot say. That works, and
+it is measured — the editor path loses nine properties out of fifty thousand, each one
+named — but it is scaffolding until the laid-out view is the only view.
 
 ### v0.10.0 — The business tier
 

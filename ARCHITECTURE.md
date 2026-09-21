@@ -19,16 +19,20 @@ OpenNote/
 │   │   ├── tabcontrol.c/h  # Tab management and switching
 │   │   ├── editor.c/h      # Scintilla editor wrapper
 │   │   ├── editor_rich.c/h # RichEdit view: the rich text document
+│   │   ├── richole.c/h     # Somewhere for that view to keep a picture
 │   │   ├── pageview.cpp/h  # The page view: laid-out pages, drawn and edited (Direct2D)
 │   │   ├── menubar.c/h     # Menu creation and updates
 │   │   ├── statusbar.c/h   # Status bar updates
 │   │   └── dialogs.c/h     # Find, Replace, Go To, Notes Browser, etc.
 │   ├── layout/
 │   │   ├── layout.cpp/h    # The layout engine: document model -> pages
+│   │   ├── layoutimage.cpp/h # A picture's bytes -> a Direct2D bitmap
 │   │   └── layoutprint.cpp/h # Printing those pages, and export to PDF
 │   ├── core/
-│   │   ├── doctree.c/h     # The document tree: sections, paragraphs, runs, tables
-│   │   ├── docx.c/h        # .docx reading and writing (ECMA-376)
+│   │   ├── doctree.c/h     # The document tree: sections, paragraphs, runs, tables,
+│   │   │                   #   styles, notes, pictures
+│   │   ├── docx.c/h        # .docx reading and writing (ECMA-376), all its parts
+│   │   ├── imagedib.c/h    # Decoding a picture for the one view that cannot
 │   │   ├── document.c/h    # Document model (title, path, content, modified state)
 │   │   ├── fileio.c/h      # File reading/writing with encoding detection
 │   │   └── search.c/h      # Find and replace engine
