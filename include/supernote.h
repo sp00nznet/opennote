@@ -52,7 +52,11 @@ typedef enum {
 typedef enum {
     FORMAT_PLAIN,
     FORMAT_RTF,
-    FORMAT_DOCX
+    FORMAT_DOCX,
+
+    // A PDF is shown rather than edited: it gets a view of its own and no
+    // editor at all. Filling in a form and signing one are v0.11's other half.
+    FORMAT_PDF
 } DocumentFormat;
 
 // Both rich formats are edited in the same view; only their storage differs.

@@ -6,6 +6,10 @@ struct Tab {
     Document* document;
     HWND hEditor;
 
+    // The PDF view, when this tab is showing somebody else's document. It
+    // owns the file; there is no editor underneath it holding anything.
+    HWND hPdfView;
+
     // The laid-out view of the same document, when this tab is showing one.
     // The tab owns it; the text control stays alive underneath, holding what
     // was there when the view opened.

@@ -16,6 +16,10 @@ BOOL MainWindow_OnQueryEndSession(HWND hwnd);
 
 // UI updates
 void MainWindow_UpdateTitle(void);
+
+// Show a document in a tab -- reusing an untouched one where that fits, and
+// giving a PDF a view of its own. Takes ownership of `newDoc`.
+void MainWindow_OpenDocument(Document* newDoc);
 void MainWindow_UpdateMenuState(void);
 void MainWindow_UpdateNewTabButton(void);
 

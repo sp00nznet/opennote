@@ -60,6 +60,7 @@ set(SUPERNOTE_SOURCES
     src/ui/richole.c
     src/core/docx.c
     src/pdf/pdfread.cpp
+    src/pdf/pdfview.cpp
     src/db/database.c
     src/db/notes_repo.c
     src/db/links_repo.c

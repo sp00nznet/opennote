@@ -1,6 +1,7 @@
 #include "supernote.h"
 #include "res/resource.h"
 #include "ui/toolbar.h"
+#include "pdf/pdfview.h"
 #include <windowsx.h>
 // ponytail: still here for the SCNotification dispatch below -- that is the
 // control's notification protocol, not an editing operation. Every editing
@@ -467,11 +468,53 @@ static LRESULT OnNotify(HWND hwnd, int idCtrl, LPNMHDR pnmh) {
 // an .rtf document dropped into a Scintilla tab would show the user its markup
 // instead of the document. Four call sites had this block copied out, and only
 // by having one of them does the check happen everywhere.
-static void OpenDocumentInTab(Document* newDoc) {
+// Opening a document: reuse the tab when it is an untouched one of the right
+// kind, otherwise make a new one. Startup and File > Open both come here --
+// they used to have a copy each, and the copy at startup had never heard of a
+// PDF.
+void MainWindow_OpenDocument(Document* newDoc) {
     if (!newDoc) return;
 
     Tab* tab = App_GetActiveTab();
     Document* doc = tab ? tab->document : NULL;
+
+    // A PDF always gets a tab of its own: there is no editor to reuse, and
+    // the view owns the file rather than a copy of its contents.
+    if (newDoc->format == FORMAT_PDF) {
+        int idx = App_CreateTabEx(NULL, FORMAT_PLAIN);
+        if (idx < 0) {
+            Document_Destroy(newDoc);
+            return;
+        }
+
+        Tab* fresh = g_app->tabs[idx];
+        HWND view = PdfView_Create(g_app->hMainWindow, newDoc->filePath);
+        if (!view) {
+            MessageBoxW(g_app->hMainWindow,
+                L"That PDF could not be opened.\n\n"
+                L"It may be damaged, or protected with a password.",
+                APP_NAME, MB_ICONWARNING);
+            Document_Destroy(newDoc);
+            return;
+        }
+
+        Document_Destroy(fresh->document);
+        fresh->document = newDoc;
+        fresh->hPdfView = view;
+        ShowWindow(fresh->hEditor, SW_HIDE);
+
+        RECT rc;
+        GetClientRect(g_app->hMainWindow, &rc);
+        MainWindow_OnSize(g_app->hMainWindow, SIZE_RESTORED, rc.right, rc.bottom);
+
+        TabControl_UpdateTabTitle(idx);
+        MainWindow_UpdateTitle();
+
+        WCHAR status[64];
+        PdfView_Describe(view, status, 64);
+        StatusBar_SetMessage(status);
+        return;
+    }
 
     BOOL wantRich = FORMAT_IS_RICH(newDoc->format);
     BOOL viewMatches = tab && tab->hEditor &&
@@ -546,8 +589,11 @@ void MainWindow_OnSize(HWND hwnd, UINT state, int cx, int cy) {
     // The toolbar reflects what the active tab is showing: a laid-out page has
     // no character formatting yet, so that half of the bar goes grey there too.
     Tab* tab = App_GetActiveTab();
-    FormatBar_UpdateVisibility(tab ? tab->hEditor : NULL,
-                               tab && tab->hPageView);
+
+    // A PDF tab has an editor underneath it holding nothing, so the bar is
+    // told there is none: what is on screen cannot be typed into.
+    HWND barEditor = (tab && !tab->hPdfView) ? tab->hEditor : NULL;
+    FormatBar_UpdateVisibility(barEditor, tab && tab->hPageView);
 
     int barHeight = FormatBar_Height();
     if (barHeight > 0) {
@@ -558,7 +604,9 @@ void MainWindow_OnSize(HWND hwnd, UINT state, int cx, int cy) {
     // Position whichever view this tab is showing, in the same rectangle.
     if (tab) {
         int top = tabHeight + barHeight;
-        HWND view = tab->hPageView ? tab->hPageView : tab->hEditor;
+        HWND view = tab->hPdfView  ? tab->hPdfView
+                  : tab->hPageView ? tab->hPageView
+                                   : tab->hEditor;
         if (view) {
             SetWindowPos(view, NULL, 0, top, cx, cy - top - statusHeight, SWP_NOZORDER);
         }
@@ -1295,7 +1343,45 @@ static void ResolveRevisions(HWND hwnd, BOOL accept) {
     StatusBar_SetMessage(message);
 }
 
+// A PDF is shown, not edited. The commands that would change a document, or
+// lay one out, or print one, all mean "the document in this tab" -- and this
+// tab is holding somebody else's file that opennote cannot yet write.
+//
+// Saying so once, here, beats each command finding out for itself.
+static BOOL RefusedForPdf(HWND hwnd, int id) {
+    Tab* tab = App_GetActiveTab();
+    if (!tab || !tab->hPdfView) return FALSE;
+
+    switch (id) {
+        case IDM_FILE_SAVE:
+        case IDM_FILE_SAVEAS:
+        case IDM_FILE_PRINT:
+        case IDM_FILE_PRINT_PREVIEW:
+        case IDM_FILE_EXPORT_PDF:
+        case IDM_FILE_PAGE_SETUP:
+        case IDM_VIEW_PAGE_LAYOUT:
+        case IDM_INSERT_PICTURE:
+        case IDM_INSERT_PAGE_NUMBERS:
+        case IDM_INSERT_TOC:
+        case IDM_INSERT_DATE_FIELD:
+        case IDM_REVIEW_NEW_COMMENT:
+        case IDM_REVIEW_COMMENTS:
+        case IDM_REVIEW_ACCEPT_ALL:
+        case IDM_REVIEW_REJECT_ALL:
+            MessageBoxW(hwnd,
+                L"This PDF can be read but not changed.\n\n"
+                L"Filling in a form and signing one are the next thing along -- "
+                L"see the roadmap.",
+                APP_NAME, MB_ICONINFORMATION);
+            return TRUE;
+    }
+
+    return FALSE;
+}
+
 void MainWindow_OnCommand(HWND hwnd, int id, HWND hwndCtl, UINT codeNotify) {
+    if (RefusedForPdf(hwnd, id)) return;
+
     (void)hwndCtl;
     (void)codeNotify;
 
@@ -1325,7 +1411,7 @@ void MainWindow_OnCommand(HWND hwnd, int id, HWND hwndCtl, UINT codeNotify) {
                     Document* newDoc = Document_CreateFromFile(path);
                     if (newDoc) {
                         // If current tab is empty and unmodified, reuse it
-                        OpenDocumentInTab(newDoc);
+                        MainWindow_OpenDocument(newDoc);
                         App_AddRecentFile(path);
                     }
                 }
@@ -1338,7 +1424,7 @@ void MainWindow_OnCommand(HWND hwnd, int id, HWND hwndCtl, UINT codeNotify) {
                 if (Dialogs_NotesBrowser(hwnd, &noteId) && noteId > 0) {
                     Document* newDoc = Document_CreateFromNote(noteId);
                     if (newDoc) {
-                        OpenDocumentInTab(newDoc);
+                        MainWindow_OpenDocument(newDoc);
                     }
                 }
             }
@@ -1676,7 +1762,7 @@ void MainWindow_OnCommand(HWND hwnd, int id, HWND hwndCtl, UINT codeNotify) {
                     if (GetFileAttributesW(path) != INVALID_FILE_ATTRIBUTES) {
                         Document* newDoc = Document_CreateFromFile(path);
                         if (newDoc) {
-                            OpenDocumentInTab(newDoc);
+                            MainWindow_OpenDocument(newDoc);
                             App_AddRecentFile(path);
                         }
                     } else {

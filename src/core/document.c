@@ -14,6 +14,7 @@ DocumentFormat Document_FormatForPath(const WCHAR* path) {
 
     if (_wcsicmp(ext, L".rtf") == 0)  return FORMAT_RTF;
     if (_wcsicmp(ext, L".docx") == 0) return FORMAT_DOCX;
+    if (_wcsicmp(ext, L".pdf") == 0)  return FORMAT_PDF;
     return FORMAT_PLAIN;
 }
 
@@ -234,6 +235,13 @@ BOOL Document_SaveAs(Document* doc, HWND hEditor, const WCHAR* path) {
 // Load document
 BOOL Document_Load(Document* doc, HWND hEditor) {
     if (!doc || !hEditor) return FALSE;
+
+    // A PDF is shown by a view of its own, which opens the file itself. There
+    // is nothing for the editor to hold.
+    if (doc->format == FORMAT_PDF) {
+        doc->modified = FALSE;
+        return TRUE;
+    }
 
     if (doc->type == DOC_TYPE_NOTE) {
         // Load from database

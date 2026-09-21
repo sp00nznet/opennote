@@ -410,9 +410,11 @@ void App_CloseTab(int index) {
     // Hide both views
     ShowWindow(tab->hEditor, SW_HIDE);
     if (tab->hPageView) ShowWindow(tab->hPageView, SW_HIDE);
+    if (tab->hPdfView)  ShowWindow(tab->hPdfView, SW_HIDE);
 
     // Cleanup
     if (tab->document) Document_Destroy(tab->document);
+    if (tab->hPdfView) DestroyWindow(tab->hPdfView);
     if (tab->hPageView) DestroyWindow(tab->hPageView);
     if (tab->hEditor) DestroyWindow(tab->hEditor);
     free(tab);
@@ -453,6 +455,7 @@ void App_SetActiveTab(int index) {
         Tab* previous = g_app->tabs[g_app->activeTab];
         ShowWindow(previous->hEditor, SW_HIDE);
         if (previous->hPageView) ShowWindow(previous->hPageView, SW_HIDE);
+        if (previous->hPdfView)  ShowWindow(previous->hPdfView, SW_HIDE);
     }
 
     g_app->activeTab = index;
@@ -460,7 +463,14 @@ void App_SetActiveTab(int index) {
 
     // Show this tab's, which may be the laid-out one.
     Tab* tab = g_app->tabs[index];
-    if (tab && tab->hPageView) {
+    if (tab && tab->hPdfView) {
+        ShowWindow(tab->hPdfView, SW_SHOW);
+        SetFocus(tab->hPdfView);
+
+        RECT rc;
+        GetClientRect(g_app->hMainWindow, &rc);
+        SendMessageW(g_app->hMainWindow, WM_SIZE, SIZE_RESTORED, MAKELPARAM(rc.right, rc.bottom));
+    } else if (tab && tab->hPageView) {
         ShowWindow(tab->hPageView, SW_SHOW);
         SetFocus(tab->hPageView);
 

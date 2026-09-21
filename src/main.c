@@ -644,29 +644,7 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPWSTR lpCmdLi
         // Check if file exists
         if (GetFileAttributesW(path) != INVALID_FILE_ATTRIBUTES) {
             Document* doc = Document_CreateFromFile(path);
-            if (doc) {
-                Tab* tab = App_GetActiveTab();
-
-                // The startup tab is a plain text view. An .rtf argument needs
-                // the rich one, so it gets its own tab rather than being poured
-                // into a control that would show its markup.
-                if (FORMAT_IS_RICH(doc->format)) {
-                    int idx = App_CreateTabEx(doc->title, doc->format);
-                    if (idx >= 0) {
-                        Document_Destroy(g_app->tabs[idx]->document);
-                        g_app->tabs[idx]->document = doc;
-                        Document_Load(doc, g_app->tabs[idx]->hEditor);
-                        TabControl_UpdateTabTitle(idx);
-                        MainWindow_UpdateTitle();
-                    }
-                } else if (tab) {
-                    Document_Destroy(tab->document);
-                    tab->document = doc;
-                    Document_Load(doc, tab->hEditor);
-                    TabControl_UpdateTabTitle(tab->index);
-                    MainWindow_UpdateTitle();
-                }
-            }
+            if (doc) MainWindow_OpenDocument(doc);
         }
     }
 
