@@ -549,7 +549,8 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPWSTR lpCmdLi
     // Initialize common controls
     INITCOMMONCONTROLSEX icex = {
         .dwSize = sizeof(icex),
-        .dwICC = ICC_TAB_CLASSES | ICC_BAR_CLASSES | ICC_STANDARD_CLASSES | ICC_LISTVIEW_CLASSES
+        .dwICC = ICC_TAB_CLASSES | ICC_BAR_CLASSES | ICC_STANDARD_CLASSES |
+                 ICC_LISTVIEW_CLASSES | ICC_LINK_CLASS
     };
     InitCommonControlsEx(&icex);
 

@@ -161,6 +161,9 @@
 #define IDC_CREDS_GOOGLE_SECRET 1145
 #define IDC_CREDS_HELP          1146
 #define IDC_CREDS_CLEAR         1147
+#define IDC_ABOUT_NAME          1148
+#define IDC_ABOUT_VERSION       1149
+#define IDC_ABOUT_LINKS         1150
 
 // Status bar parts
 #define SB_PART_MESSAGE         0

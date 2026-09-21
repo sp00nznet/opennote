@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- **A new icon.** The old one was a leather notebook and a pen, painted at 256 pixels;
+  at the size an icon is actually seen -- 16 pixels, in the title bar and the taskbar --
+  it was a brown blob. The new one is a page with a folded corner, a heading and two
+  lines of text: flat colour, hard edges, and drawn by `tools/make_icon.py` so it can be
+  changed by editing numbers rather than repainted. Below 20 pixels it drops to a heading
+  and one line, because three bars in sixteen pixels is a smudge.
+- **The product is written "opennote"** — lower case, matching the repository. The title
+  bar, every message box, the About box, the Help menu, the version resource and the
+  installer's display name all say it that way now. The executable, the `%APPDATA%`
+  directory and the registry entries keep their capitals: renaming those would orphan
+  every existing installation's database.
+- **The About box** says what this program is -- it still described "a tabbed text editor
+  with SQLite note storage" -- and links to the repository and the releases page. Its
+  version number now comes from `APP_VERSION` rather than being typed into the dialog and
+  left behind at the next release.
+
 ### Added
 - **A screen for your own OAuth credentials** — Settings → Default Settings… → Sync
   Accounts… → Credentials…. OpenNote ships no API keys and never has: an installed copy

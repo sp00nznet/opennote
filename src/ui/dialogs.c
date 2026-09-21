@@ -6,12 +6,32 @@ void Dialogs_About(HWND hParent) {
     DialogBoxW(g_app->hInstance, MAKEINTRESOURCEW(IDD_ABOUT), hParent, AboutProc);
 }
 
+#define REPO_URL     L"https://github.com/sp00nznet/opennote"
+#define RELEASES_URL L"https://github.com/sp00nznet/opennote/releases/latest"
+
 // About dialog procedure
 INT_PTR CALLBACK AboutProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
-    (void)lParam;
     switch (msg) {
-        case WM_INITDIALOG:
+        case WM_INITDIALOG: {
+            // The version comes from the one place that has it, rather than
+            // being typed into the dialog and left behind at the next release.
+            WCHAR version[64];
+            swprintf_s(version, 64, L"Version %s", APP_VERSION);
+            SetDlgItemTextW(hwnd, IDC_ABOUT_VERSION, version);
             return TRUE;
+        }
+
+        case WM_NOTIFY: {
+            const NMHDR* note = (const NMHDR*)lParam;
+            if (note->idFrom != IDC_ABOUT_LINKS) break;
+            if (note->code != NM_CLICK && note->code != NM_RETURN) break;
+
+            const NMLINK* link = (const NMLINK*)lParam;
+            const WCHAR* url = (wcscmp(link->item.szID, L"releases") == 0)
+                             ? RELEASES_URL : REPO_URL;
+            ShellExecuteW(hwnd, L"open", url, NULL, NULL, SW_SHOWNORMAL);
+            return TRUE;
+        }
 
         case WM_COMMAND:
             if (LOWORD(wParam) == IDOK || LOWORD(wParam) == IDCANCEL) {

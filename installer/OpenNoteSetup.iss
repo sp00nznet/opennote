@@ -4,7 +4,9 @@
 ; Version comes from the build so it cannot drift from the tag that shipped:
 ;   ISCC.exe /DMyAppVersion=0.2.0 installer\OpenNoteSetup.iss
 
-#define MyAppName "OpenNote"
+; Lower case: the product is "opennote". AppId is untouched, so an existing
+; installation still upgrades in place.
+#define MyAppName "opennote"
 #ifndef MyAppVersion
   #define MyAppVersion "0.0.0"
 #endif
@@ -45,7 +47,7 @@ Name: "english"; MessagesFile: "compiler:Default.isl"
 
 [Tasks]
 Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{cm:AdditionalIcons}"; Flags: unchecked
-Name: "associate"; Description: "Offer OpenNote as a handler for .txt, .log, .md and .ini"; GroupDescription: "File associations:"
+Name: "associate"; Description: "Offer opennote as a handler for .txt, .log, .md and .ini"; GroupDescription: "File associations:"
 
 [Files]
 Source: "..\build\bin\{#MyAppExeName}"; DestDir: "{app}"; Flags: ignoreversion
@@ -63,7 +65,7 @@ Filename: "{app}\{#MyAppExeName}"; Description: "{cm:LaunchProgram,{#StringChang
 ; whatever the user chose at the elevation prompt.
 
 ; "Open with OpenNote" on the context menu for any file.
-Root: HKA; Subkey: "Software\Classes\*\shell\OpenWithOpenNote"; ValueType: string; ValueName: ""; ValueData: "Open with OpenNote"; Flags: uninsdeletekey
+Root: HKA; Subkey: "Software\Classes\*\shell\OpenWithOpenNote"; ValueType: string; ValueName: ""; ValueData: "Open with opennote"; Flags: uninsdeletekey
 Root: HKA; Subkey: "Software\Classes\*\shell\OpenWithOpenNote"; ValueType: string; ValueName: "Icon"; ValueData: "{app}\{#MyAppExeName},0"
 Root: HKA; Subkey: "Software\Classes\*\shell\OpenWithOpenNote\command"; ValueType: string; ValueName: ""; ValueData: """{app}\{#MyAppExeName}"" ""%1"""
 

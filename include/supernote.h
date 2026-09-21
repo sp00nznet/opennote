@@ -27,7 +27,11 @@
 #include "sqlite3.h"
 
 // Application info
-#define APP_NAME        L"OpenNote"
+// Lower case on purpose: the product is "opennote", the repository is
+// sp00nznet/opennote, and the title bar should agree with both. The executable,
+// the data directory and the registry entries keep their capitals -- renaming
+// those would orphan every existing installation's database.
+#define APP_NAME        L"opennote"
 #define APP_VERSION     L"0.9.0"
 #define APP_CLASS_NAME  L"OpenNoteMainWindow"
 
