@@ -7,6 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **A PDF opens and is shown.** opennote has written PDFs since v0.8 and could not read
+  one; a `.pdf` now opens in a tab and draws its pages — fitted to the window, scrolled
+  with the wheel, `Page Up` / `Page Down` by a page, `Ctrl`+wheel to zoom, `Ctrl+0` to fit
+  again. Windows renders each page (it has shipped the renderer since 8.1) and WIC turns
+  it into a bitmap, so there is no PDF library here either. Pages are rendered as they
+  come into view and dropped as they leave, keeping eight.
+- **A picture can be any format WIC reads** — PNG, JPEG, GIF, BMP, TIFF — and it goes into
+  the document rather than only into the view. Insert → Picture used to push it straight
+  at the RichEdit control, which took bitmaps only and left the model none the wiser, so
+  saving to `.docx` wrote a document with no picture in it. The chosen file's own bytes
+  are what the `.docx` carries now.
+
+### Fixed
+- **A PDF tab is honest about what it is**: the formatting toolbar greys out and the
+  commands that would change, lay out or print the document say so, rather than acting on
+  an editor holding nothing.
+- Startup and File → Open had a copy each of "open this document in a tab", and the one at
+  startup had never heard of a PDF. There is one now.
+
 ## [0.10.0] - 2026-09-21
 
 **The business tier: what a company cannot leave Word for, as distinct from what a

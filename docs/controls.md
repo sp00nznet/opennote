@@ -157,6 +157,25 @@ The status bar shows the page count and the zoom while you are in this view.
 
 ---
 
+## The PDF view
+
+A `.pdf` opens in a tab of its own and is **shown, not edited** — filling in a form and
+signing one are the next thing along, and the commands that would change the document say
+so rather than half-working.
+
+| Key | What it does |
+|-----|--------------|
+| `↑` `↓` | Scroll a little |
+| `Page Up` / `Page Down` | A page |
+| `Home` / `End` | The first page / the last |
+| Wheel | Scroll |
+| `Ctrl` + wheel | Zoom |
+| `Ctrl+0` | Fit the page across the window, which is how it opens |
+
+The status bar shows the page count and the zoom.
+
+---
+
 ## Where things are kept
 
 - Notes, settings, recent files and the session: `%APPDATA%\OpenNote\opennote.db`

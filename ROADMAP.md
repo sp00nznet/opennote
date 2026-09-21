@@ -228,8 +228,10 @@ opennote writes a PDF today and cannot read one. That is a one-way door with a l
 people standing at it: the form you have to fill in and send back arrives as a PDF, and
 the free tools for it are adware or a web upload.
 
-- [ ] **Render.** Windows ships `Windows.Data.Pdf`, which turns a page into a bitmap.
+- [x] **Render.** Windows ships `Windows.Data.Pdf`, which turns a page into a bitmap.
       No parser needed to *show* a PDF, and it is the fastest way to something usable.
+      Done: a `.pdf` opens in a tab, `--pdf-info` reports it on the command line, and the
+      self-check writes a PDF by hand, opens it and asserts there is ink on the render.
 - [ ] **Fill in a form.** AcroForm fields are objects in the file; filling one means
       setting its value and appending an incremental update, which is a bounded amount
       of PDF parsing — the cross-reference table and the objects a field touches.

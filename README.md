@@ -109,6 +109,12 @@ heading — so the numbers follow the document instead of describing where it us
 **Export to PDF** goes through Windows' own PDF printer, so there is no PDF library in
 here; the output is vector and the text in it is still text.
 
+**And, as of v0.11, a PDF opens.** It gets a tab of its own and shows its pages — Windows
+has shipped the renderer since 8.1, so there is still no PDF library in here. It is
+read-only for now: filling in a form field and stamping a signature are what v0.11 is
+for, and they are the reason this matters — the form you have to fill in and send back
+arrives as a PDF, and the free tools for it are adware or a web upload.
+
 The stretch is the part Word actually gets paid for: `.docx`, real page layout, `.doc`,
 track changes. Everything needed for that is already in Windows and already paid for.
 DirectWrite does the text shaping, `ISpellChecker` does spelling, Microsoft Print to PDF

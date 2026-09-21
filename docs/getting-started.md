@@ -46,6 +46,7 @@ because there was nothing there to lose.
 | `.txt`, `.md`, source files | Plain text, with syntax highlighting where it recognises the extension |
 | `.rtf` | Rich text — fonts, colours, lists, pictures, tables |
 | `.docx` | Word documents — styles, numbering, pictures, headers and footers, footnotes, tables, tracked changes, comments, fields |
+| `.pdf` | Shown, a page at a time. Read-only for now |
 | anything else | As text |
 
 Everything it opens, it saves back in the same format.
@@ -88,6 +89,10 @@ it is still text, selectable and searchable, with the fonts embedded.
 
 **File → Page Setup…** sets paper size, orientation and margins, and the layout view
 follows it immediately.
+
+**Opening a PDF** works too, as of v0.11: it gets a tab of its own and shows its pages,
+fitted to the window, `Page Up` and `Page Down` by a page, `Ctrl`+wheel to zoom. It is
+read-only — filling in a form and signing one are what comes next.
 
 ---
 
