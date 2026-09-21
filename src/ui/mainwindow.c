@@ -748,7 +748,8 @@ static BOOL RichHasPicture(HWND hEditor) {
 // printout is a worse trade than losing the engine's pagination. Delete this
 // fallback, and `Rich_PrintToDC` with it, when images land in the model.
 static int PrintRichDocumentTo(HWND hwnd, HWND hEditor, const WCHAR* printerName,
-                               HDC hDC, const WCHAR* title, const WCHAR* outputFile) {
+                               HDC hDC, const WCHAR* title, const WCHAR* outputFile,
+                               const DocModel* source) {
     // No printer name means Direct2D has nothing to address, so the control
     // prints instead -- as it does for a document holding a picture.
     if (!printerName || !printerName[0] || RichHasPicture(hEditor)) {
@@ -764,7 +765,7 @@ static int PrintRichDocumentTo(HWND hwnd, HWND hEditor, const WCHAR* printerName
         return Rich_PrintToDC(hEditor, hDC, &rc, title, outputFile);
     }
 
-    DocModel* model = DocView_Capture(hEditor);
+    DocModel* model = DocView_CaptureWith(hEditor, source);
     if (!model) return 0;
 
     int pages = 0;
@@ -796,7 +797,8 @@ static void PrintRichDocument(HWND hwnd, HWND hEditor, Document* doc) {
     if (!PrintDlgW(&pd)) return;
 
     int pages = PrintRichDocumentTo(hwnd, hEditor, ChosenPrinter(&pd), pd.hDC,
-                                    doc ? Document_GetTitle(doc) : L"Document", NULL);
+                                    doc ? Document_GetTitle(doc) : L"Document", NULL,
+                                    doc ? doc->source : NULL);
 
     DeleteDC(pd.hDC);
     if (pd.hDevMode) GlobalFree(pd.hDevMode);
@@ -847,7 +849,8 @@ static void ExportToPdf(HWND hwnd, HWND hEditor, Document* doc) {
 
     HCURSOR old = SetCursor(LoadCursorW(NULL, IDC_WAIT));
     int pages = PrintRichDocumentTo(hwnd, hEditor, LAYOUTPRINT_PDF_DEVICE, hDC,
-                                    doc ? Document_GetTitle(doc) : L"Document", path);
+                                    doc ? Document_GetTitle(doc) : L"Document", path,
+                                    doc ? doc->source : NULL);
     SetCursor(old);
     if (hDC) DeleteDC(hDC);
 
@@ -1047,7 +1050,8 @@ void MainWindow_OnCommand(HWND hwnd, int id, HWND hwndCtl, UINT codeNotify) {
                 // below renders unformatted text into a fixed box and cannot
                 // show either.
                 if (!PageView_Show(hwnd, hEditor,
-                                   doc ? Document_GetTitle(doc) : NULL)) {
+                                   doc ? Document_GetTitle(doc) : NULL,
+                                   doc ? doc->source : NULL)) {
                     MessageBoxW(hwnd, L"The page preview could not be prepared.",
                                 APP_NAME, MB_ICONWARNING);
                 }

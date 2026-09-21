@@ -42,6 +42,7 @@ float Layout_PageContentBottom(const LayoutResult* r, int pageIndex);
 // page boundary counts once per page it appears on.
 int   Layout_PageTextCount(const LayoutResult* r, int pageIndex);
 int   Layout_PageCellCount(const LayoutResult* r, int pageIndex);
+int   Layout_PageImageCount(const LayoutResult* r, int pageIndex);
 
 // ---------------------------------------------------------------------------
 // Geometry: where a position is, and what is under a point

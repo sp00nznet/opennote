@@ -70,6 +70,19 @@ static LaidCell* AddCell(LaidPage* page) {
     return c;
 }
 
+static LaidImage* AddImage(LaidPage* page) {
+    if (page->imageCount == page->imageCap) {
+        int cap = page->imageCap ? page->imageCap * 2 : 8;
+        LaidImage* grown = (LaidImage*)realloc(page->images, (size_t)cap * sizeof(LaidImage));
+        if (!grown) return NULL;
+        page->images = grown;
+        page->imageCap = cap;
+    }
+    LaidImage* i = &page->images[page->imageCount++];
+    memset(i, 0, sizeof(*i));
+    return i;
+}
+
 // ---------------------------------------------------------------------------
 // Flattening a paragraph
 // ---------------------------------------------------------------------------
@@ -99,7 +112,13 @@ static BOOL FlattenPara(const DocPara* para, FlatText* out) {
         size_t pieceLen;
         WCHAR one[2];
 
-        if (r->tab) {
+        if (r->image) {
+            // A picture is one character wide in the text, so every offset
+            // either side of it still means what it meant in the model. A
+            // space is what goes there: it draws nothing, and the picture is
+            // placed over it once the line is laid out.
+            one[0] = L' '; one[1] = 0; piece = one; pieceLen = 1;
+        } else if (r->tab) {
             one[0] = L'\t'; one[1] = 0; piece = one; pieceLen = 1;
         } else if (r->lineBreak) {
             // A hard break inside the paragraph, which DirectWrite treats as a
@@ -473,6 +492,67 @@ static LaidText* Place(Flow* f, IDWriteTextLayout* layout, float x, float width,
     return t;
 }
 
+// Put a paragraph's pictures on the page, over the spaces standing in for
+// them. Answers how far past the line's own bottom the tallest one reaches,
+// which is what the paragraph has to make room for.
+//
+// ponytail: a picture takes a line to itself in effect -- text on the same
+// line is not pushed aside, it is drawn over. Flowing text around a picture
+// needs a DirectWrite inline object and a custom renderer to go with it, and
+// a picture in a document is almost always alone on its line.
+static float PlaceImages(Flow* f, const DocPara* para, const LaidText* piece) {
+    if (!piece || !piece->layout) return 0.0f;
+
+    float overflow = 0.0f;
+    unsigned at = 0;
+
+    for (const DocRun* r = para->runs; r; r = r->next) {
+        unsigned length = 1;
+        if (!r->image && !r->tab && !r->lineBreak) {
+            length = r->text ? (unsigned)wcslen(r->text) : 0;
+        }
+        if (!length) continue;
+
+        unsigned start = at;
+        at += length;
+
+        if (!r->image) continue;
+        if (start < piece->textStart || start >= piece->textStart + piece->textLen) continue;
+
+        float px = 0.0f, py = 0.0f;
+        DWRITE_HIT_TEST_METRICS metrics = {};
+        if (FAILED(piece->layout->HitTestTextPosition(start - piece->textStart, FALSE,
+                                                      &px, &py, &metrics))) {
+            continue;
+        }
+
+        LaidImage* laid = AddImage(f->page);
+        if (!laid) continue;
+
+        // 914400 EMU to the inch, 96 DIPs to the inch.
+        laid->image = r->image;
+        laid->width = r->image->widthEmu / 9525.0f;
+        laid->height = r->image->heightEmu / 9525.0f;
+        laid->x = piece->x + px;
+        laid->y = piece->y + py;
+
+        if (laid->width <= 0.0f) laid->width = 96.0f;
+        if (laid->height <= 0.0f) laid->height = 96.0f;
+
+        // Keep a picture inside the text column rather than off the page.
+        float roomRight = f->result->pageWidth - f->result->marginRight - laid->x;
+        if (roomRight > 8.0f && laid->width > roomRight) {
+            laid->height *= roomRight / laid->width;
+            laid->width = roomRight;
+        }
+
+        float past = laid->height - metrics.height;
+        if (past > overflow) overflow = past;
+    }
+
+    return overflow;
+}
+
 // Place a paragraph, splitting it across pages at line boundaries when it does
 // not fit. A paragraph taller than a whole page is split as many times as it
 // takes rather than being dropped or allowed to overflow.
@@ -554,8 +634,9 @@ static void PlacePara(Flow* f, const DocPara* para, float x, float width,
         float height = LayoutHeight(layout);
 
         if (height <= SpaceLeft(f) || remaining == 0) {
-            Place(f, layout, x, width, para, isCellText, tail, tailCount, from, remaining);
-            f->y += height;
+            LaidText* piece = Place(f, layout, x, width, para, isCellText,
+                                    tail, tailCount, from, remaining);
+            f->y += height + PlaceImages(f, para, piece);
             break;
         }
 
@@ -610,7 +691,11 @@ static void PlacePara(Flow* f, const DocPara* para, float x, float width,
 
         IDWriteTextLayout* head = MakeLayout(&f->ctx, flat.text + from, take,
                                              tail, tailCount, width, &para->props);
-        if (head) Place(f, head, x, width, para, isCellText, tail, tailCount, from, take);
+        if (head) {
+            LaidText* piece = Place(f, head, x, width, para, isCellText,
+                                    tail, tailCount, from, take);
+            PlaceImages(f, para, piece);
+        }
 
         from += take;
         NewPage(f);
@@ -803,6 +888,7 @@ extern "C" void Layout_Free(LayoutResult* r) {
         }
         free(p->texts);
         free(p->cells);
+        free(p->images);
     }
     free(r->pages);
 
@@ -830,6 +916,11 @@ extern "C" int Layout_PageCellCount(const LayoutResult* r, int i) {
     return r->pages[i].cellCount;
 }
 
+extern "C" int Layout_PageImageCount(const LayoutResult* r, int i) {
+    if (!r || i < 0 || i >= r->pageCount) return 0;
+    return r->pages[i].imageCount;
+}
+
 extern "C" float Layout_PageContentBottom(const LayoutResult* r, int i) {
     if (!r || i < 0 || i >= r->pageCount) return 0.0f;
 
@@ -842,6 +933,10 @@ extern "C" float Layout_PageContentBottom(const LayoutResult* r, int i) {
     }
     for (int j = 0; j < page->cellCount; j++) {
         float b = page->cells[j].y + page->cells[j].height;
+        if (b > bottom) bottom = b;
+    }
+    for (int j = 0; j < page->imageCount; j++) {
+        float b = page->images[j].y + page->images[j].height;
         if (b > bottom) bottom = b;
     }
     return bottom;
@@ -1474,6 +1569,50 @@ extern "C" BOOL Layout_SelfTest(char* failure, size_t failureSize) {
         if (wcscmp(marker, L"\x25E6") != 0) FAIL("a nested bullet did not change shape");
 
         #undef MARKER
+    }
+
+    // --- a picture takes up the room it says it does ----------------------
+    {
+        doc = Doc_New();
+        if (!doc) FAIL("could not allocate a model");
+
+        // The bytes are never decoded to lay a picture out -- only its stated
+        // size matters here -- so four of them will do.
+        static const BYTE fake[4] = { 1, 2, 3, 4 };
+
+        DocPara* p = Doc_AddPara(doc);
+        if (!p) FAIL("could not build the picture case");
+        Doc_AddRun(p, L"Before", -1, &plain);
+        if (!Doc_AddImageRun(p, fake, sizeof(fake), L"image/png", 914400, 457200)) {
+            FAIL("a picture could not be added to the model");
+        }
+        AddTextPara(doc, L"After", &plain);
+
+        r = Layout_Build(doc, L"Calibri", 11.0f);
+        if (!r) FAIL("Layout_Build failed on a document with a picture");
+
+        if (Layout_PageImageCount(r, 0) != 1) FAIL("a picture was not placed on the page");
+
+        const LaidImage* laid = &r->pages[0].images[0];
+        // An inch is 96 DIPs; half an inch is 48.
+        if (laid->width < 95.0f || laid->width > 97.0f)  FAIL("a picture is not the width it stated");
+        if (laid->height < 47.0f || laid->height > 49.0f) FAIL("a picture is not the height it stated");
+        if (laid->x < r->marginLeft) FAIL("a picture was placed outside the left margin");
+        if (laid->image->len != sizeof(fake)) FAIL("the laid-out picture is not the one in the model");
+
+        // The paragraph after it has to clear the picture rather than run
+        // through it.
+        float pictureBottom = laid->y + laid->height;
+        BOOL clear = TRUE;
+        for (int i = 0; i < r->pages[0].textCount; i++) {
+            const LaidText* t = &r->pages[0].texts[i];
+            if (t->para == p) continue;
+            if (t->y < pictureBottom - 1.0f) clear = FALSE;
+        }
+        if (!clear) FAIL("the paragraph after a picture was drawn over it");
+
+        Layout_Free(r); r = NULL;
+        Doc_Free(doc); doc = NULL;
     }
 
     // --- an empty document still produces a page --------------------------

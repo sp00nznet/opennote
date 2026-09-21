@@ -18,6 +18,7 @@
 #include "layout/layout.h"
 #include "layout/layout_internal.h"
 #include "layout/layoutprint.h"
+#include "layout/layoutimage.h"
 
 #include <d2d1_1.h>
 #include <d3d11.h>
@@ -65,6 +66,20 @@ static void DrawPage(ID2D1DeviceContext* dc, const LaidPage* page,
 
         dc->DrawTextLayout(D2D1::Point2F(lt->x, lt->y), lt->layout, text,
                            D2D1_DRAW_TEXT_OPTIONS_NONE);
+    }
+
+    for (int m = 0; m < page->imageCount; m++) {
+        const LaidImage* pic = &page->images[m];
+
+        // Decoded per page rather than cached: a print is one pass, and the
+        // bitmap belongs to this page's command list anyway.
+        ID2D1Bitmap* bitmap = LayoutImage_Create(dc, pic->image);
+        if (!bitmap) continue;
+
+        dc->DrawBitmap(bitmap,
+                       D2D1::RectF(pic->x, pic->y, pic->x + pic->width, pic->y + pic->height),
+                       1.0f, D2D1_BITMAP_INTERPOLATION_MODE_LINEAR, NULL);
+        bitmap->Release();
     }
 }
 

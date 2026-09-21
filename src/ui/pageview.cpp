@@ -18,6 +18,7 @@
 #include "res/resource.h"
 #include "layout/layout.h"
 #include "layout/layout_internal.h"
+#include "layout/layoutimage.h"
 #include "ui/pageview.h"
 #include "ui/editor_rich.h"
 
@@ -73,6 +74,14 @@ struct PageViewState {
     IDWriteFactory*    dwrite;      // for the ruler's numbers, and nothing else
     IDWriteTextFormat* rulerFont;
 
+    // Pictures, decoded once for the device they are drawn on. A document
+    // with the same picture ten times decodes it once.
+    struct {
+        const DocImage* image;
+        ID2D1Bitmap*    bitmap;
+    } pictures[64];
+    int pictureCount;
+
     DocModel* undo[UNDO_MAX];
     int       undoCount;
     DocModel* redo[UNDO_MAX];
@@ -113,7 +122,29 @@ static void PixelsToDip(ID2D1RenderTarget* rt, int px, int py, float* x, float* 
 // Device resources
 // ---------------------------------------------------------------------------
 
+// A bitmap belongs to the render target it was made for, so both go together.
+static void DiscardPictures(PageViewState* st) {
+    for (int i = 0; i < st->pictureCount; i++) {
+        if (st->pictures[i].bitmap) st->pictures[i].bitmap->Release();
+    }
+    st->pictureCount = 0;
+}
+
+static ID2D1Bitmap* PictureFor(PageViewState* st, const DocImage* image) {
+    for (int i = 0; i < st->pictureCount; i++) {
+        if (st->pictures[i].image == image) return st->pictures[i].bitmap;
+    }
+    if (st->pictureCount >= 64) return NULL;
+
+    ID2D1Bitmap* bitmap = LayoutImage_Create(st->target, image);
+    st->pictures[st->pictureCount].image = image;
+    st->pictures[st->pictureCount].bitmap = bitmap;   // NULL is remembered too
+    st->pictureCount++;
+    return bitmap;
+}
+
 static void DiscardTarget(PageViewState* st) {
+    DiscardPictures(st);
     if (st->textBrush) { st->textBrush->Release(); st->textBrush = NULL; }
     if (st->pageBrush) { st->pageBrush->Release(); st->pageBrush = NULL; }
     if (st->lineBrush) { st->lineBrush->Release(); st->lineBrush = NULL; }
@@ -976,6 +1007,17 @@ static void Paint(HWND hwnd, PageViewState* st) {
                                            D2D1_DRAW_TEXT_OPTIONS_NONE);
             }
 
+            for (int m = 0; m < page->imageCount; m++) {
+                const LaidImage* pic = &page->images[m];
+                ID2D1Bitmap* bitmap = PictureFor(st, pic->image);
+                if (!bitmap) continue;
+
+                st->target->DrawBitmap(
+                    bitmap,
+                    D2D1::RectF(pic->x, pic->y, pic->x + pic->width, pic->y + pic->height),
+                    1.0f, D2D1_BITMAP_INTERPOLATION_MODE_LINEAR, NULL);
+            }
+
             if (haveCaret && caretPage == i && st->focused && st->caretOn && !selecting) {
                 st->target->FillRectangle(
                     D2D1::RectF(caretRect.x, caretRect.y,
@@ -1455,10 +1497,11 @@ static void EnsureClass(void) {
     registered = TRUE;
 }
 
-extern "C" BOOL PageView_Show(HWND hOwner, HWND hRichEdit, const WCHAR* docTitle) {
+extern "C" BOOL PageView_Show(HWND hOwner, HWND hRichEdit, const WCHAR* docTitle,
+                              const DocModel* source) {
     if (!hRichEdit) return FALSE;
 
-    DocModel* doc = DocView_Capture(hRichEdit);
+    DocModel* doc = DocView_CaptureWith(hRichEdit, source);
     if (!doc) return FALSE;
 
     PageViewState* st = (PageViewState*)calloc(1, sizeof(PageViewState));

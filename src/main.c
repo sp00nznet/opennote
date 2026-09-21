@@ -128,9 +128,10 @@ static int RunLayoutReport(int argc, WCHAR** argv) {
     wprintf(L"  tables      %d, %d cells\n", Doc_CountTables(doc), Doc_CountCells(doc));
 
     for (int i = 0; i < pages; i++) {
-        wprintf(L"  page %-3d    %d text pieces, %d cell boxes, content to %.1f DIPs\n",
+        wprintf(L"  page %-3d    %d text pieces, %d cell boxes, %d pictures, "
+                L"content to %.1f DIPs\n",
                 i + 1, Layout_PageTextCount(r, i), Layout_PageCellCount(r, i),
-                Layout_PageContentBottom(r, i));
+                Layout_PageImageCount(r, i), Layout_PageContentBottom(r, i));
     }
 
     Layout_Free(r);
@@ -437,6 +438,7 @@ static int RunDocxCheck(int argc, WCHAR** argv) {
                         fileName);
                 failures++;
             } else {
+                RichOle_Attach(rt);
                 SendMessageW(rt, EM_SETTEXTMODE, TM_RICHTEXT, 0);
                 SendMessageW(rt, EM_EXLIMITTEXT, 0, 0x7FFFFFFF);
 
@@ -445,7 +447,10 @@ static int RunDocxCheck(int argc, WCHAR** argv) {
                     wprintf(L"FAIL  %s: converted RTF was rejected by the control\n",
                             fileName);
                     failures++;
-                } else if (!Docx_WriteFromEditor(rt, outPath)) {
+                } else if (!Docx_WriteFromEditorWith(rt, outPath, source)) {
+                    // With the model the view was loaded from, the same way the
+                    // application saves: the control cannot give a picture's
+                    // bytes back, so they come from there.
                     wprintf(L"FAIL  %s: could not be written back as .docx\n", fileName);
                     failures++;
                 } else {

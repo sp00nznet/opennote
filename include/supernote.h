@@ -63,6 +63,7 @@ typedef enum {
 } TextEncoding;
 
 // Forward declarations
+typedef struct DocModel DocModel;
 typedef struct Document Document;
 typedef struct Tab Tab;
 typedef struct AppState AppState;
@@ -92,6 +93,7 @@ extern "C" {
 #include "layout/layout.h"
 #include "layout/layoutprint.h"
 #include "ui/pageview.h"
+#include "ui/richole.h"
 #include "core/docx.h"
 #include "core/fileio.h"
 #include "core/search.h"

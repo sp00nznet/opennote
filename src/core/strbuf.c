@@ -45,10 +45,33 @@ void SB_AddChar(StrBuf* s, char c) {
 void SB_AddF(StrBuf* s, const char* fmt, ...) {
     char tmp[512];
     va_list ap;
+
     va_start(ap, fmt);
     int n = vsnprintf(tmp, sizeof(tmp), fmt, ap);
     va_end(ap);
-    if (n > 0) SB_AddN(s, tmp, (size_t)n < sizeof(tmp) ? (size_t)n : sizeof(tmp) - 1);
+    if (n <= 0) return;
+
+    if ((size_t)n < sizeof(tmp)) {
+        SB_AddN(s, tmp, (size_t)n);
+        return;
+    }
+
+    // Longer than the stack buffer. Format it again into one that fits rather
+    // than adding the first five hundred characters and calling it done: that
+    // silent truncation cut a picture's drawing in half and produced XML no
+    // reader would accept.
+    char* big = (char*)malloc((size_t)n + 1);
+    if (!big) {
+        s->failed = TRUE;
+        return;
+    }
+
+    va_start(ap, fmt);
+    vsnprintf(big, (size_t)n + 1, fmt, ap);
+    va_end(ap);
+
+    SB_AddN(s, big, (size_t)n);
+    free(big);
 }
 
 void SB_AddRtfText(StrBuf* s, const WCHAR* text, int len) {

@@ -8,6 +8,7 @@
 #include "core/doctree.h"
 #include "core/doctree_rtf.h"
 #include "core/strbuf.h"
+#include "core/imagedib.h"
 
 #define MAX_FONTS  64
 #define MAX_COLORS 64
@@ -62,6 +63,47 @@ static void CollectTables(const DocModel* doc, Tables* t) {
     }
 }
 
+// A picture, as RTF.
+//
+// Decoded and then wrapped in a metafile, whatever it arrived as. RichEdit's
+// RTF reader takes \wmetafile and nothing else: given \pngblip or \dibitmap it
+// parses the group, discards it, and reports nothing, so every picture in a
+// document was disappearing on its way to the view. The model still carries
+// the original bytes, and those are what a file gets written back.
+static void EmitPicture(StrBuf* sb, const DocImage* image) {
+    BITMAPINFOHEADER header;
+    size_t pixelsLen = 0;
+    BYTE* pixels = ImageDib_Decode(image->bytes, image->len, &header, &pixelsLen);
+    if (!pixels) return;
+
+    size_t metaLen = 0;
+    BYTE* meta = ImageDib_ToMetafile(pixels, &header, &metaLen);
+    free(pixels);
+    if (!meta) return;
+
+    // Twips: 914400 EMU to the inch, 1440 twips to the inch.
+    int widthTwips = (int)((double)image->widthEmu / 914400.0 * 1440.0);
+    int heightTwips = (int)((double)image->heightEmu / 914400.0 * 1440.0);
+    if (widthTwips <= 0) widthTwips = (int)header.biWidth * 15;
+    if (heightTwips <= 0) heightTwips = (int)header.biHeight * 15;
+
+    // \picw and \pich are in hundredths of a millimetre for a metafile.
+    int widthMm = (int)((double)widthTwips / 1440.0 * 2540.0);
+    int heightMm = (int)((double)heightTwips / 1440.0 * 2540.0);
+
+    SB_AddF(sb, "{\\pict\\wmetafile8\\picw%d\\pich%d\\picwgoal%d\\pichgoal%d ",
+            widthMm, heightMm, widthTwips, heightTwips);
+
+    static const char hexDigits[] = "0123456789abcdef";
+    for (size_t i = 0; i < metaLen; i++) {
+        char pair[3] = { hexDigits[meta[i] >> 4], hexDigits[meta[i] & 0x0F], 0 };
+        SB_Add(sb, pair);
+    }
+
+    SB_Add(sb, "}");
+    free(meta);
+}
+
 static void EmitRun(StrBuf* sb, const DocRun* run, Tables* t) {
     SB_Add(sb, "\\plain");
 
@@ -82,7 +124,8 @@ static void EmitRun(StrBuf* sb, const DocRun* run, Tables* t) {
 
     SB_Add(sb, " ");
 
-    if (run->tab)            SB_Add(sb, "\\tab ");
+    if (run->image)          EmitPicture(sb, run->image);
+    else if (run->tab)       SB_Add(sb, "\\tab ");
     else if (run->lineBreak) SB_Add(sb, "\\line ");
     else                     SB_AddRtfText(sb, run->text, -1);
 }

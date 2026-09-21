@@ -32,6 +32,10 @@ BOOL Docx_WriteModel(const DocModel* doc, const WCHAR* path);
 // Capture a rich text editor window into a model and write that.
 BOOL Docx_WriteFromEditor(HWND hRichEdit, const WCHAR* path);
 
+// The same, told which model the view holds, so that pictures -- which the
+// control will not give back -- survive being saved.
+BOOL Docx_WriteFromEditorWith(HWND hRichEdit, const WCHAR* path, const DocModel* source);
+
 // Human-readable reason the last read or write failed, for the message box.
 const WCHAR* Docx_GetLastError(void);
 

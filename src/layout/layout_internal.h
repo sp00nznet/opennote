@@ -54,12 +54,22 @@ struct LaidCell {
     float x, y, width, height;
 };
 
+// A picture's box on a page. The engine decodes nothing: it works out where
+// the picture goes and how big it is, and whoever has a device draws it.
+struct LaidImage {
+    float x, y, width, height;
+    const DocImage* image;      // not owned
+};
+
 struct LaidPage {
     LaidText* texts;
     int       textCount, textCap;
 
     LaidCell* cells;
     int       cellCount, cellCap;
+
+    LaidImage* images;
+    int        imageCount, imageCap;
 };
 
 struct LayoutResult {

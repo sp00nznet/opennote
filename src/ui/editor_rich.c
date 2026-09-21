@@ -51,6 +51,10 @@ HWND Rich_Create(HWND hParent) {
     );
     if (!h) return NULL;
 
+    // Somewhere to keep an embedded picture. Without it the control drops
+    // every one it reads, silently -- see richole.c.
+    RichOle_Attach(h);
+
     // TM_RICHTEXT keeps formatting on paste and on undo; TM_MULTILEVELUNDO is
     // what makes Ctrl+Z more than a single step.
     SendMessageW(h, EM_SETTEXTMODE, TM_RICHTEXT | TM_MULTILEVELUNDO | TM_MULTICODEPAGE, 0);

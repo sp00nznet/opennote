@@ -22,6 +22,39 @@
 #define CH_ROW_END    0xFFFB
 #define CH_OBJECT     0xFFFC
 
+// The pictures a captured model can re-use, in the order they appear.
+typedef struct {
+    const DocImage* images[256];
+    int             count;
+    int             next;
+} ImageSource;
+
+static void CollectParaImages(const DocPara* para, ImageSource* out) {
+    for (const DocRun* r = para->runs; r; r = r->next) {
+        if (!r->image || out->count >= 256) continue;
+        out->images[out->count++] = r->image;
+    }
+}
+
+static void CollectImages(const DocModel* source, ImageSource* out) {
+    memset(out, 0, sizeof(*out));
+    if (!source) return;
+
+    for (const DocBlock* b = source->blocks; b; b = b->next) {
+        if (b->kind == BLOCK_PARA) {
+            for (const DocPara* p = b->para; p; p = p->next) CollectParaImages(p, out);
+        } else {
+            for (const DocRow* r = b->table.rows; r; r = r->next) {
+                for (const DocCell* c = r->cells; c; c = c->next) {
+                    for (const DocPara* p = c->paras; p; p = p->next) {
+                        CollectParaImages(p, out);
+                    }
+                }
+            }
+        }
+    }
+}
+
 static BOOL IsStructural(WCHAR c) {
     return c == CH_CELL_BREAK || c == CH_ROW_START ||
            c == CH_ROW_END || c == CH_OBJECT || c == 0xFFFA;
@@ -179,7 +212,8 @@ static void ToParaProps(const PARAFORMAT2* pf, ParaProps* out) {
 
 // Add the text between [from, to) to a paragraph, split into runs wherever the
 // character formatting changes, with tabs and structural characters handled.
-static void AddRuns(HWND h, DocPara* para, const WCHAR* text, int from, int to) {
+static void AddRuns(HWND h, DocPara* para, const WCHAR* text, int from, int to,
+                    ImageSource* pictures) {
     if (!para || from >= to) return;
 
     int i = from;
@@ -194,6 +228,21 @@ static void AddRuns(HWND h, DocPara* para, const WCHAR* text, int from, int to) 
             i++;
             continue;
         }
+        if (text[i] == CH_OBJECT) {
+            // An object in the text is a picture the control is holding. It
+            // will not hand the bytes back, so they come from the model the
+            // view was loaded from, matched in order. A picture the control
+            // gained some other way -- pasted in, inserted from a file -- has
+            // nothing to match and is lost here, which is the ceiling on
+            // editing pictures in this view at all.
+            if (pictures && pictures->next < pictures->count) {
+                const DocImage* image = pictures->images[pictures->next++];
+                Doc_AddImageRun(para, image->bytes, image->len, image->contentType,
+                                image->widthEmu, image->heightEmu);
+            }
+            i++;
+            continue;
+        }
         if (IsStructural(text[i])) {
             i++;
             continue;
@@ -203,7 +252,8 @@ static void AddRuns(HWND h, DocPara* para, const WCHAR* text, int from, int to) 
         GetCharFormatAt(h, i, &base);
 
         int j = i + 1;
-        while (j < to && text[j] != L'\t' && !IsStructural(text[j])) {
+        while (j < to && text[j] != L'\t' && text[j] != CH_OBJECT &&
+               !IsStructural(text[j])) {
             CHARFORMAT2W next;
             GetCharFormatAt(h, j, &next);
             if (!SameCharFormat(&base, &next)) break;
@@ -268,7 +318,117 @@ static void CaptureGrid(HWND h, int pos, const PARAFORMAT2* pf, DocBlock* table)
     table->table.gridCount = n;
 }
 
+// Put the pictures back.
+//
+// The control displays a picture perfectly well and then refuses to say where
+// it is: the text it hands back has no object character to match, whichever
+// way it is asked. So each picture goes back on the paragraph it came from,
+// and only when that paragraph still reads exactly as it did -- a paragraph
+// whose text was edited has no way to say where within it the picture was.
+//
+// ponytail: a picture in an edited paragraph is lost on the way back out.
+// The page view holds the model itself and has no such problem; this exists
+// because the RichEdit view is still where typing happens.
+static BOOL SameTextIgnoringPictures(const DocPara* a, const DocPara* b) {
+    unsigned alen = 0, blen = 0;
+    WCHAR* at = Doc_ParaText(a, &alen);
+    WCHAR* bt = Doc_ParaText(b, &blen);
+    if (!at || !bt) {
+        free(at);
+        free(bt);
+        return FALSE;
+    }
+
+    unsigned i = 0, j = 0;
+    BOOL same = TRUE;
+    for (;;) {
+        while (i < alen && at[i] == (WCHAR)DOC_IMAGE_CHAR) i++;
+        while (j < blen && bt[j] == (WCHAR)DOC_IMAGE_CHAR) j++;
+        if (i >= alen || j >= blen) break;
+        if (at[i] != bt[j]) { same = FALSE; break; }
+        i++;
+        j++;
+    }
+
+    if (same) {
+        while (i < alen && at[i] == (WCHAR)DOC_IMAGE_CHAR) i++;
+        while (j < blen && bt[j] == (WCHAR)DOC_IMAGE_CHAR) j++;
+        same = (i >= alen && j >= blen);
+    }
+
+    free(at);
+    free(bt);
+    return same;
+}
+
+static BOOL HasImages(const DocPara* para) {
+    for (const DocRun* r = para->runs; r; r = r->next) {
+        if (r->image) return TRUE;
+    }
+    return FALSE;
+}
+
+static BOOL TextIsOnlyPictures(const DocPara* para) {
+    for (const DocRun* r = para->runs; r; r = r->next) {
+        if (r->image) continue;
+        if (r->tab || r->lineBreak) return FALSE;
+        if (r->text && r->text[0]) return FALSE;
+    }
+    return TRUE;
+}
+
+static void CopyImages(const DocPara* from, DocPara* into) {
+    for (const DocRun* r = from->runs; r; r = r->next) {
+        if (!r->image) continue;
+        Doc_AddImageRun(into, r->image->bytes, r->image->len, r->image->contentType,
+                        r->image->widthEmu, r->image->heightEmu);
+    }
+}
+
+// Walk the two models together, putting each picture back on the paragraph it
+// came from. A paragraph that held nothing but a picture is not in the
+// captured model at all -- the control's text has nothing where a picture is,
+// not even a space -- so it is put back as well.
+static void ReattachImages(DocModel* captured, const DocModel* source) {
+    int sourceCount = Doc_CountParas(source);
+    int si = 0, ci = 0;
+
+    while (si < sourceCount) {
+        DocPara* from = Doc_ParaAt((DocModel*)source, si);
+        if (!from) break;
+
+        if (!HasImages(from)) {
+            si++;
+            ci++;
+            continue;
+        }
+
+        DocPara* into = Doc_ParaAt(captured, ci);
+
+        if (TextIsOnlyPictures(from)) {
+            // A picture on a line of its own: the paragraph itself has to come
+            // back before the picture has anywhere to go.
+            DocPara* fresh = Doc_InsertParaBefore(captured, into);
+            if (fresh) {
+                fresh->props = from->props;
+                CopyImages(from, fresh);
+            }
+        } else if (into && SameTextIgnoringPictures(from, into)) {
+            CopyImages(from, into);
+        }
+        // A paragraph whose text was edited keeps its words and loses its
+        // picture: there is no way to say where in the new text it belonged.
+
+        si++;
+        ci++;
+    }
+}
+
 DocModel* DocView_Capture(HWND h) {
+    return DocView_CaptureWith(h, NULL);
+}
+
+DocModel* DocView_CaptureWith(HWND h, const DocModel* source) {
     if (!h) return NULL;
 
     int textLen = 0;
@@ -289,6 +449,9 @@ DocModel* DocView_Capture(HWND h) {
     DocBlock* table = NULL;
     DocRow*   row = NULL;
     ListRun   lists = {0};
+
+    ImageSource pictures;
+    CollectImages(source, &pictures);
 
     int pos = 0;
     while (pos <= textLen) {
@@ -339,7 +502,7 @@ DocModel* DocView_Capture(HWND h) {
                     if (cp) {
                         ToParaProps(&pf, &cp->props);
                         AssignList(&lists, &cp->props);
-                        AddRuns(h, cp, text, cellStart, i);
+                        AddRuns(h, cp, text, cellStart, i, &pictures);
                     }
                     emitted++;
                     cellStart = i + 1;
@@ -353,7 +516,7 @@ DocModel* DocView_Capture(HWND h) {
                     if (cp) {
                         ToParaProps(&pf, &cp->props);
                         AssignList(&lists, &cp->props);
-                        AddRuns(h, cp, text, cellStart, contentEnd);
+                        AddRuns(h, cp, text, cellStart, contentEnd, &pictures);
                     }
                 }
             }
@@ -371,7 +534,7 @@ DocModel* DocView_Capture(HWND h) {
                 if (para) {
                     ToParaProps(&pf, &para->props);
                     AssignList(&lists, &para->props);
-                    AddRuns(h, para, text, pos, paraEnd);
+                    AddRuns(h, para, text, pos, paraEnd, &pictures);
                 }
             }
         }
@@ -380,6 +543,8 @@ DocModel* DocView_Capture(HWND h) {
         pos = paraEnd + 1;
         if (pos < textLen && text[paraEnd] == L'\r' && text[pos] == L'\n') pos++;
     }
+
+    if (pictures.count > 0 && pictures.next == 0) ReattachImages(doc, source);
 
     SendMessageW(h, EM_EXSETSEL, 0, (LPARAM)&saved);
     SendMessageW(h, WM_SETREDRAW, TRUE, 0);

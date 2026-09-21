@@ -79,6 +79,7 @@ Document* Document_CreateFromNote(int noteId) {
 // Destroy document
 void Document_Destroy(Document* doc) {
     if (doc) {
+        Doc_Free(doc->source);
         free(doc);
     }
 }
@@ -100,7 +101,7 @@ BOOL Document_Save(Document* doc, HWND hEditor) {
         }
 
         BOOL saved = (doc->format == FORMAT_DOCX)
-            ? Docx_WriteFromEditor(hEditor, doc->filePath)
+            ? Docx_WriteFromEditorWith(hEditor, doc->filePath, doc->source)
             : Rich_SaveRtfFile(hEditor, doc->filePath);
 
         if (!saved) {
@@ -174,7 +175,7 @@ BOOL Document_SaveAs(Document* doc, HWND hEditor, const WCHAR* path) {
         if (!FORMAT_IS_RICH(want)) want = FORMAT_RTF;
 
         BOOL saved = (want == FORMAT_DOCX)
-            ? Docx_WriteFromEditor(hEditor, path)
+            ? Docx_WriteFromEditorWith(hEditor, path, doc->source)
             : Rich_SaveRtfFile(hEditor, path);
 
         if (!saved) {
@@ -262,14 +263,28 @@ BOOL Document_Load(Document* doc, HWND hEditor) {
     if (doc->format == FORMAT_DOCX) {
         // WordprocessingML is converted to RTF and handed to the same view --
         // see docx.h for why.
-        char* rtf = Docx_ReadToRtf(doc->filePath);
-        if (!rtf) {
+        // Read once into a model, kept; the view gets RTF made from it.
+        DocModel* model = Docx_ReadToModel(doc->filePath);
+        if (!model) {
             MessageBoxW(g_app->hMainWindow, Docx_GetLastError(), APP_NAME, MB_ICONWARNING);
             return FALSE;
         }
+
+        char* rtf = DocRtf_Emit(model);
+        if (!rtf) {
+            Doc_Free(model);
+            return FALSE;
+        }
+
         BOOL ok = Rich_SetRtf(hEditor, rtf);
         free(rtf);
-        if (!ok) return FALSE;
+        if (!ok) {
+            Doc_Free(model);
+            return FALSE;
+        }
+
+        Doc_Free(doc->source);
+        doc->source = model;
         doc->modified = FALSE;
         return TRUE;
     }

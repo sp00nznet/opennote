@@ -88,12 +88,24 @@ typedef struct {
 // Nodes
 // ---------------------------------------------------------------------------
 
+// A picture, carried as the bytes the file had. Nothing in the model decodes
+// it: the layout engine hands the bytes to WIC, and a document written back
+// out hands them back unchanged, which is the only way a picture survives a
+// round trip without being re-encoded.
+typedef struct {
+    BYTE*  bytes;                 // owned
+    size_t len;
+    WCHAR  contentType[64];       // "image/png", "image/jpeg", ...
+    int    widthEmu, heightEmu;   // how big it is drawn; 914400 EMU to the inch
+} DocImage;
+
 typedef struct DocRun {
     struct DocRun* next;
     CharProps      props;
     WCHAR*         text;          // owned; never NULL, may be empty
     BOOL           lineBreak;     // a soft break rather than text
     BOOL           tab;
+    DocImage*      image;         // owned; a run is a picture or it is text
 } DocRun;
 
 typedef struct DocPara {
@@ -144,7 +156,7 @@ typedef struct DocStyle {
     CharProps run;
 } DocStyle;
 
-typedef struct {
+typedef struct DocModel {
     DocBlock*    blocks;
     SectionProps section;
 
@@ -175,6 +187,15 @@ DocRow*   Doc_AddRow(DocBlock* table);
 DocCell*  Doc_AddCell(DocRow* row);
 DocPara*  Doc_AddCellPara(DocCell* cell);
 DocRun*   Doc_AddRun(DocPara* para, const WCHAR* text, int len, const CharProps* props);
+
+// A picture, which counts as one character in the paragraph's text -- the
+// object replacement character, the same one the editor control uses -- so a
+// caret can sit either side of it and an offset means the same thing
+// everywhere.
+DocRun*   Doc_AddImageRun(DocPara* para, const BYTE* bytes, size_t len,
+                          const WCHAR* contentType, int widthEmu, int heightEmu);
+
+#define DOC_IMAGE_CHAR 0xFFFC
 
 // styles.xml, when the document had one.
 DocStyle* Doc_AddStyle(DocModel* doc, const WCHAR* id);
@@ -225,6 +246,10 @@ BOOL DocEdit_Insert(DocModel* doc, DocPos* at, const WCHAR* text, int len);
 
 // Break a paragraph in two at `at`, which lands at the start of the new one.
 BOOL DocEdit_SplitPara(DocModel* doc, DocPos* at);
+
+// A new, empty paragraph in front of `before`, or at the end of the document
+// when `before` is NULL.
+DocPara* Doc_InsertParaBefore(DocModel* doc, DocPara* before);
 
 // Delete [a, b). Fails rather than half-doing it when the range runs into or
 // out of a table, which is not a splice the model can make.

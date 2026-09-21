@@ -31,6 +31,7 @@
 
 #define REL_STYLES     L"http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles"
 #define REL_NUMBERING     L"http://schemas.openxmlformats.org/officeDocument/2006/relationships/numbering"
+#define REL_IMAGE         L"http://schemas.openxmlformats.org/officeDocument/2006/relationships/image"
 
 #define CT_STYLES     L"application/vnd.openxmlformats-officedocument.wordprocessingml.styles+xml"
 #define CT_NUMBERING     L"application/vnd.openxmlformats-officedocument.wordprocessingml.numbering+xml"
@@ -39,6 +40,10 @@
     L"application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"
 
 #define WML_NS "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
+#define REL_NS "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
+#define WP_NS  "http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing"
+#define DML_NS "http://schemas.openxmlformats.org/drawingml/2006/main"
+#define PIC_NS "http://schemas.openxmlformats.org/drawingml/2006/picture"
 
 static WCHAR g_lastError[512] = {0};
 
@@ -273,6 +278,101 @@ static IStream* RelatedStream(DocxPkg* pkg, const WCHAR* relType) {
 
     IOpcRelationshipSet_Release(rels);
     return stream;
+}
+
+
+// The part a particular relationship id points at, with its content type --
+// which is how a picture is found: the drawing says r:embed="rId7", and the
+// relationship says which part that is and what kind of image it holds.
+static BYTE* ReadRelatedBytes(DocxPkg* pkg, const WCHAR* relId, size_t* lenOut,
+                              WCHAR* contentTypeOut, size_t contentTypeChars) {
+    *lenOut = 0;
+    if (contentTypeOut && contentTypeChars) contentTypeOut[0] = L'\0';
+    if (!relId || !relId[0]) return NULL;
+
+    IOpcRelationshipSet* rels = NULL;
+    if (FAILED(IOpcPart_GetRelationshipSet(pkg->docPart, &rels))) return NULL;
+
+    IOpcRelationship* rel = NULL;
+    BYTE* bytes = NULL;
+
+    if (SUCCEEDED(IOpcRelationshipSet_GetRelationship(rels, relId, &rel))) {
+        IUri* target = NULL;
+        if (SUCCEEDED(IOpcRelationship_GetTargetUri(rel, &target))) {
+            IOpcPartUri* uri = NULL;
+            if (SUCCEEDED(IOpcUri_CombinePartUri((IOpcUri*)pkg->docUri, target, &uri))) {
+                IOpcPart* part = NULL;
+                if (SUCCEEDED(IOpcPartSet_GetPart(pkg->parts, uri, &part))) {
+                    LPWSTR type = NULL;
+                    if (contentTypeOut && SUCCEEDED(IOpcPart_GetContentType(part, &type)) && type) {
+                        wcsncpy_s(contentTypeOut, contentTypeChars, type, _TRUNCATE);
+                        CoTaskMemFree(type);
+                    }
+
+                    IStream* stream = NULL;
+                    if (SUCCEEDED(IOpcPart_GetContentStream(part, &stream)) && stream) {
+                        // Read it whole: a picture is small enough to hold and
+                        // the model keeps the bytes anyway.
+                        STATSTG stat = {0};
+                        if (SUCCEEDED(stream->lpVtbl->Stat(stream, &stat, STATFLAG_NONAME)) &&
+                            stat.cbSize.QuadPart > 0 &&
+                            stat.cbSize.QuadPart < 64 * 1024 * 1024) {
+
+                            size_t size = (size_t)stat.cbSize.QuadPart;
+                            bytes = (BYTE*)malloc(size);
+                            if (bytes) {
+                                ULONG got = 0;
+                                if (SUCCEEDED(stream->lpVtbl->Read(stream, bytes, (ULONG)size, &got))) {
+                                    *lenOut = got;
+                                } else {
+                                    free(bytes);
+                                    bytes = NULL;
+                                }
+                            }
+                        }
+                        IStream_Release(stream);
+                    }
+                    IOpcPart_Release(part);
+                }
+                IOpcPartUri_Release(uri);
+            }
+            IUri_Release(target);
+        }
+        IOpcRelationship_Release(rel);
+    }
+
+    IOpcRelationshipSet_Release(rels);
+    return bytes;
+}
+
+// "width:120pt;height:90pt" out of a VML shape's style attribute, in EMU.
+// A point is 12700 EMU; the other units a style can use are rarer than the
+// documents that never state a size at all.
+static void ParseVmlSize(const WCHAR* style, int* widthEmu, int* heightEmu) {
+    const WCHAR* at = style;
+    while (at && *at) {
+        while (*at == L' ' || *at == L';') at++;
+
+        BOOL isWidth = _wcsnicmp(at, L"width:", 6) == 0;
+        BOOL isHeight = _wcsnicmp(at, L"height:", 7) == 0;
+        if (isWidth || isHeight) {
+            const WCHAR* value = at + (isWidth ? 6 : 7);
+            double number = _wtof(value);
+
+            double emu = number * 12700.0;          // points
+            if (wcsstr(value, L"in"))      emu = number * 914400.0;
+            else if (wcsstr(value, L"cm")) emu = number * 360000.0;
+            else if (wcsstr(value, L"mm")) emu = number * 36000.0;
+            else if (wcsstr(value, L"px")) emu = number * 9525.0;
+
+            if (isWidth) *widthEmu = (int)emu;
+            else         *heightEmu = (int)emu;
+        }
+
+        const WCHAR* semi = wcschr(at, L';');
+        if (!semi) break;
+        at = semi + 1;
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -630,6 +730,13 @@ typedef struct {
     int  numId;
     int  ilvl;
 
+    // A picture, which arrives in pieces: an extent, then a relationship id
+    // several elements later.
+    BOOL  inDrawing;
+    BOOL  inPicture;          // the VML spelling
+    int   imageWidthEmu;
+    int   imageHeightEmu;
+
     int  skipDepth;             // >0 inside content that is not document text
 } Build;
 
@@ -637,7 +744,8 @@ static DocPara* NewParagraph(Build* b) {
     return b->cell ? Doc_AddCellPara(b->cell) : Doc_AddPara(b->doc);
 }
 
-static BOOL BuildModel(IStream* stream, DocModel* doc, const NumTable* numbering) {
+static BOOL BuildModel(IStream* stream, DocModel* doc, const NumTable* numbering,
+                       DocxPkg* pkg) {
     IXmlReader* reader = NULL;
     if (FAILED(CreateXmlReader(&IID_IXmlReader, (void**)&reader, NULL))) {
         SetError(L"The XML reader could not be created.");
@@ -757,6 +865,47 @@ static BOOL BuildModel(IStream* stream, DocModel* doc, const NumTable* numbering
                 // b, i, u, strike, sz, color, vertAlign, rFonts.
             }
 
+            // --- pictures ---
+            //
+            // Two spellings of the same thing. DrawingML is what Word has
+            // written since 2007: an extent in EMU, then a blip naming the
+            // relationship the image part hangs off. VML is what it wrote
+            // before that, and what it still writes for some shapes.
+            else if (NameIs(local, len, L"drawing")) {
+                b.inDrawing = TRUE;
+                b.imageWidthEmu = 0;
+                b.imageHeightEmu = 0;
+            } else if (NameIs(local, len, L"pict")) {
+                b.inPicture = TRUE;
+                b.imageWidthEmu = 0;
+                b.imageHeightEmu = 0;
+            } else if (b.inDrawing && NameIs(local, len, L"extent")) {
+                b.imageWidthEmu = AttrInt(reader, L"cx", 0);
+                b.imageHeightEmu = AttrInt(reader, L"cy", 0);
+            } else if (b.inPicture && NameIs(local, len, L"shape")) {
+                WCHAR style[256];
+                if (GetAttr(reader, L"style", style, 256)) {
+                    ParseVmlSize(style, &b.imageWidthEmu, &b.imageHeightEmu);
+                }
+            } else if ((b.inDrawing || b.inPicture) && b.para &&
+                       (NameIs(local, len, L"blip") || NameIs(local, len, L"imagedata"))) {
+                // r:embed on a blip, r:id on VML image data. Both name a
+                // relationship rather than a file.
+                WCHAR relId[64];
+                if (GetAttr(reader, L"embed", relId, 64) ||
+                    GetAttr(reader, L"id", relId, 64)) {
+
+                    size_t bytes = 0;
+                    WCHAR contentType[64];
+                    BYTE* data = ReadRelatedBytes(pkg, relId, &bytes, contentType, 64);
+                    if (data) {
+                        Doc_AddImageRun(b.para, data, bytes, contentType,
+                                        b.imageWidthEmu, b.imageHeightEmu);
+                        free(data);
+                    }
+                }
+            }
+
             // --- content ---
             else if (NameIs(local, len, L"t")) {
                 b.inText = TRUE;
@@ -822,7 +971,9 @@ static BOOL BuildModel(IStream* stream, DocModel* doc, const NumTable* numbering
             }
             if (b.skipDepth > 0) continue;
 
-            if (NameIs(local, len, L"numPr")) {
+            if (NameIs(local, len, L"drawing")) b.inDrawing = FALSE;
+            else if (NameIs(local, len, L"pict")) b.inPicture = FALSE;
+            else if (NameIs(local, len, L"numPr")) {
                 if (b.inNumPr && b.para) {
                     if (b.numId > 0) ApplyNumbering(numbering, b.numId, b.ilvl, &b.para->props);
                     else {
@@ -891,7 +1042,7 @@ DocModel* Docx_ReadToModel(const WCHAR* path) {
 
         IStream* docStream = NULL;
         if (SUCCEEDED(IOpcPart_GetContentStream(pkg.docPart, &docStream)) && docStream) {
-            ok = BuildModel(docStream, doc, &numbering);
+            ok = BuildModel(docStream, doc, &numbering, &pkg);
             IStream_Release(docStream);
         } else {
             SetError(L"The main document part could not be read.");
@@ -1011,7 +1162,40 @@ static void EmitParaProps(StrBuf* x, const ParaProps* p) {
     SB_Free(&inner);
 }
 
-static void EmitPara(StrBuf* x, const DocPara* para) {
+// Pictures are numbered as they are written, and each one becomes a part and
+// a relationship. The number is the same one the drawing refers to.
+typedef struct {
+    const DocImage* images[64];
+    int             count;
+} ImagePlan;
+
+static int PlanImage(ImagePlan* plan, const DocImage* image) {
+    if (plan->count >= 64) return -1;
+    plan->images[plan->count] = image;
+    return plan->count++;
+}
+
+// An inline picture: the extent in EMU, and a blip naming the relationship the
+// bytes hang off. The ids and names are cosmetic; the relationship is not.
+static void EmitDrawing(StrBuf* x, const DocImage* image, int index) {
+    SB_AddF(x,
+        "<w:drawing><wp:inline distT=\"0\" distB=\"0\" distL=\"0\" distR=\"0\">"
+        "<wp:extent cx=\"%d\" cy=\"%d\"/>"
+        "<wp:docPr id=\"%d\" name=\"Picture %d\"/>"
+        "<a:graphic xmlns:a=\"" DML_NS "\">"
+        "<a:graphicData uri=\"" PIC_NS "\">"
+        "<pic:pic xmlns:pic=\"" PIC_NS "\">"
+        "<pic:nvPicPr><pic:cNvPr id=\"%d\" name=\"Picture %d\"/><pic:cNvPicPr/></pic:nvPicPr>"
+        "<pic:blipFill><a:blip r:embed=\"rIdImg%d\"/><a:stretch><a:fillRect/></a:stretch></pic:blipFill>"
+        "<pic:spPr><a:xfrm><a:off x=\"0\" y=\"0\"/><a:ext cx=\"%d\" cy=\"%d\"/></a:xfrm>"
+        "<a:prstGeom prst=\"rect\"><a:avLst/></a:prstGeom></pic:spPr>"
+        "</pic:pic></a:graphicData></a:graphic></wp:inline></w:drawing>",
+        image->widthEmu, image->heightEmu,
+        index + 1, index + 1, index + 1, index + 1, index + 1,
+        image->widthEmu, image->heightEmu);
+}
+
+static void EmitPara(StrBuf* x, const DocPara* para, ImagePlan* plan) {
     SB_Add(x, "<w:p>");
     EmitParaProps(x, &para->props);
 
@@ -1019,7 +1203,10 @@ static void EmitPara(StrBuf* x, const DocPara* para) {
         SB_Add(x, "<w:r>");
         EmitRunProps(x, &r->props);
 
-        if (r->tab) {
+        if (r->image) {
+            int index = PlanImage(plan, r->image);
+            if (index >= 0) EmitDrawing(x, r->image, index);
+        } else if (r->tab) {
             SB_Add(x, "<w:tab/>");
         } else if (r->lineBreak) {
             SB_Add(x, "<w:br/>");
@@ -1034,7 +1221,7 @@ static void EmitPara(StrBuf* x, const DocPara* para) {
     SB_Add(x, "</w:p>");
 }
 
-static void EmitTable(StrBuf* x, const DocBlock* block) {
+static void EmitTable(StrBuf* x, const DocBlock* block, ImagePlan* plan) {
     SB_Add(x, "<w:tbl><w:tblPr><w:tblW w:w=\"0\" w:type=\"auto\"/></w:tblPr>");
 
     if (block->table.gridCount > 0) {
@@ -1053,7 +1240,7 @@ static void EmitTable(StrBuf* x, const DocBlock* block) {
             SB_Add(x, "<w:tc>");
             // A cell must contain at least one paragraph to be valid.
             if (!c->paras) SB_Add(x, "<w:p/>");
-            for (const DocPara* p = c->paras; p; p = p->next) EmitPara(x, p);
+            for (const DocPara* p = c->paras; p; p = p->next) EmitPara(x, p, plan);
             SB_Add(x, "</w:tc>");
         }
         SB_Add(x, "</w:tr>");
@@ -1280,19 +1467,23 @@ static BOOL BuildNumberingXml(const DocModel* doc, StrBuf* x, ListOut* lists, in
     return !x->failed;
 }
 
-static BOOL BuildDocumentXml(const DocModel* doc, StrBuf* x) {
+static BOOL BuildDocumentXml(const DocModel* doc, StrBuf* x, ImagePlan* plan) {
+    // The drawing namespaces are declared on the root whether or not the
+    // document holds a picture; a namespace nothing uses costs a line.
     SB_Add(x, "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>\r\n"
-              "<w:document xmlns:w=\"" WML_NS "\"><w:body>");
+              "<w:document xmlns:w=\"" WML_NS "\""
+              " xmlns:r=\"" REL_NS "\""
+              " xmlns:wp=\"" WP_NS "\"><w:body>");
 
     BOOL any = FALSE;
     for (const DocBlock* b = doc->blocks; b; b = b->next) {
         if (b->kind == BLOCK_PARA) {
             for (const DocPara* p = b->para; p; p = p->next) {
-                EmitPara(x, p);
+                EmitPara(x, p, plan);
                 any = TRUE;
             }
         } else {
-            EmitTable(x, b);
+            EmitTable(x, b, plan);
             any = TRUE;
 
             // Word requires a paragraph after a table; without one the table
@@ -1323,10 +1514,10 @@ static BOOL BuildDocumentXml(const DocModel* doc, StrBuf* x) {
 // Add a part to the package and relate the document to it. The relationship is
 // what makes a part findable: a part nothing points at is dead weight that
 // Word ignores.
-static BOOL AddRelatedPart(IOpcFactory* factory, IOpcPartSet* parts,
-                           IOpcRelationshipSet* docRels, const WCHAR* uriText,
-                           const WCHAR* contentType, const WCHAR* relType,
-                           const char* bytes, size_t len) {
+static BOOL AddRelatedPartWithId(IOpcFactory* factory, IOpcPartSet* parts,
+                                 IOpcRelationshipSet* docRels, const WCHAR* uriText,
+                                 const WCHAR* relId, const WCHAR* contentType,
+                                 const WCHAR* relType, const char* bytes, size_t len) {
     IOpcPartUri* uri = NULL;
     if (FAILED(IOpcFactory_CreatePartUri(factory, uriText, &uri))) return FALSE;
 
@@ -1343,7 +1534,7 @@ static BOOL AddRelatedPart(IOpcFactory* factory, IOpcPartSet* parts,
         if (SUCCEEDED(content->lpVtbl->Write(content, bytes, (ULONG)len, &written)) &&
             written == (ULONG)len) {
             ok = SUCCEEDED(IOpcRelationshipSet_CreateRelationship(
-                docRels, NULL, relType, (IUri*)uri,
+                docRels, relId, relType, (IUri*)uri,
                 OPC_URI_TARGET_MODE_INTERNAL, &rel));
         }
     }
@@ -1355,12 +1546,22 @@ static BOOL AddRelatedPart(IOpcFactory* factory, IOpcPartSet* parts,
     return ok;
 }
 
+static BOOL AddRelatedPart(IOpcFactory* factory, IOpcPartSet* parts,
+                           IOpcRelationshipSet* docRels, const WCHAR* uriText,
+                           const WCHAR* contentType, const WCHAR* relType,
+                           const char* bytes, size_t len) {
+    return AddRelatedPartWithId(factory, parts, docRels, uriText, NULL,
+                                contentType, relType, bytes, len);
+}
+
 BOOL Docx_WriteModel(const DocModel* doc, const WCHAR* path) {
     if (!doc || !path) return FALSE;
     SetError(NULL);
 
+    ImagePlan plan = {0};
+
     StrBuf xml = {0};
-    if (!BuildDocumentXml(doc, &xml)) {
+    if (!BuildDocumentXml(doc, &xml, &plan)) {
         SB_Free(&xml);
         return FALSE;
     }
@@ -1440,6 +1641,34 @@ BOOL Docx_WriteModel(const DocModel* doc, const WCHAR* path) {
             goto done;
         }
 
+        // A part per picture, named by the relationship the drawing refers to.
+        for (int i = 0; i < plan.count; i++) {
+            const DocImage* image = plan.images[i];
+
+            const WCHAR* extension = L"png";
+            if (wcsstr(image->contentType, L"jpeg") || wcsstr(image->contentType, L"jpg")) {
+                extension = L"jpeg";
+            } else if (wcsstr(image->contentType, L"gif")) {
+                extension = L"gif";
+            } else if (wcsstr(image->contentType, L"bmp")) {
+                extension = L"bmp";
+            } else if (wcsstr(image->contentType, L"tiff")) {
+                extension = L"tiff";
+            }
+
+            WCHAR uri[128], relId[32];
+            swprintf_s(uri, 128, L"/word/media/image%d.%s", i + 1, extension);
+            swprintf_s(relId, 32, L"rIdImg%d", i + 1);
+
+            if (!AddRelatedPartWithId(factory, parts, docRels, uri, relId,
+                                      image->contentType, REL_IMAGE,
+                                      (const char*)image->bytes, image->len)) {
+                IOpcRelationshipSet_Release(docRels);
+                SetError(L"A picture could not be written.");
+                goto done;
+            }
+        }
+
         ListOut lists[MAX_LISTS];
         int listCount = CollectLists(doc, lists);
         if (listCount > 0) {
@@ -1490,9 +1719,13 @@ done:
 }
 
 BOOL Docx_WriteFromEditor(HWND hRichEdit, const WCHAR* path) {
+    return Docx_WriteFromEditorWith(hRichEdit, path, NULL);
+}
+
+BOOL Docx_WriteFromEditorWith(HWND hRichEdit, const WCHAR* path, const DocModel* source) {
     if (!hRichEdit || !path) return FALSE;
 
-    DocModel* doc = DocView_Capture(hRichEdit);
+    DocModel* doc = DocView_CaptureWith(hRichEdit, source);
     if (!doc) {
         SetError(L"The document could not be read out of the editor.");
         return FALSE;

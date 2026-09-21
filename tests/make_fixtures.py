@@ -9,10 +9,16 @@ Usage:
     py tests/make_fixtures.py build/corpus
 """
 import os
+import struct
 import sys
 import zipfile
+import zlib
 
 W = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
+R = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
+WP = "http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing"
+O = "urn:schemas-microsoft-com:office:office"
+V = "urn:schemas-microsoft-com:vml"
 
 CONTENT_TYPES = """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
@@ -27,6 +33,7 @@ DOC_RELS = """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
 {rels}</Relationships>"""
 
+IMAGE_CT = "image/png"
 STYLES_CT = "application/vnd.openxmlformats-officedocument.wordprocessingml.styles+xml"
 NUMBERING_CT = "application/vnd.openxmlformats-officedocument.wordprocessingml.numbering+xml"
 REL_BASE = "http://schemas.openxmlformats.org/officeDocument/2006/relationships/"
@@ -48,7 +55,7 @@ def r(text, props=""):
 def document(body):
     return (
         '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n'
-        f'<w:document xmlns:w="{W}"><w:body>'
+        f'<w:document xmlns:w="{W}" xmlns:r="{R}" xmlns:wp="{WP}" xmlns:o="{O}" xmlns:v="{V}"><w:body>'
         + "".join(body)
         + '<w:sectPr><w:pgSz w:w="12240" w:h="15840"/></w:sectPr>'
         "</w:body></w:document>"
@@ -73,12 +80,15 @@ def write(outdir, name, body, expect, target="word/document.xml", parts=None):
         if parts:
             rels = ""
             for i, (part, _ct, rel, xml) in enumerate(parts, start=1):
-                z.writestr(part, xml)
+                z.writestr(part, xml)   # bytes or str, whichever the part is
                 # Relative to the document part, which is where a reader
                 # resolves it from.
-                relative = part.split("/")[-1]
-                rels += '  <Relationship Id="rIdX%d" Type="%s%s" Target="%s"/>\n' % (
-                    i, REL_BASE, rel, relative)
+                # A picture is named rIdImg1 and so on, because the drawing in
+                # the document refers to it by name.
+                relative = "/".join(part.split("/")[1:])
+                rid = "rIdImg%d" % i if rel == "image" else "rIdX%d" % i
+                rels += '  <Relationship Id="%s" Type="%s%s" Target="%s"/>\n' % (
+                    rid, REL_BASE, rel, relative)
 
             folder, filename = target.rsplit("/", 1)
             z.writestr("%s/_rels/%s.rels" % (folder, filename), DOC_RELS.format(rels=rels))
@@ -333,6 +343,73 @@ def fixture_styles(outdir):
     return write(outdir, "styles", body, expect, parts=parts)
 
 
+# --------------------------------------------------------------------------
+# images: DrawingML and VML, which are the two ways a picture reaches a page
+# --------------------------------------------------------------------------
+def png(width, height, rgb):
+    """A PNG of one colour, built here so the corpus stays generated."""
+    raw = b"".join(b"\x00" + bytes(rgb) * width for _ in range(height))
+
+    def chunk(kind, payload):
+        return (struct.pack(">I", len(payload)) + kind + payload +
+                struct.pack(">I", zlib.crc32(kind + payload) & 0xFFFFFFFF))
+
+    return (b"\x89PNG\r\n\x1a\n" +
+            chunk(b"IHDR", struct.pack(">IIBBBBB", width, height, 8, 2, 0, 0, 0)) +
+            chunk(b"IDAT", zlib.compress(raw)) +
+            chunk(b"IEND", b""))
+
+
+def fixture_images(outdir):
+    drawing = (
+        '<w:r><w:drawing><wp:inline distT="0" distB="0" distL="0" distR="0">'
+        '<wp:extent cx="914400" cy="457200"/>'
+        '<wp:docPr id="1" name="Picture 1"/>'
+        '<a:graphic xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">'
+        '<a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/picture">'
+        '<pic:pic xmlns:pic="http://schemas.openxmlformats.org/drawingml/2006/picture">'
+        '<pic:nvPicPr><pic:cNvPr id="1" name="Picture 1"/><pic:cNvPicPr/></pic:nvPicPr>'
+        '<pic:blipFill><a:blip r:embed="rIdImg1"/><a:stretch><a:fillRect/></a:stretch></pic:blipFill>'
+        '<pic:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="914400" cy="457200"/></a:xfrm>'
+        '<a:prstGeom prst="rect"><a:avLst/></a:prstGeom></pic:spPr>'
+        '</pic:pic></a:graphicData></a:graphic></wp:inline></w:drawing></w:r>'
+    )
+
+    vml = (
+        '<w:r><w:pict>'
+        '<v:shape id="_x0000_i1025" type="#_x0000_t75" style="width:36pt;height:18pt">'
+        '<v:imagedata r:id="rIdImg1" o:title="Picture"/>'
+        '</v:shape>'
+        '</w:pict></w:r>'
+    )
+
+    body = [
+        p([r("Before the picture.")]),
+        "<w:p>" + drawing + "</w:p>",
+        p([r("Between the two.")]),
+        "<w:p>" + vml + "</w:p>",
+        p([r("After the picture.")]),
+    ]
+
+    expect = [
+        "# both spellings of a picture reach the view as a blip",
+        "contains:\\pict",
+        "# RichEdit reads \\wmetafile and drops \\pngblip without a word",
+        "contains:\\wmetafile8",
+        "# an inch-wide picture is 1440 twips wide, and half that tall",
+        "contains:\\picwgoal1440\\pichgoal720",
+        "# ...and the VML one states its size in points: 36pt is half an inch",
+        "contains:\\picwgoal720\\pichgoal360",
+        "# the text around them is untouched",
+        "contains:Before the picture.",
+        "contains:Between the two.",
+        "contains:After the picture.",
+    ]
+
+    parts = [("word/media/image1.png", IMAGE_CT, "image", png(8, 4, (200, 30, 30)))]
+    return write(outdir, "images", body, expect, parts=parts)
+
+
 def main():
     outdir = sys.argv[1] if len(sys.argv) > 1 else "build/corpus"
     os.makedirs(outdir, exist_ok=True)
@@ -344,6 +421,7 @@ def main():
         fixture_escaping(outdir),
         fixture_relocated(outdir),
         fixture_styles(outdir),
+        fixture_images(outdir),
     ]
     for path in made:
         print(f"  {os.path.basename(path)}  {os.path.getsize(path)} bytes")

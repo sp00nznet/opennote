@@ -35,6 +35,10 @@ static void FreeRuns(DocRun* run) {
     while (run) {
         DocRun* next = run->next;
         free(run->text);
+        if (run->image) {
+            free(run->image->bytes);
+            free(run->image);
+        }
         free(run);
         run = next;
     }
@@ -263,6 +267,37 @@ void Doc_ResolveStyle(const DocModel* doc, const WCHAR* id,
     }
 }
 
+DocRun* Doc_AddImageRun(DocPara* para, const BYTE* bytes, size_t len,
+                        const WCHAR* contentType, int widthEmu, int heightEmu) {
+    if (!para || !bytes || !len) return NULL;
+
+    CharProps plain = {0};
+    DocRun* run = Doc_AddRun(para, L"", 0, &plain);
+    if (!run) return NULL;
+
+    DocImage* image = (DocImage*)calloc(1, sizeof(DocImage));
+    if (!image) return NULL;
+
+    image->bytes = (BYTE*)malloc(len);
+    if (!image->bytes) {
+        free(image);
+        return NULL;
+    }
+    memcpy(image->bytes, bytes, len);
+    image->len = len;
+
+    wcsncpy_s(image->contentType, 64,
+              contentType && contentType[0] ? contentType : L"image/png", _TRUNCATE);
+
+    // A picture with no stated size is drawn at two inches wide, which is
+    // better than drawing it at nothing at all.
+    image->widthEmu = widthEmu > 0 ? widthEmu : 1828800;
+    image->heightEmu = heightEmu > 0 ? heightEmu : 1828800;
+
+    run->image = image;
+    return run;
+}
+
 // ---------------------------------------------------------------------------
 // Counting
 // ---------------------------------------------------------------------------
@@ -460,8 +495,10 @@ typedef struct {
 static void Flatten(const DocPara* para, FlatPara* out) {
     out->len = 0;
     for (const DocRun* r = para->runs; r && out->len < MAX_FLAT; r = r->next) {
-        if (r->tab || r->lineBreak) {
-            out->text[out->len] = r->tab ? L'\t' : L'\n';
+        if (r->tab || r->lineBreak || r->image) {
+            out->text[out->len] = r->tab ? L'\t'
+                                : r->lineBreak ? L'\n'
+                                : (WCHAR)DOC_IMAGE_CHAR;
             out->props[out->len] = r->props;
             out->len++;
             continue;
@@ -474,8 +511,44 @@ static void Flatten(const DocPara* para, FlatPara* out) {
     }
 }
 
+// Pictures, in order. A picture that came back a different size, or with
+// different bytes, has been re-encoded by something -- which is exactly what
+// carrying the original bytes through the model is meant to avoid.
+static void CompareImages(const DocPara* pa, const DocPara* pb, int idx, DocDiff* d) {
+    const DocRun* ra = pa->runs;
+    const DocRun* rb = pb->runs;
+    int n = 0;
+
+    for (;;) {
+        while (ra && !ra->image) ra = ra->next;
+        while (rb && !rb->image) rb = rb->next;
+        if (!ra && !rb) break;
+
+        d->compared++;
+        if (!ra || !rb) {
+            DiffNote(d, "para %d: picture %d %s", idx, n, ra ? "lost" : "appeared");
+            break;
+        }
+
+        CMP(ra->image->len == rb->image->len,
+            "para %d: picture %d is %zu bytes, was %zu", idx, n,
+            rb->image->len, ra->image->len);
+        CMP(ra->image->widthEmu == rb->image->widthEmu &&
+            ra->image->heightEmu == rb->image->heightEmu,
+            "para %d: picture %d changed size", idx, n);
+        CMP(ra->image->len == rb->image->len &&
+            memcmp(ra->image->bytes, rb->image->bytes, ra->image->len) == 0,
+            "para %d: picture %d was re-encoded", idx, n);
+
+        ra = ra->next;
+        rb = rb->next;
+        n++;
+    }
+}
+
 static void CompareParas(const DocPara* pa, const DocPara* pb, int idx, DocDiff* d) {
     CompareParaProps(&pa->props, &pb->props, idx, d);
+    CompareImages(pa, pb, idx, d);
 
     static FlatPara fa, fb;
     Flatten(pa, &fa);
@@ -583,7 +656,7 @@ void Doc_Compare(const DocModel* a, const DocModel* b, DocDiff* d) {
 
 // The characters one run contributes.
 static unsigned RunLength(const DocRun* run) {
-    if (run->tab || run->lineBreak) return 1;
+    if (run->tab || run->lineBreak || run->image) return 1;
     return run->text ? (unsigned)wcslen(run->text) : 0;
 }
 
@@ -605,6 +678,7 @@ WCHAR* Doc_ParaText(const DocPara* para, unsigned* lenOut) {
         if (!n) continue;
         if (r->tab)            out[at] = L'\t';
         else if (r->lineBreak) out[at] = L'\n';
+        else if (r->image)     out[at] = DOC_IMAGE_CHAR;
         else                   memcpy(out + at, r->text, n * sizeof(WCHAR));
         at += n;
     }
@@ -894,6 +968,34 @@ static void RemovePara(DocModel* doc, DocPara* victim) {
 // The editing operations themselves
 // ---------------------------------------------------------------------------
 
+DocPara* Doc_InsertParaBefore(DocModel* doc, DocPara* before) {
+    if (!doc) return NULL;
+    if (!before) return Doc_AddPara(doc);
+
+    DocBlock* block = NULL;
+    DocPara** head = ParaChain(doc, before, &block);
+    if (!head) return NULL;
+
+    DocPara* fresh = (DocPara*)calloc(1, sizeof(DocPara));
+    if (!fresh) return NULL;
+
+    if (*head == before) {
+        fresh->next = before;
+        *head = fresh;
+        return fresh;
+    }
+
+    for (DocPara* p = *head; p; p = p->next) {
+        if (p->next != before) continue;
+        fresh->next = before;
+        p->next = fresh;
+        return fresh;
+    }
+
+    free(fresh);
+    return NULL;
+}
+
 BOOL DocEdit_Insert(DocModel* doc, DocPos* at, const WCHAR* text, int len) {
     (void)doc;
     if (!at || !at->para || !text) return FALSE;
@@ -1093,6 +1195,15 @@ static BOOL CloneParas(const DocPara* src, DocPara** dest) {
             rc->props = r->props;
             rc->tab = r->tab;
             rc->lineBreak = r->lineBreak;
+
+            if (r->image) {
+                rc->image = (DocImage*)calloc(1, sizeof(DocImage));
+                if (!rc->image) { free(rc); return FALSE; }
+                *rc->image = *r->image;
+                rc->image->bytes = (BYTE*)malloc(r->image->len);
+                if (!rc->image->bytes) { free(rc->image); free(rc); return FALSE; }
+                memcpy(rc->image->bytes, r->image->bytes, r->image->len);
+            }
 
             size_t n = r->text ? wcslen(r->text) : 0;
             rc->text = (WCHAR*)malloc((n + 1) * sizeof(WCHAR));

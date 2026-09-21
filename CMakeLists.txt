@@ -52,9 +52,12 @@ set(SUPERNOTE_SOURCES
     src/core/doctree.c
     src/core/doctree_rtf.c
     src/core/doctree_view.c
+    src/core/imagedib.c
     src/layout/layout.cpp
     src/layout/layoutprint.cpp
+    src/layout/layoutimage.cpp
     src/ui/pageview.cpp
+    src/ui/richole.c
     src/core/docx.c
     src/db/database.c
     src/db/notes_repo.c

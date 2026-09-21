@@ -14,6 +14,12 @@ struct Document {
     int noteId;
     WCHAR noteTitle[MAX_TITLE_LEN];
 
+    // The model this document was read from, when it came from a format that
+    // has one. The view cannot hold everything a file states -- a picture's
+    // bytes, a style's name -- so the original is kept beside it and consulted
+    // when the document is written back out.
+    DocModel* source;
+
     // State
     BOOL modified;
     BOOL isNew;  // Never saved
