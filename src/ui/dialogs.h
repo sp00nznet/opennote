@@ -10,6 +10,10 @@ BOOL Dialogs_Font(HWND hParent, LOGFONTW* font);
 BOOL Dialogs_NotesBrowser(HWND hParent, int* noteId);
 void Dialogs_Compare(HWND hParent, int tab1Index, int tab2Index);
 void Dialogs_Defaults(HWND hParent);
+
+// The OAuth application the user registered for themselves. Nothing ships with
+// OpenNote, so this is how an installed copy is given credentials.
+void Dialogs_SyncCredentials(HWND hParent);
 void Dialogs_FindInTabs(HWND hParent);
 void Dialogs_ReplaceInTabs(HWND hParent);
 

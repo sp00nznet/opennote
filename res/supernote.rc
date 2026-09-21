@@ -181,7 +181,7 @@ BEGIN
 END
 
 // Sync Accounts dialog
-IDD_SYNC_ACCOUNTS DIALOGEX 0, 0, 220, 130
+IDD_SYNC_ACCOUNTS DIALOGEX 0, 0, 220, 150
 STYLE DS_SETFONT | DS_MODALFRAME | DS_FIXEDSYS | WS_POPUP | WS_CAPTION | WS_SYSMENU
 CAPTION "Cloud Sync Accounts"
 FONT 8, "MS Shell Dlg"
@@ -189,9 +189,35 @@ BEGIN
     LTEXT           "Connect a cloud account to sync your notes:", IDC_STATIC, 15, 15, 190, 10
     PUSHBUTTON      "Sign in with GitHub", IDC_SYNC_GITHUB, 15, 35, 190, 20
     PUSHBUTTON      "Sign in with Google Drive", IDC_SYNC_GOOGLE, 15, 60, 190, 20
-    LTEXT           "", IDC_SYNC_STATUS, 15, 88, 190, 10
-    PUSHBUTTON      "Sign Out", IDC_SYNC_SIGNOUT, 15, 105, 60, 14, WS_DISABLED
-    PUSHBUTTON      "Close", IDCANCEL, 155, 105, 50, 14
+    LTEXT           "", IDC_SYNC_STATUS, 15, 88, 190, 18
+    PUSHBUTTON      "Credentials...", IDC_SYNC_CREDENTIALS, 15, 110, 65, 14
+    PUSHBUTTON      "Sign Out", IDC_SYNC_SIGNOUT, 85, 110, 55, 14, WS_DISABLED
+    PUSHBUTTON      "Close", IDCANCEL, 155, 110, 50, 14
+END
+
+// Cloud credentials -- the user's own OAuth application. OpenNote ships none.
+IDD_SYNC_CREDENTIALS DIALOGEX 0, 0, 300, 190
+STYLE DS_SETFONT | DS_MODALFRAME | DS_FIXEDSYS | WS_POPUP | WS_CAPTION | WS_SYSMENU
+CAPTION "Cloud Credentials"
+FONT 8, "MS Shell Dlg"
+BEGIN
+    LTEXT           "OpenNote ships no API keys. Register your own OAuth app with each provider and enter its details here; they stay on this machine.",
+                    IDC_STATIC, 12, 10, 276, 26
+
+    GROUPBOX        "GitHub (device flow -- no secret needed)", IDC_STATIC, 12, 42, 276, 42
+    LTEXT           "Client &ID:", IDC_STATIC, 22, 60, 45, 10
+    EDITTEXT        IDC_CREDS_GITHUB_ID, 72, 58, 206, 13, ES_AUTOHSCROLL
+
+    GROUPBOX        "Google Drive (desktop client, PKCE)", IDC_STATIC, 12, 92, 276, 60
+    LTEXT           "Client I&D:", IDC_STATIC, 22, 110, 45, 10
+    EDITTEXT        IDC_CREDS_GOOGLE_ID, 72, 108, 206, 13, ES_AUTOHSCROLL
+    LTEXT           "&Secret:", IDC_STATIC, 22, 130, 45, 10
+    EDITTEXT        IDC_CREDS_GOOGLE_SECRET, 72, 128, 206, 13, ES_AUTOHSCROLL | ES_PASSWORD
+
+    PUSHBUTTON      "Setup &Guide", IDC_CREDS_HELP, 12, 165, 60, 14
+    PUSHBUTTON      "C&lear All", IDC_CREDS_CLEAR, 78, 165, 50, 14
+    DEFPUSHBUTTON   "Save", IDOK, 180, 165, 50, 14
+    PUSHBUTTON      "Cancel", IDCANCEL, 236, 165, 50, 14
 END
 
 // Print Preview dialog

@@ -204,9 +204,10 @@ your revocation. Tokens and the Google client secret are wrapped with DPAPI befo
 reach the database. See [SECURITY.md](SECURITY.md) and
 [docs/cloud-sync-setup.md](docs/cloud-sync-setup.md).
 
-It is still the least finished part of the codebase: a published build has no way to enter
-those credentials yet, so sync currently needs a build from source. The settings screen for
-it belongs with the rest of v0.3.
+Credentials go in under **Settings → Default Settings… → Sync Accounts… → Credentials…**,
+so an installed copy can be given them without a rebuild. It is still the least finished
+part of the codebase — the sync itself is last-writer-wins, and the vault work that fixes
+that is v0.3.
 
 ### Configuration
 

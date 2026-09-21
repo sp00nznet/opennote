@@ -42,6 +42,13 @@ could read `%APPDATA%\OpenNote\opennote.db` — any process running as you, any 
 sync tool that picked that directory up — could read the token and use it against your
 account.
 
+**If you ran a build from before v0.2.0 and signed in, your access token is still in that
+database in the clear.** Revoke it — GitHub under Settings → Applications, Google under
+Account → Security → Third-party access — and sign in again. From v0.9.1 OpenNote deletes
+any stored credential it cannot unwrap the moment it reads one, so such a token is removed
+on sight rather than left to sit there; it was unusable to the program either way, which
+is precisely why it went unnoticed.
+
 Tokens are now wrapped with `CryptProtectData` (DPAPI) before they reach the database,
 which ties the stored blob to your Windows account. A copy of `opennote.db` taken to
 another machine, or opened by another user, yields nothing.

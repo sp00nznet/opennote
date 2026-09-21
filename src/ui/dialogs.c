@@ -1502,6 +1502,164 @@ void Dialogs_PrintPreview(HWND hParent, HWND hEditor) {
 }
 
 // Sync Accounts dialog procedure
+// ---------------------------------------------------------------------------
+// Cloud credentials
+//
+// OpenNote ships no API keys: not a client secret, which the build refuses, and
+// not a client id, which CI never passes. Sync therefore needs an OAuth
+// application the user registered for themselves -- and this is where an
+// installed copy is told about it, so that does not mean building from source.
+//
+// What is entered here goes into the settings table: client ids as they are,
+// because they are public identifiers, and Google's secret wrapped with DPAPI
+// like an access token.
+// ---------------------------------------------------------------------------
+
+#define CREDS_GUIDE_URL \
+    L"https://github.com/sp00nznet/opennote/blob/main/docs/cloud-sync-setup.md"
+
+static void SetDlgItemUtf8(HWND hwnd, int id, const char* text) {
+    WCHAR wide[1024] = {0};
+    if (text && text[0]) {
+        MultiByteToWideChar(CP_UTF8, 0, text, -1, wide, 1024);
+    }
+    SetDlgItemTextW(hwnd, id, wide);
+}
+
+static void GetDlgItemUtf8(HWND hwnd, int id, char* out, size_t outSize) {
+    WCHAR wide[1024] = {0};
+    GetDlgItemTextW(hwnd, id, wide, 1024);
+
+    // Credentials pasted out of a browser bring whitespace with them.
+    WCHAR* start = wide;
+    while (*start == L' ' || *start == L'\t') start++;
+
+    size_t len = wcslen(start);
+    while (len > 0 && (start[len - 1] == L' ' || start[len - 1] == L'\t')) {
+        start[--len] = L'\0';
+    }
+
+    out[0] = '\0';
+    WideCharToMultiByte(CP_UTF8, 0, start, -1, out, (int)outSize, NULL, NULL);
+}
+
+static INT_PTR CALLBACK SyncCredentialsProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
+    (void)lParam;
+
+    switch (msg) {
+        case WM_INITDIALOG: {
+            OAuthCredentials creds;
+            OAuth_LoadCredentials(&creds);
+
+            SetDlgItemUtf8(hwnd, IDC_CREDS_GITHUB_ID, creds.githubClientId);
+            SetDlgItemUtf8(hwnd, IDC_CREDS_GOOGLE_ID, creds.googleClientId);
+            SetDlgItemUtf8(hwnd, IDC_CREDS_GOOGLE_SECRET, creds.googleSecret);
+
+            SecureZeroMemory(&creds, sizeof(creds));
+            return TRUE;
+        }
+
+        case WM_COMMAND:
+            switch (LOWORD(wParam)) {
+                case IDC_CREDS_HELP:
+                    ShellExecuteW(hwnd, L"open", CREDS_GUIDE_URL, NULL, NULL, SW_SHOWNORMAL);
+                    return TRUE;
+
+                case IDC_CREDS_CLEAR:
+                    if (MessageBoxW(hwnd,
+                            L"Remove the credentials stored on this machine?\n\n"
+                            L"Any account already signed in stays signed in until you "
+                            L"sign out; this only forgets the application they were "
+                            L"obtained through.",
+                            APP_NAME, MB_YESNO | MB_ICONQUESTION) == IDYES) {
+                        SetDlgItemTextW(hwnd, IDC_CREDS_GITHUB_ID, L"");
+                        SetDlgItemTextW(hwnd, IDC_CREDS_GOOGLE_ID, L"");
+                        SetDlgItemTextW(hwnd, IDC_CREDS_GOOGLE_SECRET, L"");
+                    }
+                    return TRUE;
+
+                case IDOK: {
+                    OAuthCredentials creds;
+                    memset(&creds, 0, sizeof(creds));
+
+                    GetDlgItemUtf8(hwnd, IDC_CREDS_GITHUB_ID,
+                                   creds.githubClientId, sizeof(creds.githubClientId));
+                    GetDlgItemUtf8(hwnd, IDC_CREDS_GOOGLE_ID,
+                                   creds.googleClientId, sizeof(creds.googleClientId));
+                    GetDlgItemUtf8(hwnd, IDC_CREDS_GOOGLE_SECRET,
+                                   creds.googleSecret, sizeof(creds.googleSecret));
+
+                    // Half a Google credential cannot sign anybody in, and
+                    // finding that out at the consent screen is worse than
+                    // being told here.
+                    if (creds.googleClientId[0] && !creds.googleSecret[0]) {
+                        MessageBoxW(hwnd,
+                            L"Google needs both the client ID and the client secret "
+                            L"from your own Cloud project.\n\n"
+                            L"They are on the same page in the Google Cloud console, "
+                            L"under Credentials.",
+                            APP_NAME, MB_ICONWARNING);
+                        SecureZeroMemory(&creds, sizeof(creds));
+                        return TRUE;
+                    }
+
+                    BOOL saved = OAuth_SaveCredentials(&creds);
+                    SecureZeroMemory(&creds, sizeof(creds));
+
+                    if (!saved) {
+                        MessageBoxW(hwnd, L"The credentials could not be stored.",
+                                    APP_NAME, MB_ICONERROR);
+                        return TRUE;
+                    }
+
+                    EndDialog(hwnd, IDOK);
+                    return TRUE;
+                }
+
+                case IDCANCEL:
+                    EndDialog(hwnd, IDCANCEL);
+                    return TRUE;
+            }
+            break;
+
+        case WM_CLOSE:
+            EndDialog(hwnd, IDCANCEL);
+            return TRUE;
+    }
+
+    return FALSE;
+}
+
+void Dialogs_SyncCredentials(HWND hParent) {
+    DialogBoxW(g_app->hInstance, MAKEINTRESOURCEW(IDD_SYNC_CREDENTIALS), hParent,
+               SyncCredentialsProc);
+}
+
+// Sign-in is only possible with an OAuth application to sign in through, so
+// the buttons follow the credentials rather than being offered and then
+// failing with an explanation.
+static void SyncAccountsRefresh(HWND hwnd) {
+    BOOL signedIn = g_app->syncProvider && g_app->syncProvider[0] != L'\0';
+    BOOL haveGitHub = OAuth_HasGitHubCredentials();
+    BOOL haveGoogle = OAuth_HasGoogleCredentials();
+
+    EnableWindow(GetDlgItem(hwnd, IDC_SYNC_SIGNOUT), signedIn);
+    EnableWindow(GetDlgItem(hwnd, IDC_SYNC_GITHUB), !signedIn && haveGitHub);
+    EnableWindow(GetDlgItem(hwnd, IDC_SYNC_GOOGLE), !signedIn && haveGoogle);
+
+    if (signedIn) {
+        WCHAR status[256];
+        swprintf_s(status, 256, L"Signed in with %s", g_app->syncProvider);
+        SetDlgItemTextW(hwnd, IDC_SYNC_STATUS, status);
+    } else if (!haveGitHub && !haveGoogle) {
+        SetDlgItemTextW(hwnd, IDC_SYNC_STATUS,
+                        L"No credentials yet. OpenNote ships none -- register your "
+                        L"own app and enter it under Credentials.");
+    } else {
+        SetDlgItemTextW(hwnd, IDC_SYNC_STATUS, L"Not signed in");
+    }
+}
+
 static INT_PTR CALLBACK SyncAccountsProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
     (void)lParam;
 
@@ -1520,18 +1678,7 @@ static INT_PTR CALLBACK SyncAccountsProc(HWND hwnd, UINT msg, WPARAM wParam, LPA
                     }
                 }
 
-                // Update status and button states based on current sync state
-                if (g_app->syncProvider && g_app->syncProvider[0] != L'\0') {
-                    WCHAR status[256];
-                    swprintf_s(status, 256, L"Signed in with %s", g_app->syncProvider);
-                    SetDlgItemTextW(hwnd, IDC_SYNC_STATUS, status);
-                    EnableWindow(GetDlgItem(hwnd, IDC_SYNC_SIGNOUT), TRUE);
-                    EnableWindow(GetDlgItem(hwnd, IDC_SYNC_GITHUB), FALSE);
-                    EnableWindow(GetDlgItem(hwnd, IDC_SYNC_GOOGLE), FALSE);
-                } else {
-                    SetDlgItemTextW(hwnd, IDC_SYNC_STATUS, L"Not signed in");
-                    EnableWindow(GetDlgItem(hwnd, IDC_SYNC_SIGNOUT), FALSE);
-                }
+                SyncAccountsRefresh(hwnd);
             }
             return TRUE;
 
@@ -1567,6 +1714,11 @@ static INT_PTR CALLBACK SyncAccountsProc(HWND hwnd, UINT msg, WPARAM wParam, LPA
                             MessageBoxW(hwnd, L"Successfully signed in with Google Drive!", APP_NAME, MB_ICONINFORMATION);
                         }
                     }
+                    return TRUE;
+
+                case IDC_SYNC_CREDENTIALS:
+                    Dialogs_SyncCredentials(hwnd);
+                    SyncAccountsRefresh(hwnd);
                     return TRUE;
 
                 case IDC_SYNC_SIGNOUT:

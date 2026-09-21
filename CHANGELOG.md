@@ -5,6 +5,28 @@ All notable changes to this project are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+- **A screen for your own OAuth credentials** — Settings → Default Settings… → Sync
+  Accounts… → Credentials…. OpenNote ships no API keys and never has: an installed copy
+  had no way to be given any, so cloud sync could only be enabled by building from source.
+  Client IDs are stored as they are, because they are public identifiers; the Google
+  client secret is wrapped with DPAPI like an access token. The sign-in buttons follow
+  the credentials rather than being offered and then failing.
+
+### Fixed
+- **A stored credential that cannot be unwrapped is now deleted rather than left.** A
+  token written by a different Windows account, or left in the clear by a build from
+  before v0.2.0, could not be read and so could not be used — but it stayed in the
+  database indefinitely, which for a cleartext token is the whole of the vulnerability
+  v0.2.0 set out to remove. See SECURITY.md: revoke any token from such a build.
+
+### Changed
+- `docs/cloud-sync-setup.md` rewritten: it had been telling people to pass client secrets
+  to CMake, which fails the build on purpose, and to register a Google *Web application*
+  client, which PKCE with a loopback redirect does not want.
+
 ## [0.9.0] - 2026-09-20
 
 **Document fidelity.** The reader used to guess at a good deal of what a `.docx` says: a

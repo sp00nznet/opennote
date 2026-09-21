@@ -49,7 +49,16 @@ loopback port for a desktop client, so this needs no configuration.
 
 ## Giving OpenNote the credentials
 
-Build with them compiled in — client IDs only:
+**In an installed copy** — no rebuild, no command line:
+
+> **Settings → Default Settings… → Sync Accounts… → Credentials…**
+
+Paste the GitHub client ID, and the Google client ID and secret, then **Save**. The
+sign-in buttons stay greyed out until there is something to sign in with, so the dialog
+tells you what is missing rather than failing at the consent screen. **Clear All** forgets
+them again; signing out is separate, under Sync Accounts.
+
+**When building from source** the client IDs can be compiled in instead:
 
 ```powershell
 cmake -B build -DGH_OAUTH_CLIENT_ID="your_github_client_id" `
@@ -58,14 +67,8 @@ cmake --build build --config Release
 ```
 
 Passing `GH_OAUTH_CLIENT_SECRET` or `GOOGLE_CLIENT_SECRET` **fails the build on purpose**.
-The Google secret is entered in the application, not compiled in.
-
-> **Not yet possible in a published build.** The binaries on the releases page have no
-> credentials and no way to enter them: the settings keys the OAuth code reads
-> (`oauth_github_client_id`, `oauth_google_client_id`, `oauth_google_client_secret`) are
-> read but never written, because the settings screen for them has not been built. Until
-> it is, cloud sync needs a build from source. Tracked as part of v0.3 in
-> [ROADMAP.md](../ROADMAP.md).
+The Google secret is entered in the dialog, not compiled in. A compiled-in ID shows up in
+the dialog as the current value, so what you see there is always what will be used.
 
 ## What is stored, and where
 
@@ -78,6 +81,12 @@ The Google secret is entered in the application, not compiled in.
 
 Revoking access at the provider is always enough to cut a build off entirely: GitHub under
 **Settings → Applications**, Google under **Account → Security → Third-party access**.
+
+A stored credential that cannot be unwrapped — because it was written by a different
+Windows account, or because it was left in the clear by a build from before v0.2.0 — is
+**deleted the moment it is read**. It could not have been used anyway, and a credential
+nothing can read has no business staying in a database. The account simply appears signed
+out, and signing in again stores a wrapped one.
 
 ## Why not just ship a key?
 

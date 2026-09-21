@@ -107,6 +107,7 @@
 #define IDD_INPUTBOX            409
 #define IDD_PRINT_PREVIEW       410
 #define IDD_SYNC_ACCOUNTS       411
+#define IDD_SYNC_CREDENTIALS    412
 
 // Dialog controls
 #define IDC_STATIC              -1
@@ -152,6 +153,14 @@
 #define IDC_SYNC_GOOGLE         1139
 #define IDC_SYNC_STATUS         1140
 #define IDC_SYNC_SIGNOUT        1141
+#define IDC_SYNC_CREDENTIALS    1142
+
+// Cloud credentials: the OAuth application the user registered themselves
+#define IDC_CREDS_GITHUB_ID     1143
+#define IDC_CREDS_GOOGLE_ID     1144
+#define IDC_CREDS_GOOGLE_SECRET 1145
+#define IDC_CREDS_HELP          1146
+#define IDC_CREDS_CLEAR         1147
 
 // Status bar parts
 #define SB_PART_MESSAGE         0

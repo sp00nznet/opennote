@@ -151,6 +151,81 @@ static BOOL GetClientId(const char* settingsKey, const char* builtIn,
     return Database_GetSetting(settingsKey, out, outSize);
 }
 
+// ---------------------------------------------------------------------------
+// The user's own OAuth application
+// ---------------------------------------------------------------------------
+
+void OAuth_LoadCredentials(OAuthCredentials* out) {
+    if (!out) return;
+    memset(out, 0, sizeof(*out));
+
+    // A build-time client id, when one was compiled in, is what the user sees
+    // in the settings screen -- so what is shown is what will actually be used.
+#ifdef GITHUB_CLIENT_ID
+    strncpy_s(out->githubClientId, sizeof(out->githubClientId), GITHUB_CLIENT_ID, _TRUNCATE);
+#endif
+#ifdef GOOGLE_CLIENT_ID
+    strncpy_s(out->googleClientId, sizeof(out->googleClientId), GOOGLE_CLIENT_ID, _TRUNCATE);
+#endif
+
+    char stored[512];
+    if (Database_GetSetting(KEY_GITHUB_CLIENT_ID, stored, sizeof(stored)) && stored[0]) {
+        strncpy_s(out->githubClientId, sizeof(out->githubClientId), stored, _TRUNCATE);
+    }
+    if (Database_GetSetting(KEY_GOOGLE_CLIENT_ID, stored, sizeof(stored)) && stored[0]) {
+        strncpy_s(out->googleClientId, sizeof(out->googleClientId), stored, _TRUNCATE);
+    }
+
+    char wrapped[2048];
+    if (Database_GetSetting(KEY_GOOGLE_CLIENT_SECRET, wrapped, sizeof(wrapped)) && wrapped[0]) {
+        if (!Crypto_UnprotectFromBase64(wrapped, out->googleSecret, sizeof(out->googleSecret))) {
+            // Written by another Windows account, or corrupted. Treat it as
+            // absent rather than handing the caller rubbish.
+            out->googleSecret[0] = '\0';
+        }
+    }
+}
+
+// Write one setting, or remove it when the value is empty.
+static BOOL StoreOrClear(const char* key, const char* value) {
+    if (!value || !value[0]) {
+        Database_DeleteSetting(key);
+        return TRUE;
+    }
+    return Database_SetSetting(key, value);
+}
+
+BOOL OAuth_SaveCredentials(const OAuthCredentials* creds) {
+    if (!creds) return FALSE;
+
+    BOOL ok = StoreOrClear(KEY_GITHUB_CLIENT_ID, creds->githubClientId) &&
+              StoreOrClear(KEY_GOOGLE_CLIENT_ID, creds->googleClientId);
+
+    if (!creds->googleSecret[0]) {
+        Database_DeleteSetting(KEY_GOOGLE_CLIENT_SECRET);
+        return ok;
+    }
+
+    // The secret is wrapped before it reaches the database, the same way a
+    // token is: a copy of opennote.db is then useless anywhere else.
+    char wrapped[2048];
+    if (!Crypto_ProtectToBase64(creds->googleSecret, wrapped, sizeof(wrapped))) return FALSE;
+
+    return ok && Database_SetSetting(KEY_GOOGLE_CLIENT_SECRET, wrapped);
+}
+
+BOOL OAuth_HasGitHubCredentials(void) {
+    OAuthCredentials creds;
+    OAuth_LoadCredentials(&creds);
+    return creds.githubClientId[0] != '\0';
+}
+
+BOOL OAuth_HasGoogleCredentials(void) {
+    OAuthCredentials creds;
+    OAuth_LoadCredentials(&creds);
+    return creds.googleClientId[0] != '\0' && creds.googleSecret[0] != '\0';
+}
+
 static void CopyToClipboard(HWND hOwner, const char* text) {
     if (!OpenClipboard(hOwner)) return;
     EmptyClipboard();
@@ -411,10 +486,9 @@ BOOL OAuth_GoogleLogin(HWND hParent, OAuthToken* tokenOut) {
 
     // The user's own client secret, wrapped by DPAPI in their own database.
     // Google's token endpoint wants one for a Desktop client even under PKCE.
-    char clientSecretEnc[2048], clientSecret[512] = {0};
-    if (Database_GetSetting(KEY_GOOGLE_CLIENT_SECRET, clientSecretEnc, sizeof(clientSecretEnc))) {
-        Crypto_UnprotectFromBase64(clientSecretEnc, clientSecret, sizeof(clientSecret));
-    }
+    OAuthCredentials creds;
+    OAuth_LoadCredentials(&creds);
+    const char* clientSecret = creds.googleSecret;
 
     // PKCE: a fresh verifier per attempt, and its SHA-256 sent up front. An
     // attacker who intercepts the authorization code cannot redeem it without
@@ -510,7 +584,16 @@ static BOOL SaveProtected(const char* key, const char* value) {
 static BOOL LoadProtected(const char* key, char* out, size_t outSize) {
     char wrapped[4096];
     if (!Database_GetSetting(key, wrapped, sizeof(wrapped))) return FALSE;
-    return Crypto_UnprotectFromBase64(wrapped, out, outSize);
+    if (Crypto_UnprotectFromBase64(wrapped, out, outSize)) return TRUE;
+
+    // It did not unwrap. Either it was written by another Windows account, or
+    // it is a token left in the clear by a build from before v0.2.0 -- the
+    // vulnerability SECURITY.md describes. Either way it is unusable here, and
+    // a credential nothing can read should not still be sitting in a database.
+    // Deleting it signs that account out; the next sign-in stores a wrapped one.
+    Database_DeleteSetting(key);
+    out[0] = 0;
+    return FALSE;
 }
 
 BOOL OAuth_SaveToken(const char* provider, const OAuthToken* token) {
@@ -583,10 +666,9 @@ BOOL OAuth_GoogleRefresh(const char* refreshToken, OAuthToken* tokenOut) {
     char clientId[256];
     if (!GetClientId(KEY_GOOGLE_CLIENT_ID, builtIn, clientId, sizeof(clientId))) return FALSE;
 
-    char clientSecretEnc[2048], clientSecret[512] = {0};
-    if (Database_GetSetting(KEY_GOOGLE_CLIENT_SECRET, clientSecretEnc, sizeof(clientSecretEnc))) {
-        Crypto_UnprotectFromBase64(clientSecretEnc, clientSecret, sizeof(clientSecret));
-    }
+    OAuthCredentials creds;
+    OAuth_LoadCredentials(&creds);
+    const char* clientSecret = creds.googleSecret;
 
     char body[2048];
     snprintf(body, sizeof(body),
@@ -619,8 +701,117 @@ BOOL OAuth_GoogleRefresh(const char* refreshToken, OAuthToken* tokenOut) {
 // Self-check. Run with: OpenNote.exe --selftest
 // ---------------------------------------------------------------------------
 
+// The credentials round trip, through a database of its own.
+//
+// What matters is that what goes in comes back, and that the Google secret is
+// not sitting in the settings table in the clear -- the whole point of wrapping
+// it. Checking that means reading the raw row back, not the decrypted value.
+static BOOL CredentialsSelfTest(char* failure, size_t failureSize) {
+#define CFAIL(msg) do { \
+        strncpy_s(failure, failureSize, (msg), _TRUNCATE); \
+        Database_Close(); \
+        DeleteFileW(path); \
+        return FALSE; \
+    } while (0)
+
+    WCHAR temp[MAX_PATH], path[MAX_PATH];
+    if (!GetTempPathW(MAX_PATH, temp)) {
+        strncpy_s(failure, failureSize, "no temp directory", _TRUNCATE);
+        return FALSE;
+    }
+    swprintf_s(path, MAX_PATH, L"%sopennote-selftest-%lu.db", temp, GetCurrentProcessId());
+    DeleteFileW(path);
+
+    // A database of its own: the checks must not touch whatever the person
+    // running them has actually configured.
+    BOOL wasOpen = Database_IsOpen();
+    if (wasOpen) Database_Close();
+
+    if (!Database_Open(path) || !Database_Initialize()) {
+        strncpy_s(failure, failureSize, "could not open a temporary database", _TRUNCATE);
+        Database_Close();
+        DeleteFileW(path);
+        return FALSE;
+    }
+
+    OAuthCredentials in;
+    memset(&in, 0, sizeof(in));
+    strcpy_s(in.githubClientId, sizeof(in.githubClientId), "Iv1.0123456789abcdef");
+    strcpy_s(in.googleClientId, sizeof(in.googleClientId),
+             "1234567890-abcdefgh.apps.googleusercontent.com");
+    strcpy_s(in.googleSecret, sizeof(in.googleSecret), "GOCSPX-a-secret-that-is-theirs");
+
+    if (!OAuth_SaveCredentials(&in)) CFAIL("credentials could not be saved");
+
+    OAuthCredentials out;
+    OAuth_LoadCredentials(&out);
+
+    if (strcmp(out.githubClientId, in.githubClientId) != 0) {
+        CFAIL("the GitHub client id did not survive being stored");
+    }
+    if (strcmp(out.googleClientId, in.googleClientId) != 0) {
+        CFAIL("the Google client id did not survive being stored");
+    }
+    if (strcmp(out.googleSecret, in.googleSecret) != 0) {
+        CFAIL("the Google secret did not survive being stored");
+    }
+
+    // The secret must not be readable in the database itself.
+    char raw[2048] = {0};
+    if (!Database_GetSetting(KEY_GOOGLE_CLIENT_SECRET, raw, sizeof(raw)) || !raw[0]) {
+        CFAIL("the Google secret was not stored at all");
+    }
+    if (strstr(raw, in.googleSecret) != NULL) {
+        CFAIL("the Google secret is in the database in the clear");
+    }
+
+    if (!OAuth_HasGitHubCredentials()) CFAIL("a stored GitHub client id was not noticed");
+    if (!OAuth_HasGoogleCredentials()) CFAIL("stored Google credentials were not noticed");
+
+    // Clearing a field removes it rather than storing a blank.
+    OAuthCredentials cleared;
+    memset(&cleared, 0, sizeof(cleared));
+    if (!OAuth_SaveCredentials(&cleared)) CFAIL("credentials could not be cleared");
+
+    OAuth_LoadCredentials(&out);
+    if (out.githubClientId[0] || out.googleClientId[0] || out.googleSecret[0]) {
+        CFAIL("clearing the credentials left something behind");
+    }
+    if (OAuth_HasGitHubCredentials() || OAuth_HasGoogleCredentials()) {
+        CFAIL("cleared credentials still count as present");
+    }
+
+    // A token left in the clear by a build from before v0.2.0 is not merely
+    // unreadable, it is removed on sight: leaving a credential nothing can use
+    // in a database is the thing that version set out to stop.
+    if (!Database_SetSetting("oauth_github_token", "gho_a_token_in_the_clear")) {
+        CFAIL("could not plant a cleartext token");
+    }
+
+    OAuthToken stale;
+    if (OAuth_LoadToken("github", &stale)) CFAIL("a cleartext token was accepted");
+
+    char left[256] = {0};
+    if (Database_GetSetting("oauth_github_token", left, sizeof(left)) && left[0]) {
+        CFAIL("a cleartext token was left in the database");
+    }
+
+    Database_Close();
+    DeleteFileW(path);
+
+    // Leave the application's own database as it was found. In --selftest
+    // there is none open, so this is for a check run from inside a session.
+    if (wasOpen && g_app && g_app->dbPath[0]) Database_Open(g_app->dbPath);
+
+    return TRUE;
+
+#undef CFAIL
+}
+
 BOOL OAuth_SelfTest(char* failure, size_t failureSize) {
 #define FAIL(msg) do { strncpy_s(failure, failureSize, (msg), _TRUNCATE); return FALSE; } while (0)
+
+    if (!CredentialsSelfTest(failure, failureSize)) return FALSE;
 
     char out[256];
 
