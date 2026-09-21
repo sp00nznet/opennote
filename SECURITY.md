@@ -1,6 +1,6 @@
 # Security
 
-OpenNote stores your notes, your editor session and — if you connect a sync provider —
+opennote stores your notes, your editor session and — if you connect a sync provider —
 an OAuth access token, in a SQLite database at `%APPDATA%\OpenNote\opennote.db`.
 
 That file is as sensitive as the notes you put in it. This document says plainly what
@@ -44,7 +44,7 @@ account.
 
 **If you ran a build from before v0.2.0 and signed in, your access token is still in that
 database in the clear.** Revoke it — GitHub under Settings → Applications, Google under
-Account → Security → Third-party access — and sign in again. From v0.9.1 OpenNote deletes
+Account → Security → Third-party access — and sign in again. From v0.9.1 opennote deletes
 any stored credential it cannot unwrap the moment it reads one, so such a token is removed
 on sight rather than left to sit there; it was unusable to the program either way, which
 is precisely why it went unnoticed.
@@ -70,7 +70,7 @@ The notes database is an ordinary SQLite file. Anyone with the file has the note
 This is not a bug, it is the current design, and it is stated here so nobody assumes
 otherwise. Encryption at rest is scheduled for v0.3.0 — see `ROADMAP.md`.
 
-## What OpenNote does not do
+## What opennote does not do
 
 - No telemetry, no analytics, no crash reporting, no update check. The application makes
   no network request at all unless you connect a sync provider.

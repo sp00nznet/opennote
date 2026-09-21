@@ -1,6 +1,6 @@
 # Cloud Sync Setup
 
-**OpenNote ships no API keys.** Not a client secret, and not a client ID: the published
+**opennote ships no API keys.** Not a client secret, and not a client ID: the published
 binaries contain neither, CI passes no credentials, and the build refuses a secret if one
 is offered. If you want sync, you register the OAuth application yourself and it stays
 yours — your quota, your consent screen, your revocation.
@@ -20,7 +20,7 @@ is not a secret; `strings OpenNote.exe` recovers it. See [SECURITY.md](../SECURI
 Google's token endpoint still asks for a `client_secret` for a Desktop client type even
 under PKCE. [RFC 8252][native] is explicit that such a value is not confidential — it
 cannot be, in an application anybody can download — which is exactly why it belongs to
-*your* project rather than to OpenNote's.
+*your* project rather than to opennote's.
 
 ## GitHub
 
@@ -30,7 +30,7 @@ cannot be, in an application anybody can download — which is exactly why it be
 3. In the app's settings, enable **Device flow**. Without it GitHub rejects the request.
 4. Copy the **Client ID**. There is no secret to copy; do not generate one.
 
-The scope OpenNote asks for is `gist` — enough to sync notes as gists, and nothing else.
+The scope opennote asks for is `gist` — enough to sync notes as gists, and nothing else.
 
 ## Google Drive
 
@@ -47,7 +47,7 @@ The scope OpenNote asks for is `gist` — enough to sync notes as gists, and not
 The loopback listener runs on `http://localhost:8547/callback`. Google accepts any
 loopback port for a desktop client, so this needs no configuration.
 
-## Giving OpenNote the credentials
+## Giving opennote the credentials
 
 **In an installed copy** — no rebuild, no command line:
 

@@ -4,7 +4,7 @@ Where this is going, in order, and what is deliberately not being built.
 
 The short version: **Windows shipped a rich text editor for thirty years and removed it
 in 2024.** WordPad is gone from Windows 11 24H2 and from Windows Server 2025. The
-replacement Microsoft points you at is a subscription. OpenNote is aiming at that hole.
+replacement Microsoft points you at is a subscription. opennote is aiming at that hole.
 
 **v0.11.0.** Published binaries — a bare executable and an installer — are built by CI
 from the tagged commit.
@@ -42,7 +42,7 @@ product is scaffolding. The seam is where it needs to be and the rest waits for 
 
 ## v0.3.0 — Notes vault
 
-The notes half of OpenNote aimed squarely at what Evernote (~$130/yr, free tier capped at
+The notes half of opennote aimed squarely at what Evernote (~$130/yr, free tier capped at
 50 notes), Obsidian Sync ($4–8/mo for sync and version history alone) and Standard Notes
 (~$90/yr, where encryption *is* the paid tier) charge for.
 

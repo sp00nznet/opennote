@@ -195,7 +195,7 @@ properties being counted.
 
 ### Added
 - **A screen for your own OAuth credentials** — Settings → Default Settings… → Sync
-  Accounts… → Credentials…. OpenNote ships no API keys and never has: an installed copy
+  Accounts… → Credentials…. opennote ships no API keys and never has: an installed copy
   had no way to be given any, so cloud sync could only be enabled by building from source.
   Client IDs are stored as they are, because they are public identifiers; the Google
   client secret is wrapped with DPAPI like an access token. The sign-in buttons follow
@@ -433,7 +433,7 @@ before it can be written, and it fixes a real defect on the way.
 
 ## [0.6.0] - 2026-09-18
 
-**Word documents.** OpenNote reads and writes `.docx` — ECMA-376 WordprocessingML —
+**Word documents.** opennote reads and writes `.docx` — ECMA-376 WordprocessingML —
 with no new dependency, because Windows already ships an API for Open Packaging
 Conventions containers and a pull XML reader.
 
@@ -457,7 +457,7 @@ Conventions containers and a pull XML reader.
 - **The corpus is generated, not committed** — `tests/make_fixtures.py` builds it, so the
   repository carries no binary Office documents.
 - **`tests/validate_docx.py`** checks the packages the writer produced using Python's
-  zipfile and XML parser, so a file only OpenNote's own reader accepts does not pass.
+  zipfile and XML parser, so a file only opennote's own reader accepts does not pass.
 - `OpenNote.exe --docx2rtf <file.docx>` prints the converted RTF, for looking at when a
   document comes out wrong.
 
@@ -491,7 +491,7 @@ Conventions containers and a pull XML reader.
 ## [0.5.0] - 2026-09-18
 
 **The WordPad replacement.** Windows 11 24H2 removed WordPad; this is the milestone that
-answers it. OpenNote now opens, edits, prints and saves rich text documents.
+answers it. opennote now opens, edits, prints and saves rich text documents.
 
 ### Added
 - **Rich text documents.** `.rtf` files open in a RichEdit 4.1 view alongside the existing
@@ -541,7 +541,7 @@ answers it. OpenNote now opens, edits, prints and saves rich text documents.
 - GitHub Actions pipeline (`.github/workflows/ci.yml`): builds on every push and pull
   request to `main`, publishes a GitHub Release with both the bare executable and the
   installer on a `v*` tag.
-- Installer now registers OpenNote as an *additional* handler for `.txt`, `.log`, `.md`
+- Installer now registers opennote as an *additional* handler for `.txt`, `.log`, `.md`
   and `.ini` rather than only adding a generic "Open with" verb, and no longer seizes
   the default association for any extension.
 

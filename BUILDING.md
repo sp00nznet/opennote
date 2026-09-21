@@ -1,4 +1,4 @@
-# Building OpenNote
+# Building opennote
 
 ## Requirements
 
@@ -13,7 +13,7 @@
 ```bash
 # Clone the repository
 git clone https://github.com/sp00nznet/opennote.git
-cd OpenNote
+cd opennote
 
 # Configure with CMake
 cmake -B build
@@ -30,7 +30,7 @@ The executable will be at `build/bin/Release/OpenNote.exe` or `build/bin/Debug/O
 ### Visual Studio
 
 1. Open Visual Studio 2022
-2. Select "Open a local folder" and choose the OpenNote directory
+2. Select "Open a local folder" and choose the opennote directory
 3. CMake will automatically configure the project
 4. Select your build configuration (Debug/Release)
 5. Build > Build All (Ctrl+Shift+B)
@@ -39,7 +39,7 @@ The executable will be at `build/bin/Release/OpenNote.exe` or `build/bin/Debug/O
 
 ```bash
 # Open "x64 Native Tools Command Prompt for VS 2022"
-cd path\to\OpenNote
+cd path\to\opennote
 cmake -B build -G "Visual Studio 17 2022" -A x64
 cmake --build build --config Release
 ```
@@ -91,7 +91,7 @@ cmake --build build --config Release
 
 ## Running Tests
 
-Currently, OpenNote does not have automated tests. Manual testing is performed on:
+Currently, opennote does not have automated tests. Manual testing is performed on:
 - File operations (new, open, save, save as)
 - Tab management (create, close, switch)
 - Notes database (create, edit, delete, search)

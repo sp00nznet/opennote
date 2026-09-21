@@ -27,7 +27,7 @@ absent. See `SECURITY.md`.
 
 ## Working on file formats
 
-OpenNote is growing into a document editor, which means implementing published formats:
+opennote is growing into a document editor, which means implementing published formats:
 RTF 1.9.1, ECMA-376 (`.docx`), and eventually [MS-DOC] over [MS-CFB] (`.doc`). All of
 these specifications are public and downloadable. Read them.
 

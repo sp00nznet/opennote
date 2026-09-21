@@ -1,11 +1,11 @@
 # Building the Installer
 
-OpenNote uses [Inno Setup](https://jrsoftware.org/isinfo.php) to create the Windows installer.
+opennote uses [Inno Setup](https://jrsoftware.org/isinfo.php) to create the Windows installer.
 
 ## Prerequisites
 
 1. Install [Inno Setup](https://jrsoftware.org/isdl.php) (free)
-2. Build OpenNote first:
+2. Build opennote first:
    ```bash
    cmake -B build -G "Visual Studio 17 2022" -A x64
    cmake --build build --config Release

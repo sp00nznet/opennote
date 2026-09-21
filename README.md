@@ -18,11 +18,15 @@ A tabbed Windows editor with a local SQLite note store behind it. Native C and W
 one executable, a few megabytes, no runtime to install and nothing running when it is
 closed.
 
+[Features](#features) • [Comparison](#comparison) • [Build and run](#build-and-run) • [Documentation](#documentation) • [Why](PHILOSOPHY.md)
+
 Sibling project to [futureburn](https://github.com/sp00nznet/futureburn),
 [pstfree](https://github.com/sp00nznet/pstfree),
-[vncfree](https://github.com/sp00nznet/vncfree) and
-[bulkhead](https://github.com/sp00nznet/bulkhead) — same attitude: find the Windows
-payware, read the published spec it is hiding behind, give it away.
+[vncfree](https://github.com/sp00nznet/vncfree),
+[bulkhead](https://github.com/sp00nznet/bulkhead) and
+[connectty](https://github.com/sp00nznet/connectty) — same attitude: find the Windows
+payware, read the published spec it is hiding behind, give it away. The long version is
+in **[PHILOSOPHY.md](PHILOSOPHY.md)**.
 
 ## Status
 
@@ -35,7 +39,7 @@ made from source without the optional OAuth variables is not affected by any of 
 
 ### Word documents
 
-As of v0.6.0 OpenNote opens and saves **`.docx`** — ECMA-376 WordprocessingML.
+As of v0.6.0 opennote opens and saves **`.docx`** — ECMA-376 WordprocessingML.
 Formatting, alignment, lists, indents, tables, tracked-deletion handling and Unicode all
 come through. There is no new dependency: a `.docx` is an Open Packaging Conventions
 container, and Windows ships the API for exactly that shape (`IOpcFactory`) alongside a
@@ -55,7 +59,7 @@ over it. **Tables now survive being saved back to `.docx`**, which they did not 
 from Windows 11 24H2 and Windows Server 2025. Microsoft's suggested replacement is a
 subscription: Microsoft 365 is $70–100/yr, or $150 once for Office 2024.
 
-As of v0.5.0 OpenNote opens, edits and saves `.rtf` — fonts, sizes, colours, bold, italic,
+As of v0.5.0 opennote opens, edits and saves `.rtf` — fonts, sizes, colours, bold, italic,
 underline, strikethrough, super/subscript, alignment, line spacing, bullets, numbering,
 indent, pictures — with a formatting toolbar, spell check, page setup and multi-page
 printing. The whole application is a **3.6MB executable** with no runtime to install.
@@ -72,7 +76,7 @@ As of v0.8 a document is laid out onto pages rather than flowed into a window:
 paragraphs measured and broken at a line when they do not fit, widows and orphans kept
 off the page, tables boxed with the column widths the file states, pages sized by Page
 Setup. `IDWriteTextLayout` does the shaping, line breaking and font fallback; what
-OpenNote adds is the part above it, and it knows nothing about windows — the same
+opennote adds is the part above it, and it knows nothing about windows — the same
 geometry draws the page view, the printout and the PDF, so they cannot disagree.
 
 As of v0.9 the engine lays out what documents actually contain: named styles resolved
@@ -131,7 +135,7 @@ does the export, and [MS-DOC], [MS-CFB] and ECMA-376 are all published specifica
 anyone can download.
 
 [LibreOffice](https://www.libreoffice.org) Writer is genuinely free, genuinely good, and
-further along than this will be for a long time. Use it today. OpenNote exists because a
+further along than this will be for a long time. Use it today. opennote exists because a
 350MB office suite is not what most people wanted when they opened WordPad — and because
 nothing free reads a legacy `.doc` well, now that the last in-box reader has left with it.
 
@@ -140,6 +144,91 @@ does not compete with them. Syntax highlighting is here because Scintilla provid
 because anyone should switch.
 
 See [ROADMAP.md](ROADMAP.md) for the ordering.
+
+---
+
+## Features
+
+### Documents
+
+| | |
+|---|---|
+| **Word documents** | `.docx` read and written directly — ECMA-376, through Windows' own packaging API. Styles resolved through `basedOn`, numbering that counts (letters, roman numerals, `1.2.` when nested), tables with their stated column widths, sections, columns, page breaks, headers and footers, footnotes and endnotes |
+| **Rich text** | `.rtf` — fonts, sizes, colours, bold, italic, underline, strikethrough, super- and subscript, alignment, line spacing, bullets and numbering, indents, pictures. What WordPad saved |
+| **Plain text** | Any encoding, with syntax highlighting where Scintilla recognises the file, word wrap and configurable tabs |
+| **Pictures** | PNG, JPEG, GIF, BMP, TIFF go in and come out as the same bytes — the file you chose, not a re-encoding of it |
+| **Fidelity is measured** | `230/230` conformance checks across 12 documents, `84327/84327` properties surviving the model round trip, and a build that fails when the number gets worse |
+
+### Pages, printing and PDF
+
+| | |
+|---|---|
+| **A real layout engine** | Paragraphs measured onto pages, widows and orphans kept off, tables boxed, footnotes at the foot of the page that referred to them, columns, page breaks, paper from Page Setup |
+| **Editing on the page** | The laid-out view is not a preview: click to place the caret, arrows walk the lines you can see, `Page Up` means a page, the ruler's markers set indents, undo is a stack of model snapshots |
+| **Printing** | The pages that come out are the pages the view showed — the same engine measures both |
+| **PDF export** | Vector, through Windows' own PDF printer. The text stays text and the fonts are embedded |
+| **PDF reading** | A `.pdf` opens in a tab and shows its pages, fitted, zoomable, a page at a time |
+| **PDF forms** | Boxes to type in, boxes to tick and lists to choose from — filled in and written back as an *incremental update*, so your original bytes stay in the file |
+| **PDF signing** | A picture of a signature where you drag it, transparency kept; or a certificate signature — a detached PKCS#7 over the byte range, from your own Windows certificate store |
+| **PDF checking** | Whether the bytes have changed since signing, and what the certificate behind it is worth, reported as two separate answers |
+
+### Reviewing
+
+| | |
+|---|---|
+| **Tracked changes** | Read, kept and written back, with Accept All and Reject All. A deletion is carried rather than dropped — losing it on read means losing it on save |
+| **Comments** | Who said what and when, in their own part of the file, with the markers that say what they are about |
+| **Fields** | `PAGE`, `NUMPAGES`, `DATE`, `TIME`, `REF` and `PAGEREF`, answered when the document is laid out. Anything else keeps the result it came in with |
+| **Page numbers** | A centred "Page N of M" footer, as fields rather than as text |
+| **Table of contents** | Built from the headings, each entry pointing at a bookmark on its heading, so the numbers follow the document |
+
+### Notes and the editor
+
+| | |
+|---|---|
+| **Tabs** | Several documents at once, with the session restored on the next launch |
+| **Note store** | SQLite with full-text search, browsable, importable and exportable — one file in `%APPDATA%`, or wherever `OPENNOTE_DB` points |
+| **Cross-tab search** | Find and replace across every open document |
+| **Compare** | Side-by-side diff between any two open documents |
+| **Spell check** | Through `ISpellChecker` — the dictionary Windows already has |
+| **Shell integration** | Run selected text through CMD or PowerShell |
+| **Cloud sync** | Optional, to your own GitHub gist or Google Drive, with an OAuth application you registered yourself. No opennote server exists |
+
+### What is in the box
+
+| | |
+|---|---|
+| **One executable** | A few megabytes. No installer required, no runtime, no service, no account |
+| **No telemetry** | Nothing is sent anywhere. No update check, no analytics, no crash reporter |
+| **No API keys** | The published binaries contain neither a client id nor a secret; sync is off until you supply your own |
+| **Dependencies** | SQLite and Scintilla, vendored. Everything else is Windows: DirectWrite, Direct2D, WIC, XmlLite, the OPC packaging API, `Windows.Data.Pdf`, CryptoAPI |
+| **MIT** | Forever. If this ever grows a licence key, fork it |
+
+---
+
+## Comparison
+
+| | opennote | WordPad | Word | LibreOffice Writer | Notepad |
+|:--|:--:|:--:|:--:|:--:|:--:|
+| **Price** | Free | Removed in 24H2 | $70–100/yr | Free | Free |
+| **Open source** | MIT | No | No | MPL | No |
+| **Size** | ~4 MB | ~2 MB | ~2 GB | ~350 MB | ~1 MB |
+| **Reads `.docx`** | Yes | Partly | Yes | Yes | No |
+| **Writes `.docx`** | Yes | No | Yes | Yes | No |
+| **Reads `.rtf`** | Yes | Yes | Yes | Yes | No |
+| **Page layout** | Yes | No | Yes | Yes | No |
+| **Tracked changes** | Read, write, resolve | No | Yes | Yes | No |
+| **Comments** | Read and write | No | Yes | Yes | No |
+| **Opens a PDF** | Yes | No | Yes | Draw only | No |
+| **Fills a PDF form** | Yes | No | No | Yes | No |
+| **Signs a PDF** | Picture + certificate | No | Certificate | Certificate | No |
+| **Note store with search** | Yes | No | No | No | No |
+| **Telemetry** | None | None | Yes | Opt-in | Yes |
+
+LibreOffice Writer is genuinely free, genuinely good and years ahead of this on documents;
+if you want an office suite, install it. opennote exists because a 350MB office suite is
+not what most people wanted when they opened WordPad — and because nothing free reads a
+legacy `.doc` well, now that the last in-box reader has left with it.
 
 ---
 
@@ -188,26 +277,25 @@ From a clean machine:
 ## Usage
 
 ```powershell
-OpenNote.exe                 # empty tab
-OpenNote.exe notes.txt       # open a file in a tab
-OpenNote.exe report.rtf      # open a rich text document
-OpenNote.exe report.docx     # open a Word document
-OpenNote.exe --selftest      # run the built-in checks and exit
+OpenNote.exe                    # empty tab
+OpenNote.exe notes.txt          # open a file in a tab
+OpenNote.exe report.rtf         # open a rich text document
+OpenNote.exe report.docx        # open a Word document
+OpenNote.exe form.pdf           # open a PDF
+
+OpenNote.exe --selftest         # run the built-in checks and exit
+OpenNote.exe --docx-check DIR   # .docx conformance across a corpus
+OpenNote.exe --export-pdf IN OUT
+OpenNote.exe --pdf-info FILE [page.png]
+OpenNote.exe --pdf-fields FILE
+OpenNote.exe --pdf-fill IN OUT "field=value" ...
+OpenNote.exe --pdf-stamp IN OUT IMAGE PAGE X Y WIDTH
+OpenNote.exe --pdf-sign IN OUT
+OpenNote.exe --pdf-verify FILE
 ```
 
-### What it does
-
-| | |
-|---|---|
-| **Word documents** | `.docx` read and write — ECMA-376, via Windows' own packaging API |
-| **Rich text** | `.rtf` documents: fonts, colours, alignment, lists, indent, pictures, printing |
-| **Tabs** | Several documents at once, with the session restored on next launch |
-| **Syntax highlighting** | Via Scintilla — 100+ languages |
-| **Note store** | SQLite with FTS5 full-text search, browsable, import and export |
-| **Compare** | Side-by-side diff between any two open documents |
-| **Cross-tab search** | Find and replace across every open tab |
-| **Shell integration** | Run selected text through CMD or PowerShell |
-| **Cloud sync** | Optional, to your own GitHub or Google Drive. See the caveats below |
+What it does is in [Features](#features) above; these are the same jobs without a window,
+which is also where they are checked.
 
 ### Keyboard
 
@@ -231,7 +319,7 @@ Every key, button and mouse gesture, including the page layout view's own, is in
 Off unless you connect an account, and it talks to GitHub or Google directly — there is
 no server in between and this project does not operate one.
 
-**No API key ships with OpenNote** — not a client secret, and not a client ID. The
+**No API key ships with opennote** — not a client secret, and not a client ID. The
 published binaries contain neither, CI passes no credentials, and the build fails outright
 if a client secret is offered to it, so a released build can be reproduced byte for byte
 from its tag. GitHub uses the device flow and Google uses PKCE against an OAuth
@@ -262,6 +350,7 @@ application completely.
 | [Overview](docs/overview.md) | What this is: where it came from, what is WordPad about it, what is Word about it, and the goals |
 | [Cloud sync setup](docs/cloud-sync-setup.md) | Registering your own OAuth application with GitHub and Google |
 | [Building the installer](docs/building-installer.md) | Packaging a release |
+| [PHILOSOPHY.md](PHILOSOPHY.md) | Why these projects exist, and what would mean one had gone wrong |
 | [ROADMAP.md](ROADMAP.md) | The ordering, version by version |
 | [SECURITY.md](SECURITY.md) | Known issues, stated rather than buried |
 
@@ -330,7 +419,7 @@ contain — that a tracked deletion is absent, that a heading keeps its weight, 
 edges come from `w:tblGrid`, that non-ASCII survives as `\uN`. Every document is also
 written back out as `.docx` and re-read, asserting no text is lost, and
 `tests/validate_docx.py` then checks those packages with Python rather than with
-OpenNote's own reader.
+opennote's own reader.
 
 `--docx2rtf <file.docx>` prints the converted RTF, which is the thing to look at when a
 document comes out wrong. `--layout-report <file.docx>` prints where the layout engine

@@ -1,8 +1,8 @@
-# OpenNote Architecture
+# opennote Architecture
 
 ## Overview
 
-OpenNote is a Win32 application written in C, using the Windows API for UI and SQLite for data persistence.
+opennote is a Win32 application written in C, using the Windows API for UI and SQLite for data persistence.
 
 ## Project Structure
 
@@ -213,7 +213,7 @@ Functions return success/failure indicators:
 - Wide strings (`WCHAR*`) for all text
 - SQLite manages its own memory
 
-## Extending OpenNote
+## Extending opennote
 
 ### Adding a Menu Command
 
