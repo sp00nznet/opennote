@@ -59,6 +59,7 @@ set(SUPERNOTE_SOURCES
     src/ui/pageview.cpp
     src/ui/richole.c
     src/core/docx.c
+    src/pdf/pdfread.cpp
     src/db/database.c
     src/db/notes_repo.c
     src/db/links_repo.c
@@ -113,6 +114,7 @@ target_link_libraries(OpenNote PRIVATE
     d3d11
     dxgi
     windowscodecs
+    runtimeobject
 )
 
 target_compile_definitions(OpenNote PRIVATE

@@ -3,6 +3,7 @@
 #include "sync/crypto.h"
 #include "sync/oauth.h"
 #include "ui/editor_rich.h"
+#include "pdf/pdfread.h"
 
 // Twips per DIP. Mirrors the engine's constant, which lives in a C++-only
 // header because DirectWrite has no C binding.
@@ -37,6 +38,7 @@ static int RunSelfTest(void) {
         { "docedit",DocEdit_SelfTest},
         { "docx",   Docx_SelfTest   },
         { "layout", Layout_SelfTest },
+        { "pdf",    Pdf_SelfTest    },
     };
 
     int failed = 0;
@@ -166,6 +168,59 @@ static int RunExportPdf(int argc, WCHAR** argv) {
 
     wprintf(L"%s -> %s, %d page%s\n", argv[2], argv[3], pages, pages == 1 ? L"" : L"s");
     return 0;
+}
+
+// What a PDF says it is: how many pages, how big, and -- with a third
+// argument -- one of them written out as a PNG. The same shape as
+// --docx-check: the reading path answering on the command line, where it can
+// be checked without a window.
+static int RunPdfInfo(int argc, WCHAR** argv) {
+    if (argc < 3) {
+        printf("usage: OpenNote.exe --pdf-info <file.pdf> [page.png] [pageIndex]\n");
+        return 2;
+    }
+
+    PdfFile* pdf = Pdf_Open(argv[2]);
+    if (!pdf) {
+        wprintf(L"FAILED: %s could not be opened as a PDF\n", argv[2]);
+        return 1;
+    }
+
+    int pages = Pdf_PageCount(pdf);
+    wprintf(L"%s: %d page%s\n", argv[2], pages, pages == 1 ? L"" : L"s");
+
+    for (int i = 0; i < pages && i < 10; i++) {
+        float w = 0.0f, h = 0.0f;
+        if (!Pdf_PageSize(pdf, i, &w, &h)) continue;
+        wprintf(L"  page %d: %.0f x %.0f points (%.2f x %.2f inches)\n",
+                i + 1, w, h, w / 72.0f, h / 72.0f);
+    }
+
+    int rc = 0;
+    if (argc >= 4) {
+        int index = argc >= 5 ? _wtoi(argv[4]) : 0;
+
+        BYTE* bytes = NULL;
+        size_t len = 0;
+        if (Pdf_RenderPage(pdf, index, 1000, &bytes, &len)) {
+            FILE* out = NULL;
+            if (_wfopen_s(&out, argv[3], L"wb") == 0 && out) {
+                fwrite(bytes, 1, len, out);
+                fclose(out);
+                wprintf(L"  page %d -> %s (%zu bytes)\n", index + 1, argv[3], len);
+            } else {
+                wprintf(L"FAILED: could not write %s\n", argv[3]);
+                rc = 1;
+            }
+            free(bytes);
+        } else {
+            wprintf(L"FAILED: page %d did not render\n", index + 1);
+            rc = 1;
+        }
+    }
+
+    Pdf_Close(pdf);
+    return rc;
 }
 
 // Does `b` contain the same characters as `a`, ignoring whitespace and the
@@ -522,7 +577,8 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPWSTR lpCmdLi
     if (lpCmdLine && (wcsstr(lpCmdLine, L"--docx2rtf") ||
                       wcsstr(lpCmdLine, L"--docx-check") ||
                       wcsstr(lpCmdLine, L"--layout-report") ||
-                      wcsstr(lpCmdLine, L"--export-pdf"))) {
+                      wcsstr(lpCmdLine, L"--export-pdf") ||
+                      wcsstr(lpCmdLine, L"--pdf-info"))) {
         BOOL attached = FALSE;
         FILE* out = NULL;
         if (GetStdHandle(STD_OUTPUT_HANDLE) == NULL) {
@@ -537,6 +593,7 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPWSTR lpCmdLi
             if (wcsstr(lpCmdLine, L"--docx-check"))         rc = RunDocxCheck(argc, argv);
             else if (wcsstr(lpCmdLine, L"--layout-report")) rc = RunLayoutReport(argc, argv);
             else if (wcsstr(lpCmdLine, L"--export-pdf"))    rc = RunExportPdf(argc, argv);
+            else if (wcsstr(lpCmdLine, L"--pdf-info"))      rc = RunPdfInfo(argc, argv);
             else                                            rc = RunDocxToRtf(argc, argv);
             LocalFree(argv);
         }

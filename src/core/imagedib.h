@@ -12,6 +12,10 @@
 // WIC does the decoding. It ships with Windows, reads every format anybody
 // pastes into a document, and is already a dependency of the printing path.
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 // Decode `bytes` into a 24-bit bottom-up DIB: the header is filled in and the
 // pixels are returned. Caller frees. NULL if the format is not one WIC reads.
 BYTE* ImageDib_Decode(const BYTE* bytes, size_t len,
@@ -21,5 +25,9 @@ BYTE* ImageDib_Decode(const BYTE* bytes, size_t len,
 // RichEdit's RTF reader will actually take. Caller frees.
 BYTE* ImageDib_ToMetafile(const BYTE* pixels, const BITMAPINFOHEADER* header,
                           size_t* lenOut);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif // IMAGEDIB_H
