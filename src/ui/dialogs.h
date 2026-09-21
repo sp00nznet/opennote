@@ -27,9 +27,6 @@ int Dialogs_SaveChanges(HWND hParent, const WCHAR* filename);  // Returns IDYES,
 // Input dialog
 BOOL Dialogs_InputBox(HWND hParent, const WCHAR* title, const WCHAR* prompt, WCHAR* buffer, int bufferSize);
 
-// Print preview
-void Dialogs_PrintPreview(HWND hParent, HWND hEditor);
-
 // Markdown preview
 void Dialogs_MarkdownPreview(HWND hParent, HWND hEditor);
 

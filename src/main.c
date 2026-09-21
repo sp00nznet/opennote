@@ -571,14 +571,17 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPWSTR lpCmdLi
 
     // Process command line - open file if specified
     if (lpCmdLine && lpCmdLine[0]) {
-        // Remove quotes if present
+        // Let Windows do the quoting rules. The hand-rolled version kept
+        // whatever the caller left on the end -- a trailing space survived
+        // into the file name, and the title bar showed it.
         WCHAR path[MAX_PATH];
-        if (lpCmdLine[0] == L'"') {
-            wcscpy_s(path, MAX_PATH, lpCmdLine + 1);
-            WCHAR* endQuote = wcschr(path, L'"');
-            if (endQuote) *endQuote = L'\0';
-        } else {
-            wcscpy_s(path, MAX_PATH, lpCmdLine);
+        path[0] = L'\0';
+
+        int fileArgc = 0;
+        WCHAR** fileArgv = CommandLineToArgvW(GetCommandLineW(), &fileArgc);
+        if (fileArgv) {
+            if (fileArgc > 1) wcscpy_s(path, MAX_PATH, fileArgv[1]);
+            LocalFree(fileArgv);
         }
 
         // Check if file exists

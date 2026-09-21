@@ -106,7 +106,6 @@
 #define IDD_FIND_IN_TABS        407
 #define IDD_REPLACE_IN_TABS     408
 #define IDD_INPUTBOX            409
-#define IDD_PRINT_PREVIEW       410
 #define IDD_SYNC_ACCOUNTS       411
 #define IDD_SYNC_CREDENTIALS    412
 
@@ -138,11 +137,6 @@
 #define IDC_INPUTBOX_TEXT       1124
 #define IDC_INPUTBOX_PROMPT     1125
 #define IDC_DEFAULTS_TRAY       1126
-#define IDC_PREVIEW_CANVAS      1127
-#define IDC_PREVIEW_PREV        1128
-#define IDC_PREVIEW_NEXT        1129
-#define IDC_PREVIEW_PRINT       1130
-#define IDC_PREVIEW_PAGENUM     1131
 #define IDC_NOTES_RENAME        1132
 #define IDC_NEW_TAB_BTN         1133
 #define IDC_NOTES_SYNC          1134

@@ -70,6 +70,11 @@ struct PageViewState {
     BOOL  caretOn;
     BOOL  dirty;
 
+    // What this is a view of. A child window has no title bar to put it in, so
+    // it goes on the status line -- and on the window itself, where a screen
+    // reader or a window spy will find it.
+    WCHAR docTitle[128];
+
     // Dragging an indent marker on the ruler. 0 = not dragging, 1 = the
     // first-line marker, 2 = the left indent (which carries the first line
     // with it, the way every ruler does).
@@ -567,6 +572,18 @@ static void PasteText(HWND hwnd, PageViewState* st) {
 static void ApplyToDocument(HWND hwnd, PageViewState* st) {
     if (!st->dirty || !st->hRich || !IsWindow(st->hRich)) return;
 
+    // A plain text view takes the text and nothing else: there is no
+    // formatting to lose, and nothing in the view that could hold it.
+    if (!Editor_IsRich(st->hRich)) {
+        WCHAR* text = Doc_GetText(st->doc);
+        if (text) {
+            Editor_SetTextAsEdit(st->hRich, text);
+            free(text);
+            st->dirty = FALSE;
+        }
+        return;
+    }
+
     // Somebody may have typed in the main window while this one was open.
     // Overwriting that silently would lose it, so ask first.
     char* now = Rich_GetRtf(st->hRich);
@@ -1053,15 +1070,21 @@ static void Paint(HWND hwnd, PageViewState* st) {
 // page count and zoom go to the status bar, where the line and column already
 // are.
 static void SetTitle(HWND hwnd, PageViewState* st, const WCHAR* docTitle) {
-    (void)hwnd;
     (void)docTitle;
 
-    WCHAR status[128];
-    swprintf_s(status, 128, L"Page layout - %d page%s at %d%%",
+    WCHAR label[256];
+    swprintf_s(label, 256, L"Page layout - %s%s - %d page%s at %d%%",
+               st->docTitle,
+               st->dirty ? L" *" : L"",
                Layout_PageCount(st->layout),
                Layout_PageCount(st->layout) == 1 ? L"" : L"s",
                (int)(st->zoom * 100.0f + 0.5f));
-    StatusBar_SetMessage(status);
+
+    // The status line is where a child window's title goes. The window's own
+    // text is set as well: nothing draws it, but it is what anything asking
+    // Windows what this window is will be told.
+    StatusBar_SetMessage(label);
+    SetWindowTextW(hwnd, label);
 }
 
 // Arrows, Home, End and the page keys. All of them are questions about the
@@ -1499,10 +1522,31 @@ static void EnsureClass(void) {
     registered = TRUE;
 }
 
-extern "C" HWND PageView_Create(HWND hParent, HWND hRichEdit, const DocModel* source) {
+extern "C" HWND PageView_Create(HWND hParent, HWND hRichEdit, const DocModel* source,
+                                const WCHAR* docTitle) {
     if (!hParent || !hRichEdit) return NULL;
 
-    DocModel* doc = DocView_CaptureWith(hRichEdit, source);
+    // Either view can be laid out. A rich document is captured with whatever
+    // the file had that the control cannot hold; a plain one is simply its
+    // text, in the editor's own font -- which is what printing a note from
+    // Notepad has always meant.
+    DocModel* doc = NULL;
+
+    if (Editor_IsRich(hRichEdit)) {
+        doc = DocView_CaptureWith(hRichEdit, source);
+    } else {
+        WCHAR* text = Editor_GetText(hRichEdit);
+        CharProps props = {0};
+
+        wcsncpy_s(props.font, LF_FACESIZE, g_app->editorFont.lfFaceName, _TRUNCATE);
+        int points = -g_app->editorFont.lfHeight * 72 / 96;
+        if (points < 6 || points > 72) points = 11;
+        props.halfPoints = points * 2;
+
+        doc = Doc_FromText(text ? text : L"", &props);
+        free(text);
+    }
+
     if (!doc) return NULL;
 
     PageViewState* st = (PageViewState*)calloc(1, sizeof(PageViewState));
@@ -1513,6 +1557,8 @@ extern "C" HWND PageView_Create(HWND hParent, HWND hRichEdit, const DocModel* so
 
     st->doc = doc;
     st->hRich = hRichEdit;
+    wcsncpy_s(st->docTitle, 128,
+              (docTitle && docTitle[0]) ? docTitle : L"Document", _TRUNCATE);
     st->openedWith = Rich_GetRtf(hRichEdit);
     st->zoom = 1.0f;
     st->focused = TRUE;
@@ -1552,7 +1598,7 @@ extern "C" HWND PageView_Create(HWND hParent, HWND hRichEdit, const DocModel* so
     EnsureClass();
 
     HWND hwnd = CreateWindowExW(
-        0, PAGEVIEW_CLASS, NULL,
+        0, PAGEVIEW_CLASS, L"Page layout",
         WS_CHILD | WS_VISIBLE | WS_VSCROLL,
         0, 0, 100, 100,
         hParent, NULL, g_app->hInstance, st);
@@ -1570,6 +1616,7 @@ extern "C" HWND PageView_Create(HWND hParent, HWND hRichEdit, const DocModel* so
     }
 
     UpdateScrollRange(hwnd, st);
+    SetTitle(hwnd, st, NULL);
     SetFocus(hwnd);
     return hwnd;
 }

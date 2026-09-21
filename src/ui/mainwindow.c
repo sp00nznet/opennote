@@ -251,12 +251,18 @@ LRESULT CALLBACK MainWindow_WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
 
         case WM_APP_DOC_MODIFIED:
             {
+                // Ask the control rather than assuming. This message is posted
+                // from a change notification, and loading a file is a change:
+                // the notification arrived after the load had already declared
+                // the document clean, so every file was marked modified the
+                // moment it was opened and asked to be saved on the way out.
                 Tab* tab = App_GetActiveTab();
-                if (tab && tab->document) {
-                    tab->document->modified = TRUE;
+                if (tab && tab->document && tab->hEditor) {
+                    BOOL modified = Editor_GetModified(tab->hEditor);
+                    tab->document->modified = modified;
                     TabControl_UpdateTabTitle(tab->index);
                     MainWindow_UpdateTitle();
-                    StatusBar_UpdateModified(TRUE);
+                    StatusBar_UpdateModified(modified);
                 }
             }
             return 0;
@@ -756,8 +762,10 @@ static int PrintRichDocumentTo(HWND hwnd, HWND hEditor, const WCHAR* printerName
                                HDC hDC, const WCHAR* title, const WCHAR* outputFile,
                                const DocModel* source) {
     // No printer name means Direct2D has nothing to address, so the control
-    // prints instead -- as it does for a document holding a picture.
-    if (!printerName || !printerName[0] || RichHasPicture(hEditor)) {
+    // prints instead -- as it does for a rich document holding a picture,
+    // which the engine cannot draw from the model yet.
+    if (Editor_IsRich(hEditor) &&
+        (!printerName || !printerName[0] || RichHasPicture(hEditor))) {
         RECT rc;
         if (!hDC) return 0;
         if (!PrintableRectTwips(hDC, &rc)) {
@@ -770,7 +778,27 @@ static int PrintRichDocumentTo(HWND hwnd, HWND hEditor, const WCHAR* printerName
         return Rich_PrintToDC(hEditor, hDC, &rc, title, outputFile);
     }
 
-    DocModel* model = DocView_CaptureWith(hEditor, source);
+    // Either kind of document lays out: a rich one is captured, a plain one is
+    // its text in the editor's font. The old plain path drew a single page
+    // with DrawText and stopped there, so a long note printed its first page
+    // and lost the rest.
+    DocModel* model = NULL;
+
+    if (Editor_IsRich(hEditor)) {
+        model = DocView_CaptureWith(hEditor, source);
+    } else {
+        WCHAR* text = Editor_GetText(hEditor);
+        CharProps props = {0};
+
+        wcsncpy_s(props.font, LF_FACESIZE, g_app->editorFont.lfFaceName, _TRUNCATE);
+        int points = -g_app->editorFont.lfHeight * 72 / 96;
+        if (points < 6 || points > 72) points = 11;
+        props.halfPoints = points * 2;
+
+        model = Doc_FromText(text ? text : L"", &props);
+        free(text);
+    }
+
     if (!model) return 0;
 
     int pages = 0;
@@ -885,17 +913,9 @@ static void TogglePageLayout(HWND hwnd) {
         SetFocus(tab->hEditor);
         StatusBar_SetMessage(L"");
     } else {
-        if (!Editor_IsRich(tab->hEditor)) {
-            MessageBoxW(hwnd,
-                L"Page layout is for rich text documents.\n\n"
-                L"A plain text file has no pages to lay out -- open or save it as "
-                L".rtf or .docx first.",
-                APP_NAME, MB_ICONINFORMATION);
-            return;
-        }
-
         HWND view = PageView_Create(hwnd, tab->hEditor,
-                                    tab->document ? tab->document->source : NULL);
+                                    tab->document ? tab->document->source : NULL,
+                                    tab->document ? Document_GetTitle(tab->document) : NULL);
         if (!view) {
             MessageBoxW(hwnd, L"The page layout view could not be prepared.",
                         APP_NAME, MB_ICONWARNING);
@@ -1022,68 +1042,10 @@ void MainWindow_OnCommand(HWND hwnd, int id, HWND hwndCtl, UINT codeNotify) {
 
         case IDM_FILE_PRINT:
             FlushPageLayout();
-            // The rich view prints itself: the plain path below renders one
-            // page of unformatted text and stops, which would silently drop
-            // both the formatting and everything past page one.
-            if (hEditor && Editor_IsRich(hEditor)) {
-                PrintRichDocument(hwnd, hEditor, doc);
-                break;
-            }
-            if (hEditor) {
-                PRINTDLGW pd = {
-                    .lStructSize = sizeof(pd),
-                    .hwndOwner = hwnd,
-                    .Flags = PD_RETURNDC | PD_NOPAGENUMS | PD_NOSELECTION
-                };
-
-                if (PrintDlgW(&pd)) {
-                    HDC hDC = pd.hDC;
-                    DOCINFOW di = {
-                        .cbSize = sizeof(di),
-                        .lpszDocName = doc ? Document_GetTitle(doc) : L"SuperNote Document"
-                    };
-
-                    if (StartDocW(hDC, &di) > 0) {
-                        // Get text
-                        WCHAR* text = Editor_GetText(hEditor);
-                        if (text) {
-                            // Simple print - one page with text
-                            StartPage(hDC);
-
-                            // Set up font
-                            HFONT hPrintFont = CreateFontW(
-                                -MulDiv(10, GetDeviceCaps(hDC, LOGPIXELSY), 72),
-                                0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
-                                DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
-                                DEFAULT_QUALITY, FIXED_PITCH | FF_MODERN, L"Consolas"
-                            );
-                            HFONT hOldFont = (HFONT)SelectObject(hDC, hPrintFont);
-
-                            // Calculate margins
-                            int marginX = GetDeviceCaps(hDC, LOGPIXELSX);  // 1 inch
-                            int marginY = GetDeviceCaps(hDC, LOGPIXELSY);  // 1 inch
-                            int pageWidth = GetDeviceCaps(hDC, HORZRES) - 2 * marginX;
-                            int pageHeight = GetDeviceCaps(hDC, VERTRES) - 2 * marginY;
-
-                            RECT rc = { marginX, marginY, marginX + pageWidth, marginY + pageHeight };
-
-                            // Draw text (wrapping)
-                            DrawTextW(hDC, text, -1, &rc, DT_LEFT | DT_TOP | DT_WORDBREAK | DT_EXPANDTABS);
-
-                            SelectObject(hDC, hOldFont);
-                            DeleteObject(hPrintFont);
-
-                            EndPage(hDC);
-                            free(text);
-                        }
-                        EndDoc(hDC);
-                    }
-                    DeleteDC(hDC);
-                }
-
-                if (pd.hDevMode) GlobalFree(pd.hDevMode);
-                if (pd.hDevNames) GlobalFree(pd.hDevNames);
-            }
+            // Every document prints through the layout engine, plain text
+            // included: what stood here before drew one page with DrawText and
+            // stopped, so a long note printed its first page and lost the rest.
+            if (hEditor) PrintRichDocument(hwnd, hEditor, doc);
             break;
 
         case IDM_FILE_EXPORT_PDF:
@@ -1091,26 +1053,15 @@ void MainWindow_OnCommand(HWND hwnd, int id, HWND hwndCtl, UINT codeNotify) {
             // thing nobody asks for, and the layout engine has nothing to lay
             // out from Scintilla.
             FlushPageLayout();
-            if (hEditor && Editor_IsRich(hEditor)) {
-                ExportToPdf(hwnd, hEditor, doc);
-            } else {
-                MessageBoxW(hwnd, L"Only rich text documents can be exported to PDF.",
-                            APP_NAME, MB_ICONINFORMATION);
-            }
+            if (hEditor) ExportToPdf(hwnd, hEditor, doc);
             break;
 
         case IDM_FILE_PRINT_PREVIEW:
-            // A preview of the laid-out pages and the place they can be edited
-            // are the same thing once the engine exists, so this is the page
-            // layout view -- except for plain text, which the engine has
-            // nothing to lay out and which keeps its own simple preview.
-            if (hEditor && !Editor_IsRich(hEditor)) {
-                Dialogs_PrintPreview(hwnd, hEditor);
-                break;
-            }
-            /* fall through */
-
         case IDM_VIEW_PAGE_LAYOUT:
+            // A preview of the laid-out pages and the place they can be edited
+            // are the same thing once the engine exists. A text file gets the
+            // same treatment: it is one paragraph per line, which is all
+            // printing a note from Notepad has ever been.
             TogglePageLayout(hwnd);
             break;
 

@@ -204,6 +204,11 @@ typedef struct DocModel {
 // ---------------------------------------------------------------------------
 
 DocModel* Doc_New(void);
+
+// A model from plain text: one paragraph per line, one run each, with `props`
+// on every run. This is how a text file reaches the layout engine -- the
+// engine has no idea it came from anywhere else, which is the point.
+DocModel* Doc_FromText(const WCHAR* text, const CharProps* props);
 void      Doc_Free(DocModel* doc);
 
 // The page a new model starts on. A document read from a file states its own

@@ -32,6 +32,44 @@ DocModel* Doc_New(void) {
     return doc;
 }
 
+DocModel* Doc_FromText(const WCHAR* text, const CharProps* props) {
+    DocModel* doc = Doc_New();
+    if (!doc) return NULL;
+
+    CharProps plain = {0};
+    if (!props) props = &plain;
+
+    const WCHAR* line = text ? text : L"";
+    for (;;) {
+        const WCHAR* end = line;
+        while (*end && *end != L'\r' && *end != L'\n') end++;
+
+        DocPara* para = Doc_AddPara(doc);
+        if (!para) break;
+
+        // Tabs are their own runs, the way they are everywhere else in the
+        // model, so a tabbed note lines up when it is laid out.
+        const WCHAR* at = line;
+        while (at < end) {
+            const WCHAR* tab = at;
+            while (tab < end && *tab != L'\t') tab++;
+
+            if (tab > at) Doc_AddRun(para, at, (int)(tab - at), props);
+            if (tab < end) {
+                DocRun* r = Doc_AddRun(para, L"", 0, props);
+                if (r) r->tab = TRUE;
+                tab++;
+            }
+            at = tab;
+        }
+
+        if (!*end) break;
+        line = (end[0] == L'\r' && end[1] == L'\n') ? end + 2 : end + 1;
+    }
+
+    return doc;
+}
+
 static void FreeRuns(DocRun* run) {
     while (run) {
         DocRun* next = run->next;
@@ -421,12 +459,18 @@ static void AccAdd(TextAcc* acc, const WCHAR* s, size_t n) {
 
 static void TextParaFn(const DocPara* para, void* ctx) {
     TextAcc* acc = (TextAcc*)ctx;
+
+    // A line break separates paragraphs rather than terminating them: a text
+    // file that ends in a newline reads back as a last, empty paragraph, and
+    // terminating would then write that newline twice -- so a note gained a
+    // blank line every time it went through the page view.
+    if (acc->len) AccAdd(acc, L"\n", 1);
+
     for (const DocRun* r = para->runs; r; r = r->next) {
         if (r->tab)            AccAdd(acc, L"\t", 1);
         else if (r->lineBreak) AccAdd(acc, L"\n", 1);
         else                   AccAdd(acc, r->text, wcslen(r->text));
     }
-    AccAdd(acc, L"\n", 1);
 }
 
 WCHAR* Doc_GetText(const DocModel* doc) {

@@ -986,6 +986,31 @@ void Editor_SetText(HWND hEditor, const WCHAR* text) {
     SciCall(hEditor, SCI_SETSAVEPOINT, 0, 0);
 }
 
+// Replace everything, as an edit rather than as a load.
+//
+// Editor_SetText is what loading a file does: it drops the undo history and
+// says "this is the saved content". Text coming back from the page layout view
+// is neither of those -- it is something the user typed, so it has to be
+// undoable and it has to leave the document modified.
+void Editor_SetTextAsEdit(HWND hEditor, const WCHAR* text) {
+    if (Editor_IsRich(hEditor)) {
+        Rich_SetText(hEditor, text);
+        Rich_SetModified(hEditor, TRUE);
+        return;
+    }
+    if (!hEditor) return;
+
+    if (!text) text = L"";
+    int utf8Len = WideCharToMultiByte(CP_UTF8, 0, text, -1, NULL, 0, NULL, NULL);
+    char* utf8 = (char*)malloc(utf8Len);
+    if (!utf8) return;
+    WideCharToMultiByte(CP_UTF8, 0, text, -1, utf8, utf8Len, NULL, NULL);
+
+    SciCall(hEditor, SCI_SETTARGETRANGE, 0, SciCall(hEditor, SCI_GETLENGTH, 0, 0));
+    SciCall(hEditor, SCI_REPLACETARGET, utf8Len - 1, (LPARAM)utf8);
+    free(utf8);
+}
+
 // Get text content (caller must free)
 WCHAR* Editor_GetText(HWND hEditor) {
     if (Editor_IsRich(hEditor)) return Rich_GetText(hEditor);

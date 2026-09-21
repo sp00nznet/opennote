@@ -13,7 +13,8 @@
 // picture's bytes, a header, the page setup. What is edited here goes back to
 // the control when the view closes or when the document is saved.
 
-HWND PageView_Create(HWND hParent, HWND hRichEdit, const DocModel* source);
+HWND PageView_Create(HWND hParent, HWND hRichEdit, const DocModel* source,
+                     const WCHAR* docTitle);
 
 // Push whatever has been edited back into the text control it came from.
 // Called before saving or printing, and when the view goes away.

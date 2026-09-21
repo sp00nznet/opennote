@@ -18,6 +18,10 @@ HWND Editor_CreateRich(HWND hParent);  // Rich text view
 
 // Text operations
 void Editor_SetText(HWND hEditor, const WCHAR* text);
+
+// The same, but as an undoable edit that leaves the document modified -- for
+// text that the user produced rather than text that was loaded.
+void Editor_SetTextAsEdit(HWND hEditor, const WCHAR* text);
 WCHAR* Editor_GetText(HWND hEditor);  // Caller must free
 int Editor_GetTextLength(HWND hEditor);
 

@@ -7,6 +7,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **A plain text file lays out and prints like everything else.** Page layout used to
+  refuse anything but rich text, and printing a note drew a single page with DrawText and
+  stopped -- a long note printed its first page and lost the rest. A text file now becomes
+  a document of one paragraph per line, in the editor's own font, and goes through the
+  same layout engine: page layout, print preview, printing and PDF export all work on it,
+  and it pages, scrolls and edits like a rich document does. The separate plain text
+  preview dialog is gone; there is one preview now, and it is the page layout view.
+
+### Fixed
+- **Every opened file was marked modified the moment it opened.** The editor's
+  modification notification set the flag without asking the control, and the notification
+  from loading arrived after the load had cleared it, so a file that had not been touched
+  showed a `*` and offered to save itself on close.
+- **Editing on the page left the document looking unmodified**, and wiped the text view's
+  undo history. Text coming back from the page layout view was being written as if it
+  were a freshly loaded file; it is an edit, so it is undoable now and the document knows
+  it changed.
+- **A text file gained a blank line every time it went through the page layout view.** A
+  trailing newline reads back as a last, empty paragraph, and paragraphs were being
+  terminated with a newline rather than separated by one.
+- **A file opened from the command line could keep a trailing space in its name**, which
+  showed in the title bar. Windows parses the command line now instead of the hand-rolled
+  quote stripping that was there.
+
 ### Changed
 - **Page layout is a view of the tab rather than a window of its own.** It used to open a
   second top-level window; now View > Page Layout, the toolbar's page button or

@@ -249,7 +249,7 @@ void FormatBar_UpdateVisibility(HWND hEditor, BOOL pageLayout) {
                 usable = TRUE;              // these mean the same in any view
                 break;
             case GLYPH_PAGE:
-                usable = rich;              // ...and this is how you get back
+                usable = TRUE;              // any document has pages
                 break;
             default:
                 usable = rich && !pageLayout;
