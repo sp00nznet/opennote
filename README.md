@@ -26,7 +26,7 @@ payware, read the published spec it is hiding behind, give it away.
 
 ## Status
 
-**v0.10.0 — alpha. Tracked changes, comments, fields and a table of contents: the part of a Word document a company cannot do without.** Downloads are on the
+**v0.11.0 — alpha. PDFs open, fill in and sign — the other direction, and the one people are stuck at.** Downloads are on the
 [releases page](https://github.com/sp00nznet/opennote/releases/latest): a bare executable
 and an installer, with the release notes saying what each one does and does not give you.
 

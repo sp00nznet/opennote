@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.11.0] - 2026-09-21
+
+**PDF, the other direction.** opennote has written PDFs since v0.8 and could not read one
+— a one-way door with a lot of people standing at it, because the form you have to fill
+in and send back arrives as a PDF and the free tools for it are adware or a web upload.
+A `.pdf` now opens in a tab, its form fills in, and it signs both ways.
+
+Everything here still uses what Windows already ships, with one exception written for the
+purpose: an inflate, three hundred lines, because a PDF from 2005 onwards keeps its
+cross-reference table compressed and there was no reading one without it.
+
 ### Added
 - **`OPENNOTE_DB`** names the database file, so a copy run from a stick keeps its notes
   beside itself rather than in whichever account it is plugged into — and a test that

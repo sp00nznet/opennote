@@ -6,7 +6,7 @@ The short version: **Windows shipped a rich text editor for thirty years and rem
 in 2024.** WordPad is gone from Windows 11 24H2 and from Windows Server 2025. The
 replacement Microsoft points you at is a subscription. OpenNote is aiming at that hole.
 
-**v0.10.0.** Published binaries — a bare executable and an installer — are built by CI
+**v0.11.0.** Published binaries — a bare executable and an installer — are built by CI
 from the tagged commit.
 
 Nothing below is a promise of a date.
