@@ -1837,6 +1837,30 @@ void MainWindow_OnCommand(HWND hwnd, int id, HWND hwndCtl, UINT codeNotify) {
         }
 
 
+        case IDM_FILE_TYPE_ON_PDF: {
+            // The scanned-form case. There is no field to fill in, so the
+            // answer goes on the page where it is asked for -- which is what
+            // a pen does, and the only thing that works on a form nobody
+            // declared.
+            Tab* tab = App_GetActiveTab();
+            if (!tab || !tab->hPdfView) {
+                MessageBoxW(hwnd,
+                    L"Open a PDF first.\n\n"
+                    L"This types onto a page that has nowhere to type -- a scan, "
+                    L"or a form with lines on it and no fields.",
+                    APP_NAME, MB_ICONINFORMATION);
+                break;
+            }
+
+            WCHAR text[512] = L"";
+            if (!Dialogs_InputBox(hwnd, L"Type on a PDF Page",
+                                  L"What should go on the page?", text, 512)) break;
+            if (!text[0]) break;
+
+            PdfView_BeginType(tab->hPdfView, text, 11.0f);
+            break;
+        }
+
         case IDM_FILE_FILL_FORM: {
             // The form belongs to the file rather than to anything drawn, so
             // this works on the PDF the active tab is showing.

@@ -93,6 +93,21 @@ BOOL PdfForm_StampImageBytes(PdfForm* form, int pageIndex,
                              const BYTE* bytes, size_t len,
                              float x, float y, float width, float height);
 
+// Type a line onto a page that has nowhere to type.
+//
+// This is for the forms nobody declared: a scan, a fax, a form drawn with
+// lines to write on and no AcroForm anywhere in the file. There is no field
+// to fill in, so the text is put on the page where it is asked for -- as a
+// FreeText annotation, which carries the characters as well as a picture of
+// them, so what was typed can still be read back out.
+//
+// `x` and `y` are the left of the baseline, in points from the bottom left of
+// the page. The box drawn around the text is measured from Helvetica's
+// average width, which is close enough to sit on a line and not close enough
+// to lay out a paragraph with.
+BOOL PdfForm_StampText(PdfForm* form, int pageIndex, const WCHAR* text,
+                       float x, float y, float size);
+
 // Sign the document with a certificate, cryptographically: a detached PKCS#7
 // over the whole file except the hole the signature sits in. What it proves is
 // that the bytes have not changed since the holder of that key saw them --

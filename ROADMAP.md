@@ -277,9 +277,14 @@ the free tools for it are adware or a web upload.
       and the timestamp verified nowhere.
 
 ### After v0.11
-- [ ] Forms whose fields are drawn rather than declared -- the scanned kind, with lines
-      to write on and no AcroForm at all. Typing on top of those is a different feature
-      and a bigger one.
+- [x] **Forms whose fields are drawn rather than declared** -- the scanned kind, with
+      lines to write on and no AcroForm at all. Click where the answer goes and type it:
+      a FreeText annotation, which carries the characters as well as a picture of them,
+      so what was typed can still be read back out of the file.
+- [ ] Remembering those answers too. A field has a name to match on and a drawn line does
+      not, so what one page called "Surname" cannot be matched to what the next one
+      calls it -- offering the list and letting somebody pick is probably as far as this
+      can honestly go.
 
 Everything above uses what Windows already ships. Nothing in it needs a PDF library.
 

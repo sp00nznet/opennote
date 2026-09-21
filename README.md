@@ -124,9 +124,14 @@ written for the purpose: three hundred lines, no new dependency.
 
 **It can be signed, both ways.** A picture of a signature goes where you drag it; a
 certificate signature is a detached PKCS#7 over the file's byte range, made with a
-certificate from your own Windows store. Opening a signed PDF says so in the status bar,
-and says whether the bytes still match it — and nothing more than that, because whether a
-certificate is one to trust is a question this does not answer.
+certificate from your own Windows store, timestamped by a third party so it still means
+something after the certificate expires. Opening a signed PDF says who signed it, when,
+and whether the bytes still match — and stops there, because whether a certificate is one
+to trust is a different question and deserves its own answer.
+
+**And the forms nobody declared.** Half the forms people are sent are a scan: lines to
+write on, boxes to tick, and no form in the file at all. File → Type on a PDF Page puts
+the cursor on the page instead of in a field — click where the answer goes and type it.
 
 The stretch is the part Word actually gets paid for: `.docx`, real page layout, `.doc`,
 track changes. Everything needed for that is already in Windows and already paid for.
@@ -169,9 +174,10 @@ See [ROADMAP.md](ROADMAP.md) for the ordering.
 | **PDF export** | Vector, through Windows' own PDF printer. The text stays text and the fonts are embedded |
 | **PDF reading** | A `.pdf` opens in a tab and shows its pages, fitted, zoomable, a page at a time |
 | **PDF forms** | Boxes to type in, boxes to tick, lists to choose from and radio groups — filled in and written back as an *incremental update*, so your original bytes stay in the file |
+| **Forms with no fields** | The scanned kind, with lines to write on and no form in the file at all. Click where the answer goes and type it: the text lands on the page, and the annotation carries the characters so they can still be read back |
 | **PDF signing** | Sign in a box with the mouse, or use one you drew before — kept in your notes database, transparent background, dragged where you want it. Or a certificate signature: a detached PKCS#7 over the byte range, from your own Windows certificate store, timestamped so it outlives the certificate |
 | **Forms that fill themselves** | An answer given to one form is offered to the next one that asks the same question. Offered, never applied behind your back, and everything kept can be seen and forgotten |
-| **PDF checking** | Whether the bytes have changed since signing, and what the certificate behind it is worth, reported as two separate answers |
+| **PDF checking** | Whether the bytes have changed since signing, when it was signed, and what the certificate behind it is worth — reported as separate answers, because they are separate questions |
 
 ### Reviewing
 
@@ -222,6 +228,7 @@ See [ROADMAP.md](ROADMAP.md) for the ordering.
 | **Comments** | Read and write | No | Yes | Yes | No |
 | **Opens a PDF** | Yes | No | Yes | Draw only | No |
 | **Fills a PDF form** | Yes | No | No | Yes | No |
+| **Types on a scanned form** | Yes | No | No | Yes | No |
 | **Signs a PDF** | Picture + certificate | No | Certificate | Certificate | No |
 | **Note store with search** | Yes | No | No | No | No |
 | **Telemetry** | None | None | Yes | Opt-in | Yes |
@@ -291,6 +298,7 @@ OpenNote.exe --pdf-info FILE [page.png]
 OpenNote.exe --pdf-fields FILE
 OpenNote.exe --pdf-fill IN OUT "field=value" ...
 OpenNote.exe --pdf-stamp IN OUT IMAGE PAGE X Y WIDTH
+OpenNote.exe --pdf-text IN OUT "text" PAGE X Y [SIZE]
 OpenNote.exe --pdf-sign IN OUT
 OpenNote.exe --pdf-verify FILE
 ```

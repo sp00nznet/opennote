@@ -69,6 +69,12 @@ struct PdfViewState {
     // being dragged for it, in view coordinates.
     BYTE* stampPng;
     size_t stampLen;
+
+    // ...or a line of text to type, when that is what is being placed. One or
+    // the other: whichever was asked for last is what lands.
+    WCHAR typeText[512];
+    float typeSize;
+
     BOOL  placing;
     BOOL  dragging;
     float dragFrom[2];
@@ -257,8 +263,10 @@ static void Paint(HWND hwnd, PdfViewState* st) {
         st->target->DrawRectangle(paper, st->edge, 1.0f);
     }
 
-    // The box being dragged for a stamp, over the top of everything.
-    if (st->dragging) {
+    // The box being dragged for a stamp, over the top of everything. Not
+    // when typing: the size of the drag is not used there, and a box that
+    // says otherwise is a box that lies.
+    if (st->dragging && !st->typeText[0]) {
         D2D1_RECT_F box = D2D1::RectF(
             min(st->dragFrom[0], st->dragTo[0]), min(st->dragFrom[1], st->dragTo[1]),
             max(st->dragFrom[0], st->dragTo[0]), max(st->dragFrom[1], st->dragTo[1]));
@@ -592,10 +600,12 @@ static BOOL PageAt(HWND hwnd, PdfViewState* st, float x, float y,
 }
 
 static void FinishStamp(HWND hwnd, PdfViewState* st) {
+    BOOL typing = st->typeText[0] != L'\0';
+
     st->dragging = FALSE;
     st->placing = FALSE;
 
-    if (!st->stampPng || st->stampLen == 0) return;
+    if (!typing && (!st->stampPng || st->stampLen == 0)) return;
     InvalidateRect(hwnd, NULL, FALSE);
 
     int page = 0;
@@ -603,7 +613,8 @@ static void FinishStamp(HWND hwnd, PdfViewState* st) {
 
     if (!PageAt(hwnd, st, st->dragFrom[0], st->dragFrom[1], &page, &x0, &y0) ||
         !PageAt(hwnd, st, st->dragTo[0], st->dragTo[1], &page, &x1, &y1)) {
-        StatusBar_SetMessage(L"The signature has to be placed on a page");
+        StatusBar_SetMessage(typing ? L"The text has to go on a page"
+                                    : L"The signature has to be placed on a page");
         return;
     }
 
@@ -627,14 +638,23 @@ static void FinishStamp(HWND hwnd, PdfViewState* st) {
         return;
     }
 
-    if (!PdfForm_StampImageBytes(form, page, st->stampPng, st->stampLen,
-                                 x, y, width, height)) {
+    // Text sits on the baseline the click asked for, so the drag's size is
+    // not used: a line of type has the height its font gives it.
+    BOOL placed = typing
+        ? PdfForm_StampText(form, page, st->typeText, x0, y0, st->typeSize)
+        : PdfForm_StampImageBytes(form, page, st->stampPng, st->stampLen,
+                                  x, y, width, height);
+
+    if (!placed) {
         PdfForm_Close(form);
         MessageBoxW(GetAncestor(hwnd, GA_ROOT),
-                    L"That picture could not be placed on the page.",
+                    typing ? L"That text could not be put on the page."
+                           : L"That picture could not be placed on the page.",
                     APP_NAME, MB_ICONWARNING);
         return;
     }
+
+    st->typeText[0] = L'\0';
 
     WCHAR saveTo[MAX_PATH] = {0};
     if (!Dialogs_SaveFile(GetAncestor(hwnd, GA_ROOT), saveTo, MAX_PATH, L"signed.pdf")) {
@@ -677,6 +697,30 @@ extern "C" BOOL PdfView_BeginStamp(HWND hPdfView, const BYTE* png, size_t len) {
 
     SetFocus(hPdfView);
     StatusBar_SetMessage(L"Drag a box where the signature goes, or click to drop one");
+    return TRUE;
+}
+
+extern "C" BOOL PdfView_BeginType(HWND hPdfView, const WCHAR* text, float size) {
+    if (!hPdfView || !IsWindow(hPdfView) || !text || !text[0]) return FALSE;
+
+    PdfViewState* st = (PdfViewState*)GetWindowLongPtrW(hPdfView, GWLP_USERDATA);
+    if (!st) return FALSE;
+
+    if (size <= 0.0f) size = 11.0f;
+
+    // A picture and a line of text cannot both be waiting: whichever was
+    // asked for last is the one that lands.
+    free(st->stampPng);
+    st->stampPng = NULL;
+    st->stampLen = 0;
+
+    wcsncpy_s(st->typeText, 512, text, _TRUNCATE);
+    st->typeSize = size;
+    st->placing = TRUE;
+    st->dragging = FALSE;
+
+    SetFocus(hPdfView);
+    StatusBar_SetMessage(L"Click where the text should start");
     return TRUE;
 }
 

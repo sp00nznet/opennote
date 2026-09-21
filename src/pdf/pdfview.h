@@ -23,6 +23,11 @@ HWND PdfView_Create(HWND hParent, const WCHAR* path);
 // picture of one -- rather than a cryptographic one.
 BOOL PdfView_BeginStamp(HWND hPdfView, const BYTE* png, size_t len);
 
+// Type a line onto a page instead: the next click says where the text goes,
+// and the file is written when it lands. For the forms nobody declared -- a
+// scan, a fax, a page with lines drawn on it and no fields at all.
+BOOL PdfView_BeginType(HWND hPdfView, const WCHAR* text, float size);
+
 // Which file this view is showing, for the commands that work on the file
 // rather than on what is drawn -- filling in its form, for one.
 BOOL PdfView_Path(HWND hPdfView, WCHAR* out, size_t outChars);

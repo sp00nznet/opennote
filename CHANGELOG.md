@@ -18,6 +18,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   failed the save outright; there is now 16KB.
 
 ### Added
+- **Typing on a form that has no fields.** The scanned kind — lines to write on, boxes
+  drawn in ink, no AcroForm anywhere in the file. **File → Type on a PDF Page** asks what
+  goes there and then puts the cursor on the page: click where the answer belongs and it
+  lands on the baseline. It goes in as a FreeText annotation carrying the characters as
+  well as a picture of them, so the answer can still be read back out — an annotation
+  that only draws text is a picture of an answer nobody can search. `--pdf-text` does the
+  same from the command line.
 - **Radio groups** are one question with several buttons, and are read and written as
   one: the answer goes on the field and the state on every button, including the ones
   being turned off. A value the group has no button for is refused rather than written,

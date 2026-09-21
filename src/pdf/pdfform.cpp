@@ -130,14 +130,22 @@ struct DecodedStream {
 
 #define MAX_DECODED 8
 
-// A picture waiting to be put on a page: its pixels, where it goes, and which
-// page it goes on.
+// Something waiting to be put on a page: where it goes, which page it goes
+// on, and either the pixels of a picture or a line of text.
+//
+// Text is here rather than in its own list because everything after the
+// appearance stream -- the annotation, the page's /Annots, the save -- is the
+// same for both, and a second list would mean a second copy of all of it.
 struct Stamp {
     int    page;             // the page's object number
     float  rect[4];          // in points, from the bottom left
+
     BYTE*  rgb;              // owned; three bytes a pixel, top row first
     BYTE*  alpha;            // owned; one byte a pixel, or NULL when opaque
     int    width, height;
+
+    WCHAR  text[512];        // a text stamp when this is set, a picture when not
+    float  size;             // points
 };
 
 #define MAX_STAMPS 16
@@ -1602,6 +1610,8 @@ extern "C" BOOL PdfForm_StampImageBytes(PdfForm* form, int pageIndex,
 
     Stamp* stamp = &form->stamps[form->stampCount++];
     stamp->page = form->pages[pageIndex];
+    stamp->text[0] = L'\0';
+    stamp->size = 0.0f;
     stamp->rect[0] = x;
     stamp->rect[1] = y;
     stamp->rect[2] = x + width;
@@ -1610,6 +1620,39 @@ extern "C" BOOL PdfForm_StampImageBytes(PdfForm* form, int pageIndex,
     stamp->alpha = alpha;
     stamp->width = imageWidth;
     stamp->height = imageHeight;
+    return TRUE;
+}
+
+extern "C" BOOL PdfForm_StampText(PdfForm* form, int pageIndex, const WCHAR* text,
+                                  float x, float y, float size) {
+    if (!form || !text || !text[0]) return FALSE;
+    if (form->stampCount >= MAX_STAMPS) return FALSE;
+
+    ReadPages(form);
+    if (pageIndex < 0 || pageIndex >= form->pageCount) return FALSE;
+
+    if (size <= 0.0f) size = 11.0f;
+    if (size < 4.0f) size = 4.0f;
+    if (size > 144.0f) size = 144.0f;
+
+    Stamp* stamp = &form->stamps[form->stampCount++];
+    stamp->page = form->pages[pageIndex];
+    stamp->rgb = NULL;
+    stamp->alpha = NULL;
+    stamp->width = 0;
+    stamp->height = 0;
+    stamp->size = size;
+    wcsncpy_s(stamp->text, 512, text, _TRUNCATE);
+
+    // Helvetica's characters average a little over half their height. The box
+    // only has to contain the text -- a reader that finds the appearance too
+    // big for it clips, and one that is generous wastes nothing.
+    float width = (float)wcslen(stamp->text) * size * 0.60f + 4.0f;
+
+    stamp->rect[0] = x;
+    stamp->rect[1] = y - size * 0.25f;          // room for descenders
+    stamp->rect[2] = x + width;
+    stamp->rect[3] = y + size;
     return TRUE;
 }
 
@@ -1879,7 +1922,9 @@ extern "C" BOOL PdfForm_Save(PdfForm* form, const WCHAR* path) {
     int nextObject = form->objectCount > 0 ? form->objectCount : 1;
 
     struct Written { int number; size_t offset; };
-    Written written[MAX_FIELDS * 3 + MAX_STAMPS * 4 + 4];
+    // A picture stamp writes five: mask, image, appearance, annotation, and
+    // the page it goes on.
+    Written written[MAX_FIELDS * 3 + MAX_STAMPS * 5 + 4];
     int writtenCount = 0;
 
     // A font to draw the filled text with, when the form does not name one
@@ -1890,6 +1935,11 @@ extern "C" BOOL PdfForm_Save(PdfForm* form, const WCHAR* path) {
             helvetica = nextObject++;
             break;
         }
+    }
+
+    // A text stamp always needs one: there is no field to have named a font.
+    for (int i = 0; i < form->stampCount && helvetica == 0; i++) {
+        if (form->stamps[i].text[0]) helvetica = nextObject++;
     }
 
     if (helvetica > 0) {
@@ -1980,6 +2030,78 @@ extern "C" BOOL PdfForm_Save(PdfForm* form, const WCHAR* path) {
     // carries the appearance, and the page told about the annotation.
     for (int i = 0; i < form->stampCount; i++) {
         Stamp* stamp = &form->stamps[i];
+
+        // Text takes a shorter road: no picture, no mask, an appearance that
+        // draws characters, and an annotation that carries the characters as
+        // well so a reader can still find them.
+        if (stamp->text[0]) {
+            float boxWidth = stamp->rect[2] - stamp->rect[0];
+            float boxHeight = stamp->rect[3] - stamp->rect[1];
+
+            char drawn[2048];
+            WriteDrawnString(stamp->text, drawn, sizeof(drawn));
+
+            int appearance = nextObject++;
+            written[writtenCount].number = appearance;
+            written[writtenCount].offset = out.len;
+            writtenCount++;
+
+            // Drawn from the bottom of the box plus the room left for
+            // descenders, which is where the caller asked for the baseline.
+            char content[2200];
+            int contentLen = snprintf(content, sizeof(content),
+                "q\nBT\n/Helv %.2f Tf\n0 g\n2 %.2f Td\n%s Tj\nET\nQ\n",
+                stamp->size, stamp->size * 0.25f, drawn);
+            if (contentLen < 0) contentLen = 0;
+
+            OutFormat(&out,
+                "%d 0 obj\n<< /Type /XObject /Subtype /Form /FormType 1 "
+                "/BBox [0 0 %.2f %.2f] "
+                "/Resources << /ProcSet [/PDF /Text] /Font << /Helv %d 0 R >> >> "
+                "/Length %d >>\nstream\n",
+                appearance, boxWidth, boxHeight, helvetica, contentLen);
+            OutAdd(&out, content, (size_t)contentLen);
+            OutText(&out, "\nendstream\nendobj\n");
+
+            int annotation = nextObject++;
+            written[writtenCount].number = annotation;
+            written[writtenCount].offset = out.len;
+            writtenCount++;
+
+            // /BS with no width: a FreeText annotation draws a border by
+            // default, and a box around every answer is not what typing on a
+            // form looks like.
+            OutFormat(&out,
+                "%d 0 obj\n<< /Type /Annot /Subtype /FreeText "
+                "/Rect [%.2f %.2f %.2f %.2f] /F 4 /Contents %s "
+                "/DA (/Helv %.2f Tf 0 g) /BS << /W 0 >> /AP << /N %d 0 R >> >>\nendobj\n",
+                annotation, stamp->rect[0], stamp->rect[1], stamp->rect[2], stamp->rect[3],
+                drawn, stamp->size, appearance);
+
+            Span textPage;
+            if (!ObjectBody(form, stamp->page, &textPage)) continue;
+
+            written[writtenCount].number = stamp->page;
+            written[writtenCount].offset = out.len;
+            writtenCount++;
+
+            OutFormat(&out, "%d 0 obj\n", stamp->page);
+
+            Span textAnnots;
+            BOOL hadAnnots = DictValue(textPage, "Annots", &textAnnots);
+
+            static const char* const textPageKeys[] = { "Annots", NULL };
+            CopyDictExcept(&out, textPage, textPageKeys);
+
+            OutText(&out, " /Annots [");
+            if (hadAnnots && textAnnots.len > 2) {
+                OutAdd(&out, textAnnots.at + 1, textAnnots.len - 2);
+            }
+            OutFormat(&out, " %d 0 R] >>", annotation);
+
+            OutText(&out, "\nendobj\n");
+            continue;
+        }
 
         // The transparency first, when there is any: a soft mask is an image
         // of its own that the picture points at.
@@ -3145,6 +3267,62 @@ extern "C" BOOL PdfForm_SelfTest(char* failure, size_t failureSize) {
     int stampedPages = Pdf_PageCount(rendered);
     Pdf_Close(rendered);
     if (stampedPages != 1) FAIL("the stamped file did not come back as one page");
+
+    // --- a line typed onto a page with nowhere to type ---
+    //
+    // The scanned-form case: no field, so the text goes on the page. What is
+    // checked is that it is still a PDF afterwards and that the characters are
+    // in the file -- an annotation that draws the text but does not carry it
+    // is a picture of an answer nobody can read back.
+    form = PdfForm_Open(path, &why);
+    if (!form) FAIL("the form could not be opened for typing on");
+
+    if (!PdfForm_StampText(form, 0, L"Typed on the page", 72.0f, 300.0f, 11.0f)) {
+        FAIL("nothing could be typed onto the page");
+    }
+
+    // A page that does not exist is not a place to type.
+    if (PdfForm_StampText(form, 4, L"nowhere", 10.0f, 10.0f, 11.0f)) {
+        FAIL("text went onto a page the file does not have");
+    }
+
+    if (!PdfForm_Save(form, filled)) FAIL("the typed-on file could not be written");
+    PdfForm_Close(form);
+    form = NULL;
+
+    rendered = Pdf_Open(filled);
+    if (!rendered) FAIL("Windows would not open the typed-on file");
+
+    int typedPages = Pdf_PageCount(rendered);
+    Pdf_Close(rendered);
+    if (typedPages != 1) FAIL("the typed-on file did not come back as one page");
+
+    {
+        HANDLE check = CreateFileW(filled, GENERIC_READ, FILE_SHARE_READ, NULL,
+                                   OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+        if (check == INVALID_HANDLE_VALUE) FAIL("the typed-on file vanished");
+
+        LARGE_INTEGER size = {};
+        GetFileSizeEx(check, &size);
+
+        char* bytes = (char*)malloc((size_t)size.QuadPart + 1);
+        DWORD read = 0;
+        BOOL ok = bytes && ReadFile(check, bytes, (DWORD)size.QuadPart, &read, NULL);
+        CloseHandle(check);
+
+        if (!ok) {
+            free(bytes);
+            FAIL("the typed-on file could not be read back");
+        }
+        bytes[read] = 0;
+
+        BOOL carried = FindLast(bytes, read, "(Typed on the page)") != NULL;
+        BOOL drawn = FindLast(bytes, read, "/FreeText") != NULL;
+        free(bytes);
+
+        if (!drawn)   FAIL("the typed text was not put on the page");
+        if (!carried) FAIL("the annotation draws the text but does not carry it");
+    }
 
     // --- a signature over the file it is part of ---
     //

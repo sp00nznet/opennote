@@ -437,6 +437,45 @@ static int RunPdfSign(int argc, WCHAR** argv) {
 // What a file's signature says. The wording is deliberate: this checks that
 // the bytes have not changed, which is not the same as the certificate being
 // one anybody should trust.
+// Type a line onto a page that has nowhere to type -- a scan, a fax, a form
+// drawn with lines on it and no fields at all.
+static int RunPdfText(int argc, WCHAR** argv) {
+    if (argc < 8) {
+        printf("usage: OpenNote.exe --pdf-text <in.pdf> <out.pdf> <text> "
+               "<page> <x> <y> [size]\n"
+               "       x and y are the left of the baseline, in points from "
+               "the bottom left\n");
+        return 2;
+    }
+
+    const WCHAR* why = NULL;
+    PdfForm* form = PdfForm_Open(argv[2], &why);
+    if (!form) {
+        wprintf(L"FAILED: %s\n", why ? why : L"the file could not be read");
+        return 1;
+    }
+
+    int page = _wtoi(argv[5]);
+    float x = (float)_wtof(argv[6]);
+    float y = (float)_wtof(argv[7]);
+    float size = argc >= 9 ? (float)_wtof(argv[8]) : 11.0f;
+
+    BOOL ok = PdfForm_StampText(form, page, argv[4], x, y, size) &&
+              PdfForm_Save(form, argv[3]);
+
+    int pages = PdfForm_PageCount(form);
+    PdfForm_Close(form);
+
+    if (!ok) {
+        wprintf(L"FAILED: nothing was typed (the file has %d page%s)\n",
+                pages, pages == 1 ? L"" : L"s");
+        return 1;
+    }
+
+    wprintf(L"%s -> %s, typed on page %d\n", argv[2], argv[3], page + 1);
+    return 0;
+}
+
 static int RunPdfVerify(int argc, WCHAR** argv) {
     if (argc < 3) {
         printf("usage: OpenNote.exe --pdf-verify <file.pdf>\n");
@@ -910,6 +949,7 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPWSTR lpCmdLi
                       wcsstr(lpCmdLine, L"--pdf-fields") ||
                       wcsstr(lpCmdLine, L"--pdf-fill") ||
                       wcsstr(lpCmdLine, L"--pdf-stamp") ||
+                      wcsstr(lpCmdLine, L"--pdf-text") ||
                       wcsstr(lpCmdLine, L"--pdf-sign") ||
                       wcsstr(lpCmdLine, L"--pdf-verify") ||
                       wcsstr(lpCmdLine, L"--timestamp-check"))) {
@@ -931,6 +971,7 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPWSTR lpCmdLi
             else if (wcsstr(lpCmdLine, L"--pdf-fields"))    rc = RunPdfFields(argc, argv);
             else if (wcsstr(lpCmdLine, L"--pdf-fill"))      rc = RunPdfFill(argc, argv);
             else if (wcsstr(lpCmdLine, L"--pdf-stamp"))     rc = RunPdfStamp(argc, argv);
+            else if (wcsstr(lpCmdLine, L"--pdf-text"))      rc = RunPdfText(argc, argv);
             else if (wcsstr(lpCmdLine, L"--pdf-verify"))    rc = RunPdfVerify(argc, argv);
             else if (wcsstr(lpCmdLine, L"--timestamp-check")) rc = RunTimestampCheck(argc, argv);
             else if (wcsstr(lpCmdLine, L"--pdf-sign"))      rc = RunPdfSign(argc, argv);
