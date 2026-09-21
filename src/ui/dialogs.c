@@ -2021,6 +2021,134 @@ BOOL Dialogs_PdfForm(HWND hParent, const WCHAR* pdfPath, WCHAR* savedTo, size_t 
     return TRUE;
 }
 
+// ---------------------------------------------------------------------------
+// Typing on a page that has no fields
+//
+// The scanned form: lines to write on, and nothing in the file that says what
+// they are for. There is no field name, so there is nothing to match a
+// remembered answer against -- which is the whole difference between this and
+// filling in a real form.
+//
+// So it offers rather than fills. Everything this machine has been told is in
+// the list; picking one is somebody's decision, and it names the question it
+// came from so what is being reused is visible rather than guessed at.
+// ---------------------------------------------------------------------------
+
+typedef struct {
+    WCHAR*           text;
+    int              textChars;
+    RememberedAnswer answers[MAX_ANSWERS];
+    int              answerCount;
+} TypeOnPdfData;
+
+static INT_PTR CALLBACK TypeOnPdfProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
+    TypeOnPdfData* data = (TypeOnPdfData*)GetWindowLongPtrW(hwnd, GWLP_USERDATA);
+
+    switch (msg) {
+        case WM_INITDIALOG: {
+            data = (TypeOnPdfData*)lParam;
+            SetWindowLongPtrW(hwnd, GWLP_USERDATA, (LONG_PTR)data);
+
+            data->answerCount = Fill_ListAnswers(data->answers, MAX_ANSWERS);
+
+            HWND combo = GetDlgItem(hwnd, IDC_PDF_TYPE_TEXT);
+
+            // The values, not the questions: what goes in the box is what
+            // gets typed, and the question it came from is shown separately
+            // once one is picked.
+            for (int i = 0; i < data->answerCount; i++) {
+                SendMessageW(combo, CB_ADDSTRING, 0, (LPARAM)data->answers[i].value);
+            }
+
+            if (data->text[0]) SetDlgItemTextW(hwnd, IDC_PDF_TYPE_TEXT, data->text);
+
+            WCHAR note[256];
+            if (data->answerCount > 0) {
+                swprintf_s(note, 256,
+                           L"%d answer%s kept from other forms are in the list. "
+                           L"Nothing is filled in for you: a drawn line has no name "
+                           L"to match on.",
+                           data->answerCount, data->answerCount == 1 ? L"" : L"s");
+            } else {
+                wcscpy_s(note, 256,
+                         L"Nothing is kept yet. Tick the box to keep this one for "
+                         L"the next form that asks.");
+            }
+            SetDlgItemTextW(hwnd, IDC_PDF_TYPE_NOTE, note);
+
+            SetFocus(combo);
+            return FALSE;
+        }
+
+        case WM_COMMAND:
+            switch (LOWORD(wParam)) {
+                case IDC_PDF_TYPE_TEXT:
+                    // Picking a kept answer names the question it was kept
+                    // under, so reusing one is not reusing something unnamed.
+                    if (HIWORD(wParam) == CBN_SELCHANGE && data) {
+                        int picked = (int)SendDlgItemMessageW(hwnd, IDC_PDF_TYPE_TEXT,
+                                                              CB_GETCURSEL, 0, 0);
+                        if (picked >= 0 && picked < data->answerCount) {
+                            SetDlgItemTextW(hwnd, IDC_PDF_TYPE_NAME,
+                                            data->answers[picked].field);
+                        }
+                    }
+                    return TRUE;
+
+                case IDOK: {
+                    if (!data) { EndDialog(hwnd, IDCANCEL); return TRUE; }
+
+                    GetDlgItemTextW(hwnd, IDC_PDF_TYPE_TEXT, data->text, data->textChars);
+                    if (!data->text[0]) {
+                        MessageBoxW(hwnd, L"There is nothing to type.",
+                                    APP_NAME, MB_ICONINFORMATION);
+                        return TRUE;
+                    }
+
+                    if (IsDlgButtonChecked(hwnd, IDC_PDF_TYPE_REMEMBER) == BST_CHECKED) {
+                        WCHAR name[128] = L"";
+                        GetDlgItemTextW(hwnd, IDC_PDF_TYPE_NAME, name, 128);
+
+                        // Kept under a name or not kept at all: an answer
+                        // with nothing to call it can never be found again.
+                        if (!name[0]) {
+                            MessageBoxW(hwnd,
+                                L"Give the question a name to keep the answer under -- "
+                                L"\"Full name\", say, or \"Date of birth\".\n\n"
+                                L"The next form that asks it is how this gets used.",
+                                APP_NAME, MB_ICONINFORMATION);
+                            SetFocus(GetDlgItem(hwnd, IDC_PDF_TYPE_NAME));
+                            return TRUE;
+                        }
+
+                        Fill_RememberAnswer(name, data->text);
+                    }
+
+                    EndDialog(hwnd, IDOK);
+                    return TRUE;
+                }
+
+                case IDCANCEL:
+                    EndDialog(hwnd, IDCANCEL);
+                    return TRUE;
+            }
+            break;
+    }
+
+    return FALSE;
+}
+
+BOOL Dialogs_TypeOnPdf(HWND hParent, WCHAR* text, int textChars) {
+    if (!text || textChars <= 0) return FALSE;
+
+    TypeOnPdfData data = {0};
+    data.text = text;
+    data.textChars = textChars;
+
+    return DialogBoxParamW(g_app->hInstance, MAKEINTRESOURCEW(IDD_PDF_TYPE),
+                           hParent, TypeOnPdfProc, (LPARAM)&data) == IDOK;
+}
+
 BOOL Dialogs_InputBox(HWND hParent, const WCHAR* title, const WCHAR* prompt, WCHAR* buffer, int bufferSize) {
     InputBoxData data = {
         .title = title,

@@ -18,6 +18,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   failed the save outright; there is now 16KB.
 
 ### Added
+- **Answers are offered when typing on a page too.** The box now lists everything kept
+  from other forms, and picking one shows which question it was kept under — so what is
+  being reused is visible rather than guessed at. Keeping a new answer asks what to call
+  it, because one with no name can never be found again. Nothing is filled in
+  automatically: a drawn line has no name to match on, and pretending otherwise would put
+  the wrong answer on somebody's form.
 - **Typing on a form that has no fields.** The scanned kind — lines to write on, boxes
   drawn in ink, no AcroForm anywhere in the file. **File → Type on a PDF Page** asks what
   goes there and then puts the cursor on the page: click where the answer belongs and it

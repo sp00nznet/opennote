@@ -165,6 +165,23 @@ BEGIN
     PUSHBUTTON      "Close", IDCANCEL, 268, 192, 60, 14
 END
 
+// Typing on a page that has no fields. The box remembers what was typed into
+// other forms, because a form asks the same questions every other form asks.
+IDD_PDF_TYPE DIALOGEX 0, 0, 264, 108
+STYLE DS_SETFONT | DS_MODALFRAME | DS_FIXEDSYS | WS_POPUP | WS_CAPTION | WS_SYSMENU
+CAPTION "Type on a PDF Page"
+FONT 8, "MS Shell Dlg"
+BEGIN
+    LTEXT           "What should go on the page?", IDC_STATIC, 12, 10, 240, 10
+    COMBOBOX        IDC_PDF_TYPE_TEXT, 12, 22, 240, 120,
+                    CBS_DROPDOWN | CBS_AUTOHSCROLL | WS_VSCROLL | WS_TABSTOP
+    AUTOCHECKBOX    "Re&member this, as:", IDC_PDF_TYPE_REMEMBER, 12, 48, 76, 10
+    EDITTEXT        IDC_PDF_TYPE_NAME, 92, 46, 160, 14, ES_AUTOHSCROLL
+    LTEXT           "", IDC_PDF_TYPE_NOTE, 12, 66, 240, 18
+    DEFPUSHBUTTON   "OK", IDOK, 149, 88, 50, 14
+    PUSHBUTTON      "Cancel", IDCANCEL, 202, 88, 50, 14
+END
+
 // Comments: what people said about the document, which is not in it
 IDD_COMMENTS DIALOGEX 0, 0, 300, 180
 STYLE DS_SETFONT | DS_FIXEDSYS | WS_POPUP | WS_CAPTION | WS_SYSMENU | WS_THICKFRAME

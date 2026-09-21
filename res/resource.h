@@ -237,6 +237,13 @@
 #define IDC_SIGNATURES_FILE      1193
 #define IDC_SIGNATURES_DELETE    1194
 
+// Typing on a page that has no fields
+#define IDD_PDF_TYPE             1210
+#define IDC_PDF_TYPE_TEXT        1211
+#define IDC_PDF_TYPE_REMEMBER    1212
+#define IDC_PDF_TYPE_NAME        1213
+#define IDC_PDF_TYPE_NOTE        1214
+
 // What this machine remembers about the person using it
 #define IDD_ANSWERS              1200
 #define IDC_ANSWERS_LIST         1201

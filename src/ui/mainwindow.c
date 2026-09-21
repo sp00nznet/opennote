@@ -1853,8 +1853,7 @@ void MainWindow_OnCommand(HWND hwnd, int id, HWND hwndCtl, UINT codeNotify) {
             }
 
             WCHAR text[512] = L"";
-            if (!Dialogs_InputBox(hwnd, L"Type on a PDF Page",
-                                  L"What should go on the page?", text, 512)) break;
+            if (!Dialogs_TypeOnPdf(hwnd, text, 512)) break;
             if (!text[0]) break;
 
             PdfView_BeginType(tab->hPdfView, text, 11.0f);

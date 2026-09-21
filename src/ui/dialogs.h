@@ -42,6 +42,14 @@ BOOL Dialogs_PdfForm(HWND hParent, const WCHAR* pdfPath, WCHAR* savedTo, size_t 
 // TRUE when something was deleted, which is when the document has changed.
 BOOL Dialogs_Comments(HWND hParent, DocModel* doc);
 
+// What to type onto a page that has no fields, and whether to keep it.
+//
+// A drawn line has no name to match on, so nothing can be filled in
+// automatically the way a named field can. What this does instead is offer
+// what other forms were told -- the list is there, and choosing from it is
+// somebody's decision rather than this program's.
+BOOL Dialogs_TypeOnPdf(HWND hParent, WCHAR* text, int textChars);
+
 BOOL Dialogs_InputBox(HWND hParent, const WCHAR* title, const WCHAR* prompt, WCHAR* buffer, int bufferSize);
 
 // Markdown preview
