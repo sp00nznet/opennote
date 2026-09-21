@@ -37,6 +37,14 @@ struct LaidText {
     const DocPara*     para;      // what it came from; not owned
     BOOL               isCellText;
 
+    // Where this piece sits in its paragraph's text. A paragraph split across
+    // a page boundary becomes several pieces, so a character's place in the
+    // model is `textStart` plus its offset within this piece -- which is what
+    // makes a click on the page name a position in the document.
+    UINT32             textStart;
+    UINT32             textLen;
+    BOOL               isMarker;  // a list bullet: drawn, but not text anybody edits
+
     ColorSpan*         colors;    // owned; empty when the text is all default
     int                colorCount;
 };
@@ -63,6 +71,10 @@ struct LayoutResult {
     float marginRight, marginBottom;
 
     IDWriteFactory* dwrite;               // owned
+
+    // What was laid out. Borrowed, and only used to put two positions in
+    // document order -- the engine never edits it.
+    const DocModel* doc;
 };
 
 #endif // LAYOUT_INTERNAL_H

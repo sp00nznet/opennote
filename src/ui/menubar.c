@@ -113,6 +113,8 @@ HMENU MenuBar_Create(void) {
     AppendMenuW(hZoomMenu, MF_STRING, IDM_VIEW_ZOOM_RESET, L"&Reset Zoom\tCtrl+0");
     AppendMenuW(hViewMenu, MF_POPUP, (UINT_PTR)hZoomMenu, L"&Zoom");
     AppendMenuW(hViewMenu, MF_SEPARATOR, 0, NULL);
+    AppendMenuW(hViewMenu, MF_STRING, IDM_VIEW_PAGE_LAYOUT, L"&Page Layout	Ctrl+Shift+L");
+    AppendMenuW(hViewMenu, MF_SEPARATOR, 0, NULL);
     AppendMenuW(hViewMenu, MF_STRING, IDM_VIEW_STATUSBAR, L"&Status Bar");
     AppendMenuW(hViewMenu, MF_SEPARATOR, 0, NULL);
     AppendMenuW(hViewMenu, MF_STRING, IDM_VIEW_NOTES_BROWSER, L"&Notes Browser...");

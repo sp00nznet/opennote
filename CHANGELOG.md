@@ -5,52 +5,83 @@ All notable changes to this project are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.8.0] - 2026-09-20
 
-**The layout engine.** The document is laid out onto pages: paragraphs measured and
-flowed, broken at a line when they do not fit, tables boxed, and the result drawn to the
-screen, to a printer and to a PDF from one set of geometry. Editing still happens in the
-RichEdit view — the caret does not live on the laid-out model yet — so this version
-renders a document rather than hosting it.
+**The layout engine.** The document is laid out onto pages - paragraphs measured and
+flowed, broken at a line when they do not fit, tables boxed - and the result is drawn to
+the screen, to a printer and to a PDF from one set of geometry. The page view is also
+where a document can be edited: a click names a character, the arrows walk lines rather
+than runs, and every keystroke changes the model and lays it out again.
+
+The engine knows nothing about windows and nothing about Direct2D. It answers where
+everything goes; drawing it is somebody else's job. That is what lets one layout serve
+the screen, the printer and the exported PDF, and what makes it checkable without a
+screen.
 
 ### Added
 - **`src/layout/layout.cpp`** - the engine. `IDWriteTextLayout` shapes, breaks and
   justifies one paragraph at a time; this flows those paragraphs down a page, splits one
-  across a page boundary at a line, and places tables with the column widths the
-  document's `w:tblGrid` states, scaled to fit the page. It knows nothing about windows
-  or Direct2D, which is what lets one layout serve the screen, the printer and the PDF,
-  and what makes it checkable without a screen.
-- **`src/ui/pageview.cpp`** - print preview as real pages with real margins, drawn with
-  Direct2D: scrolling, Ctrl+wheel zoom, fit-to-width until you zoom, `Ctrl+P` to print.
-  Replaces the plain-text preview for rich documents.
-- **`src/layout/layoutprint.cpp`** - printing and **export to PDF** (File > Export to
+  across a page boundary at a line, places tables with the column widths the document's
+  `w:tblGrid` states, honours left indents, and keeps widows and orphans off the page: a
+  broken paragraph leaves at least two lines on each side of the break, or moves to the
+  next page whole.
+- **Geometry for editing** - `Layout_HitTest`, `Layout_PosRect`, `Layout_RangeRects`,
+  `Layout_MoveLine` and `Layout_LineEdge`. A page of text becomes an editor only when a
+  point can name a character and a character can name a point, and both of those are
+  questions about the laid-out page rather than about the tree.
+- **Editing the model** - `DocEdit_Insert`, `DocEdit_SplitPara`, `DocEdit_DeleteRange`,
+  `DocEdit_RangeText` and `Doc_Clone`, with positions measured in the same offsets the
+  engine flattens a paragraph to, so the two cannot disagree about where anything is.
+- **`src/ui/pageview.cpp`** - the page view: real pages with real margins, drawn with
+  Direct2D and edited in place. Caret and selection, click and drag, double click for a
+  word, typing, Enter, Backspace and Delete, cut, copy and paste, select all, undo and
+  redo, Ctrl+wheel zoom, fit to width, Ctrl+P to print and Ctrl+S to save. Edits go back
+  to the document when the window closes. View > Page Layout, or Ctrl+Shift+L.
+- **A ruler**, which needed a page width to mean anything: margins, half inch tab stops,
+  and indent markers that can be dragged - one undo step per drag, applied to every
+  paragraph the selection touches.
+- **`src/layout/layoutprint.cpp`** - printing, and **export to PDF** (File > Export to
   PDF). Windows' own PDF printer does the writing, so there is no PDF library here; the
   output is vector, with the text still text and the fonts subset into the file.
 - **`--layout-report <file.docx>`** prints a document's pagination: page size, page
   count, and per page how much was placed and how far down the page it reached.
 - **`--export-pdf <file.docx> <out.pdf>`** does the export without a window.
-- Layout checks in `--selftest` and in the conformance harness. The harness asserts on
-  every document in the corpus that nothing is placed below the bottom margin and that
-  every cell in the model reaches a page — pagination has no page where looking at the
-  screen would reliably catch a regression.
+- Checks for all of it. `--selftest` gains the engine's invariants - nothing below the
+  bottom margin, a paragraph longer than a page split rather than dropped, a left indent
+  narrowing the column, Page Setup reaching the page size, a position and a point
+  agreeing about where a character is, and no broken paragraph leaving a line stranded -
+  and the editing operations get their own: typing inherits the right formatting,
+  splitting keeps the paragraph's shape, deleting across paragraphs merges them, a range
+  running into a table is refused rather than half done, and a clone is equal and
+  separate. The conformance harness asserts the margin invariant and "every cell in the
+  model reached a page" over the whole corpus.
 - **Page Setup now reaches the engine.** Paper size and margins chosen in the dialog
-  become the page a new model starts on, so the preview, the printout, the PDF and a
+  become the page a new model starts on, so the page view, the printout, the PDF and a
   saved `.docx` all agree with it. Previously only the printed page used them.
-- Paragraph left indents are honoured by the engine.
 
 ### Fixed
 - Printing measured from the printable area rather than from the paper, which shifted
   every margin by the strip the printer cannot reach.
 
 ### Known issues
-- No widow and orphan control, no first-line indent (DirectWrite lays out one rectangle;
-  a first line set differently needs its own), table rows do not split across a page
-  boundary, and merged cells are not handled.
-- Paper size and orientation come from Page Setup rather than from the print dialog's
-  own paper list: the engine lays the document out before a printer is chosen.
+- The page view is a second view, not the only one: it edits a model captured from the
+  rich text view and writes it back through RTF when it closes. Typing in the main
+  window still goes through RichEdit, and the two are not live linked - if the document
+  changed in the main window while the page view was open, it asks before applying.
+  Making the laid out view the only view is v0.9.
+- No character formatting in the page view: no bold, no font, no colour. Those commands
+  still belong to the rich text view.
+- Tab stops are every half inch for the whole document. Per paragraph stops are a
+  `w:tabs` list the model does not carry yet.
+- No first line indent in the engine (DirectWrite lays out one rectangle; a first line
+  set differently needs its own), table rows do not split across a page boundary, and
+  merged cells are not handled.
+- Undo steps back one character at a time; consecutive typing is not grouped.
 - A document holding a picture still prints through the control rather than the engine:
   the model carries no images until v0.9, and dropping a picture off a printout is a
   worse trade than losing the engine's pagination.
+- Paper size and orientation come from Page Setup rather than from the print dialog's
+  own paper list: the engine lays the document out before a printer is chosen.
 
 ## [0.7.0] - 2026-09-20
 

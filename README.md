@@ -28,7 +28,7 @@ payware, read the published spec it is hiding behind, give it away.
 
 ## Status
 
-**v0.7.0 — alpha. Reads and writes `.docx`, through a real document model.** Downloads are on the
+**v0.8.0 — alpha. Lays a document out onto real pages, and edits it there.** Downloads are on the
 [releases page](https://github.com/sp00nznet/opennote/releases/latest): a bare executable
 and an installer, with the release notes saying what each one does and does not give you.
 
@@ -70,12 +70,21 @@ boundaries. The layout engine lifts both — see [ROADMAP.md](ROADMAP.md).
 
 ### Page layout
 
-A document is laid out onto pages rather than flowed into a window: paragraphs measured
-and broken at a line when they do not fit, tables boxed with the column widths the file
-states, pages sized by Page Setup. `IDWriteTextLayout` does the shaping, line breaking
-and font fallback; what OpenNote adds is the part above it, and it knows nothing about
-windows — the same geometry draws the print preview, the printout and the PDF, so they
-cannot disagree.
+As of v0.8 a document is laid out onto pages rather than flowed into a window:
+paragraphs measured and broken at a line when they do not fit, widows and orphans kept
+off the page, tables boxed with the column widths the file states, pages sized by Page
+Setup. `IDWriteTextLayout` does the shaping, line breaking and font fallback; what
+OpenNote adds is the part above it, and it knows nothing about windows — the same
+geometry draws the page view, the printout and the PDF, so they cannot disagree.
+
+**The page view edits** (View > Page Layout, or Ctrl+Shift+L). A click names a
+character, the arrows walk the laid-out lines rather than the runs behind them, Home and
+End mean the wrapped line, Page Up and Page Down mean an actual page, and there is a
+ruler with draggable indent markers. Undo is a stack of model snapshots. Character
+formatting still belongs to the rich text view, and the page view writes its changes
+back to the document when it closes.
+
+![The page layout view](gfx/pageview.png)
 
 **Export to PDF** goes through Windows' own PDF printer, so there is no PDF library in
 here; the output is vector and the text in it is still text.
@@ -173,6 +182,7 @@ OpenNote.exe --selftest      # run the built-in checks and exit
 | `Ctrl+Shift+Tab` | Previous tab | `Ctrl+-` | Zoom out |
 | `Ctrl+B` | Bold | `Ctrl+I` | Italic |
 | `Ctrl+U` | Underline | `Ctrl+P` | Print |
+| `Ctrl+Shift+L` | Page layout view | `Esc` | Close it, keeping the edits |
 
 ### Cloud sync
 

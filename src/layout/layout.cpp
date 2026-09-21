@@ -265,38 +265,51 @@ static float LayoutHeight(IDWriteTextLayout* layout) {
     return m.height;
 }
 
-// How many characters fit within `avail` height, at a line boundary. Returns 0
-// when not even the first line fits.
-static UINT32 SplitOffset(IDWriteTextLayout* layout, float avail, float* usedHeight) {
+// How a paragraph's lines fall against the space left on the page. The line
+// is the unit a paragraph can be broken at -- never inside one -- so this is
+// what pagination actually decides with.
+struct LineFit {
+    UINT32 fitted;         // lines that fit in the space left
+    UINT32 total;          // lines in the whole paragraph
+    UINT32 chars;          // characters in the fitted lines
+    UINT32 charsMinusOne;  // ...and in one line fewer, for widow control
+    float  height;         // height of the fitted lines
+};
+
+static BOOL MeasureLines(IDWriteTextLayout* layout, float avail, LineFit* out) {
+    memset(out, 0, sizeof(*out));
+
     UINT32 count = 0;
     layout->GetLineMetrics(NULL, 0, &count);
-    if (!count) return 0;
+    if (!count) return FALSE;
 
     DWRITE_LINE_METRICS* lines =
         (DWRITE_LINE_METRICS*)calloc(count, sizeof(DWRITE_LINE_METRICS));
-    if (!lines) return 0;
+    if (!lines) return FALSE;
 
     UINT32 actual = 0;
     if (FAILED(layout->GetLineMetrics(lines, count, &actual))) {
         free(lines);
-        return 0;
+        return FALSE;
     }
 
     float h = 0.0f;
-    UINT32 chars = 0;
-    UINT32 fitted = 0;
+    UINT32 chars = 0, previous = 0;
 
     for (UINT32 i = 0; i < actual; i++) {
         if (h + lines[i].height > avail) break;
+        previous = chars;
         h += lines[i].height;
         chars += lines[i].length;
-        fitted++;
+        out->fitted++;
     }
 
+    out->total = actual;
+    out->chars = chars;
+    out->charsMinusOne = previous;
+    out->height = h;
     free(lines);
-
-    if (usedHeight) *usedHeight = h;
-    return fitted ? chars : 0;
+    return TRUE;
 }
 
 // ---------------------------------------------------------------------------
@@ -323,7 +336,8 @@ static float SpaceLeft(const Flow* f) {
 
 static LaidText* Place(Flow* f, IDWriteTextLayout* layout, float x, float width,
                        const DocPara* para, BOOL isCellText,
-                       const TextSpan* spans, int spanCount) {
+                       const TextSpan* spans, int spanCount,
+                       UINT32 textStart, UINT32 textLen) {
     LaidText* t = AddText(f->page);
     if (!t) {
         layout->Release();
@@ -336,6 +350,8 @@ static LaidText* Place(Flow* f, IDWriteTextLayout* layout, float x, float width,
     t->height = LayoutHeight(layout);
     t->para = para;
     t->isCellText = isCellText;
+    t->textStart = textStart;
+    t->textLen = textLen;
     CaptureColors(t, spans, spanCount);
     return t;
 }
@@ -388,6 +404,7 @@ static void PlacePara(Flow* f, const DocPara* para, float x, float width,
                 t->width = 24.0f;
                 t->height = LayoutHeight(m);
                 t->para = para;
+                t->isMarker = TRUE;
             } else {
                 m->Release();
             }
@@ -411,17 +428,42 @@ static void PlacePara(Flow* f, const DocPara* para, float x, float width,
         float height = LayoutHeight(layout);
 
         if (height <= SpaceLeft(f) || remaining == 0) {
-            Place(f, layout, x, width, para, isCellText, tail, tailCount);
+            Place(f, layout, x, width, para, isCellText, tail, tailCount, from, remaining);
             f->y += height;
             break;
         }
 
-        // Does not fit. Find the last line boundary that does.
-        float used = 0.0f;
-        UINT32 fit = SplitOffset(layout, SpaceLeft(f), &used);
+        // Does not fit. Break at the last line that does -- and then think
+        // again about where that leaves the paragraph.
+        LineFit fit = {};
+        BOOL measured = MeasureLines(layout, SpaceLeft(f), &fit);
         layout->Release();
+        if (!measured) break;
 
-        if (fit == 0) {
+        UINT32 take = fit.chars;
+
+        // Widows and orphans. A paragraph does not leave a single line alone
+        // at the bottom of one page or the top of the next: either two lines
+        // go with it, or the whole paragraph moves to the next page. This is
+        // the one place pagination is about how a page reads rather than about
+        // what fits on it.
+        if (fit.total >= 2) {
+            BOOL orphan = fit.fitted < 2;                      // one line left behind
+            BOOL widow  = (fit.total - fit.fitted) < 2;        // one line carried over
+
+            if (orphan || widow) {
+                if (!orphan && fit.fitted >= 3) {
+                    take = fit.charsMinusOne;                  // carry two lines instead
+                } else if (f->y > f->result->marginTop) {
+                    NewPage(f);                                // move the paragraph whole
+                    continue;
+                }
+                // Already at the top of a page: a line that fills a page on its
+                // own has nowhere better to go, so it stays where it falls.
+            }
+        }
+
+        if (take == 0) {
             // Nothing fits here. A fresh page gives it the best chance; if the
             // pen is already at the top of one then a single line is taller
             // than the page, and it is placed anyway rather than looping.
@@ -434,17 +476,17 @@ static void PlacePara(Flow* f, const DocPara* para, float x, float width,
                                                    tail, tailCount, width, &para->props);
             if (forced) {
                 float h = LayoutHeight(forced);
-                Place(f, forced, x, width, para, isCellText, tail, tailCount);
+                Place(f, forced, x, width, para, isCellText, tail, tailCount, from, remaining);
                 f->y += h;
             }
             break;
         }
 
-        IDWriteTextLayout* head = MakeLayout(&f->ctx, flat.text + from, fit,
+        IDWriteTextLayout* head = MakeLayout(&f->ctx, flat.text + from, take,
                                              tail, tailCount, width, &para->props);
-        if (head) Place(f, head, x, width, para, isCellText, tail, tailCount);
+        if (head) Place(f, head, x, width, para, isCellText, tail, tailCount, from, take);
 
-        from += fit;
+        from += take;
         NewPage(f);
     }
 
@@ -584,6 +626,16 @@ extern "C" LayoutResult* Layout_Build(const DocModel* doc, const WCHAR* defaultF
         return NULL;
     }
 
+    // Half an inch between tab stops, which is what every word processor
+    // defaults to and what the ruler draws. DirectWrite's own default is four
+    // times the font size, which is neither.
+    //
+    // ponytail: one spacing for the whole document. Per-paragraph stops are a
+    // `w:tabs` list the model does not carry yet -- that is document fidelity,
+    // and it arrives with the rest of it in v0.9.
+    ctx.baseFormat->SetIncrementalTabStop(48.0f);
+
+    r->doc = doc;
     r->pageWidth    = doc->section.pageWidth  / TWIPS_PER_DIP;
     r->pageHeight   = doc->section.pageHeight / TWIPS_PER_DIP;
     r->marginLeft   = doc->section.marginLeft   / TWIPS_PER_DIP;
@@ -670,6 +722,232 @@ extern "C" float Layout_PageContentBottom(const LayoutResult* r, int i) {
 }
 
 // ---------------------------------------------------------------------------
+// Geometry
+//
+// Hit testing, caret rectangles and selection rectangles. DirectWrite answers
+// all three for one laid-out piece; the work here is deciding which piece a
+// question is about, which is the same problem pagination created -- one
+// paragraph can be three pieces on two pages.
+// ---------------------------------------------------------------------------
+
+// The piece holding `offset` in `para`. A position on the seam between two
+// pieces belongs to the earlier one, so a caret at a page break sits at the
+// bottom of the page it was typed on rather than jumping to the next.
+static const LaidText* PieceFor(const LayoutResult* r, const DocPara* para,
+                                unsigned offset, int* pageOut) {
+    const LaidText* best = NULL;
+    int bestPage = 0;
+
+    for (int p = 0; p < r->pageCount; p++) {
+        const LaidPage* page = &r->pages[p];
+        for (int i = 0; i < page->textCount; i++) {
+            const LaidText* t = &page->texts[i];
+            if (t->isMarker || t->para != para) continue;
+
+            if (offset >= t->textStart && offset <= t->textStart + t->textLen) {
+                best = t;
+                bestPage = p;
+                if (offset < t->textStart + t->textLen) {
+                    if (pageOut) *pageOut = bestPage;
+                    return t;
+                }
+            } else if (!best) {
+                best = t;
+                bestPage = p;
+            }
+        }
+    }
+
+    if (best && pageOut) *pageOut = bestPage;
+    return best;
+}
+
+extern "C" int Layout_ComparePos(const LayoutResult* r, LayoutPos a, LayoutPos b) {
+    if (!r || !a.para || !b.para) return 0;
+    if (a.para == b.para) {
+        if (a.offset < b.offset) return -1;
+        return a.offset > b.offset ? 1 : 0;
+    }
+
+    int ia = Doc_ParaIndexOf(r->doc, a.para);
+    int ib = Doc_ParaIndexOf(r->doc, b.para);
+    if (ia < 0 || ib < 0) return 0;
+    return ia < ib ? -1 : (ia > ib ? 1 : 0);
+}
+
+extern "C" BOOL Layout_HitTest(const LayoutResult* r, int page, float x, float y,
+                               LayoutPos* out) {
+    if (!r || !out || page < 0 || page >= r->pageCount) return FALSE;
+
+    const LaidPage* p = &r->pages[page];
+    const LaidText* hit = NULL;
+    float bestDistance = 0.0f;
+
+    for (int i = 0; i < p->textCount; i++) {
+        const LaidText* t = &p->texts[i];
+        if (t->isMarker) continue;
+
+        if (y >= t->y && y <= t->y + t->height &&
+            x >= t->x && x <= t->x + t->width) {
+            hit = t;
+            break;
+        }
+
+        // Not inside anything: remember the nearest, measured from the middle
+        // of the piece, so a click in a margin lands on the line beside it and
+        // a click below the text lands at the end of the page.
+        float dx = 0.0f;
+        if (x < t->x) dx = t->x - x;
+        else if (x > t->x + t->width) dx = x - (t->x + t->width);
+
+        float dy = 0.0f;
+        if (y < t->y) dy = t->y - y;
+        else if (y > t->y + t->height) dy = y - (t->y + t->height);
+
+        float distance = dy * 4.0f + dx;   // a line away counts for more than a gap beside
+        if (!hit || distance < bestDistance) {
+            bestDistance = distance;
+            hit = t;
+        }
+    }
+
+    if (!hit || !hit->layout) return FALSE;
+
+    BOOL trailing = FALSE, inside = FALSE;
+    DWRITE_HIT_TEST_METRICS metrics = {};
+    if (FAILED(hit->layout->HitTestPoint(x - hit->x, y - hit->y,
+                                         &trailing, &inside, &metrics))) {
+        return FALSE;
+    }
+
+    unsigned offset = metrics.textPosition + (trailing ? metrics.length : 0);
+    if (offset > hit->textLen) offset = hit->textLen;
+
+    out->para = hit->para;
+    out->offset = hit->textStart + offset;
+    return TRUE;
+}
+
+extern "C" BOOL Layout_PosRect(const LayoutResult* r, LayoutPos pos, int* pageOut,
+                               LayoutRect* out) {
+    if (!r || !pos.para || !out) return FALSE;
+
+    int page = 0;
+    const LaidText* t = PieceFor(r, pos.para, pos.offset, &page);
+    if (!t || !t->layout) return FALSE;
+
+    unsigned local = pos.offset >= t->textStart ? pos.offset - t->textStart : 0;
+    if (local > t->textLen) local = t->textLen;
+
+    float px = 0.0f, py = 0.0f;
+    DWRITE_HIT_TEST_METRICS metrics = {};
+    if (FAILED(t->layout->HitTestTextPosition(local, FALSE, &px, &py, &metrics))) {
+        return FALSE;
+    }
+
+    out->x = t->x + px;
+    out->y = t->y + py;
+    out->width = 1.0f;
+    out->height = metrics.height > 0.0f ? metrics.height : t->height;
+
+    if (pageOut) *pageOut = page;
+    return TRUE;
+}
+
+extern "C" int Layout_RangeRects(const LayoutResult* r, int page, LayoutPos a, LayoutPos b,
+                                 LayoutRect* out, int cap) {
+    if (!r || !out || cap <= 0 || page < 0 || page >= r->pageCount) return 0;
+    if (Layout_ComparePos(r, a, b) > 0) {
+        LayoutPos swap = a;
+        a = b;
+        b = swap;
+    }
+
+    const LaidPage* p = &r->pages[page];
+    int written = 0;
+
+    for (int i = 0; i < p->textCount && written < cap; i++) {
+        const LaidText* t = &p->texts[i];
+        if (t->isMarker || !t->layout) continue;
+
+        // What part of this piece the selection covers, in the piece's own
+        // offsets. A piece belonging to a paragraph strictly inside the range
+        // is covered whole.
+        unsigned from = 0, to = t->textLen;
+
+        int cmpStart = Layout_ComparePos(r, a, LayoutPos{ t->para, t->textStart + t->textLen });
+        int cmpEnd = Layout_ComparePos(r, b, LayoutPos{ t->para, t->textStart });
+        if (cmpStart > 0 || cmpEnd < 0) continue;      // entirely before or after
+
+        if (a.para == t->para && a.offset > t->textStart) from = a.offset - t->textStart;
+        if (b.para == t->para && b.offset < t->textStart + t->textLen) {
+            to = b.offset > t->textStart ? b.offset - t->textStart : 0;
+        }
+        if (to <= from) continue;
+
+        UINT32 count = 0;
+        DWRITE_HIT_TEST_METRICS hits[64] = {};
+        // 64 rectangles is more lines than a page holds, so the buffer cannot
+        // be the thing that is short.
+        if (FAILED(t->layout->HitTestTextRange(from, to - from, t->x, t->y,
+                                               hits, 64, &count))) {
+            continue;
+        }
+
+        for (UINT32 h = 0; h < count && written < cap; h++) {
+            out[written].x = hits[h].left;
+            out[written].y = hits[h].top;
+            out[written].width = hits[h].width;
+            out[written].height = hits[h].height;
+            written++;
+        }
+    }
+
+    return written;
+}
+
+extern "C" BOOL Layout_MoveLine(const LayoutResult* r, LayoutPos pos, int delta,
+                                LayoutPos* out) {
+    if (!r || !out || delta == 0) return FALSE;
+
+    int page = 0;
+    LayoutRect caret = {};
+    if (!Layout_PosRect(r, pos, &page, &caret)) return FALSE;
+
+    float x = caret.x;
+    float y = delta > 0 ? caret.y + caret.height * 1.5f
+                        : caret.y - caret.height * 0.5f;
+
+    // Past the top or the bottom of the page, the line above or below is on
+    // the page before or after -- a document is pages, not one long column.
+    if (y < r->marginTop && delta < 0) {
+        if (page == 0) return FALSE;
+        page--;
+        y = Layout_PageContentBottom(r, page) - caret.height * 0.5f;
+    } else if (y > r->pageHeight - r->marginBottom && delta > 0) {
+        if (page + 1 >= r->pageCount) return FALSE;
+        page++;
+        y = r->marginTop + caret.height * 0.5f;
+    }
+
+    return Layout_HitTest(r, page, x, y, out);
+}
+
+extern "C" BOOL Layout_LineEdge(const LayoutResult* r, LayoutPos pos, BOOL end,
+                                LayoutPos* out) {
+    if (!r || !out) return FALSE;
+
+    int page = 0;
+    LayoutRect caret = {};
+    if (!Layout_PosRect(r, pos, &page, &caret)) return FALSE;
+
+    // Far off the line in the wanted direction: DirectWrite answers with the
+    // nearest position on that line, which is exactly the line's edge.
+    float x = end ? r->pageWidth * 2.0f : -r->pageWidth;
+    return Layout_HitTest(r, page, x, caret.y + caret.height * 0.5f, out);
+}
+
+// ---------------------------------------------------------------------------
 // Self-check. Run with: OpenNote.exe --selftest
 //
 // The engine produces geometry and nothing else, which is exactly what makes
@@ -678,6 +956,15 @@ extern "C" float Layout_PageContentBottom(const LayoutResult* r, int i) {
 // is working, and if it does not, no amount of looking at the screen would
 // reliably catch the page where it stopped holding.
 // ---------------------------------------------------------------------------
+
+// How many lines a laid-out piece came out as. Only the self-check needs it,
+// which is why it is here rather than in the engine's interface.
+static UINT32 PieceLines(const LaidText* t) {
+    if (!t->layout) return 0;
+    UINT32 count = 0;
+    t->layout->GetLineMetrics(NULL, 0, &count);
+    return count;
+}
 
 static DocPara* AddTextPara(DocModel* doc, const WCHAR* text, const CharProps* props) {
     DocPara* p = Doc_AddPara(doc);
@@ -872,6 +1159,132 @@ extern "C" BOOL Layout_SelfTest(char* failure, size_t failureSize) {
         // 11906 twips is 793.7 DIPs; 16838 is 1122.5.
         if (w < 793.0f || w > 794.5f)    FAIL("the page defaults did not set the page width");
         if (h < 1122.0f || h > 1123.5f)  FAIL("the page defaults did not set the page height");
+    }
+
+    // --- a position and a point agree about where a character is ----------
+    //
+    // The round trip that makes the page an editor: ask where a position is,
+    // click there, and get the same position back. If these two ever disagree
+    // the caret lands somewhere other than where it was clicked, and no amount
+    // of looking at the screen tells you by how much.
+    {
+        doc = Doc_New();
+        if (!doc) FAIL("could not allocate a model");
+
+        for (int i = 0; i < 120; i++) {
+            AddTextPara(doc, L"A line of body text long enough to wrap onto a second "
+                             L"line when it is laid out on Letter paper.", &plain);
+        }
+
+        r = Layout_Build(doc, L"Calibri", 11.0f);
+        if (!r) FAIL("Layout_Build failed on the geometry case");
+        if (Layout_PageCount(r) < 2) FAIL("the geometry case did not paginate");
+
+        for (int i = 0; i < Doc_CountParas(doc); i += 17) {
+            DocPara* para = Doc_ParaAt(doc, i);
+            unsigned len = Doc_ParaLength(para);
+
+            for (unsigned off = 0; off <= len; off += 13) {
+                LayoutPos pos = { para, off };
+                LayoutRect caret = {};
+                int page = -1;
+
+                if (!Layout_PosRect(r, pos, &page, &caret)) FAIL("a position had no place on a page");
+                if (page < 0 || page >= Layout_PageCount(r)) FAIL("a position landed on no page");
+
+                LayoutPos back = {};
+                if (!Layout_HitTest(r, page, caret.x + 0.5f, caret.y + caret.height * 0.5f, &back)) {
+                    FAIL("hit testing the caret's own point found nothing");
+                }
+                if (back.para != para) FAIL("a point over a paragraph named a different one");
+                if (back.offset != off) FAIL("a point over a character named a different one");
+            }
+        }
+
+        // Document order, which is what tells a selection which end is which.
+        LayoutPos first = { Doc_ParaAt(doc, 0), 0 };
+        LayoutPos later = { Doc_ParaAt(doc, 5), 3 };
+        if (Layout_ComparePos(r, first, later) >= 0) FAIL("paragraph order came out backwards");
+        if (Layout_ComparePos(r, later, first) <= 0) FAIL("paragraph order is not symmetric");
+        if (Layout_ComparePos(r, later, later) != 0) FAIL("a position did not equal itself");
+
+        // Down a line and back up is where it started.
+        LayoutPos start = { Doc_ParaAt(doc, 3), 4 };
+        LayoutPos down = {}, up = {};
+        if (!Layout_MoveLine(r, start, 1, &down)) FAIL("moving down a line failed");
+        if (Layout_ComparePos(r, start, down) >= 0) FAIL("moving down did not move forwards");
+        if (!Layout_MoveLine(r, down, -1, &up)) FAIL("moving back up a line failed");
+        if (up.para != start.para) FAIL("down then up left a different paragraph");
+
+        // Home and end of a wrapped line stay inside the paragraph.
+        LayoutPos home = {}, end = {};
+        if (!Layout_LineEdge(r, start, FALSE, &home)) FAIL("finding the start of a line failed");
+        if (!Layout_LineEdge(r, start, TRUE, &end)) FAIL("finding the end of a line failed");
+        if (home.para != start.para || end.para != start.para) FAIL("a line edge left the paragraph");
+        if (Layout_ComparePos(r, home, end) >= 0) FAIL("a line ends before it starts");
+
+        // A selection has something to draw.
+        LayoutRect rects[32] = {};
+        LayoutPos selEnd = { Doc_ParaAt(doc, 0), Doc_ParaLength(Doc_ParaAt(doc, 0)) };
+        int n = Layout_RangeRects(r, 0, first, selEnd, rects, 32);
+        if (n < 1) FAIL("a selection over a whole paragraph produced no rectangles");
+        for (int i = 0; i < n; i++) {
+            if (rects[i].width <= 0.0f || rects[i].height <= 0.0f) FAIL("a selection rectangle is empty");
+        }
+
+        // ...and a selection that is not on this page produces nothing.
+        LayoutPos lastPara = { Doc_ParaAt(doc, Doc_CountParas(doc) - 1), 0 };
+        LayoutPos lastEnd = { lastPara.para, Doc_ParaLength(Doc_ParaAt(doc, Doc_CountParas(doc) - 1)) };
+        if (Layout_RangeRects(r, 0, lastPara, lastEnd, rects, 32) != 0) {
+            FAIL("a selection on the last page drew on the first");
+        }
+
+        Layout_Free(r); r = NULL;
+        Doc_Free(doc); doc = NULL;
+    }
+
+    // --- no widows and no orphans -----------------------------------------
+    //
+    // Paragraphs of every length from three lines to a dozen, so page
+    // boundaries land in every possible place inside one. A paragraph that
+    // gets broken must leave at least two lines on each side of the break;
+    // one that cannot moves to the next page whole instead.
+    {
+        doc = Doc_New();
+        if (!doc) FAIL("could not allocate a model");
+
+        for (int i = 0; i < 60; i++) {
+            DocPara* p = Doc_AddPara(doc);
+            if (!p) FAIL("could not build the widow and orphan case");
+            for (int j = 0; j < 2 + (i % 7); j++) {
+                Doc_AddRun(p, L"A sentence of body text, long enough to take a line and "
+                              L"a half of a Letter page all by itself. ", -1, &plain);
+            }
+        }
+
+        r = Layout_Build(doc, L"Calibri", 11.0f);
+        if (!r) FAIL("Layout_Build failed on the widow and orphan case");
+        if (Layout_PageCount(r) < 3) FAIL("the widow and orphan case did not paginate");
+
+        int split = 0;
+        for (int pg = 0; pg < r->pageCount; pg++) {
+            for (int i = 0; i < r->pages[pg].textCount; i++) {
+                const LaidText* t = &r->pages[pg].texts[i];
+                if (t->isMarker) continue;
+
+                unsigned whole = Doc_ParaLength(t->para);
+                BOOL isPiece = (t->textStart > 0) || (t->textLen < whole);
+                if (!isPiece) continue;
+
+                split++;
+                if (PieceLines(t) < 2) FAIL("a broken paragraph left a single line alone");
+            }
+        }
+
+        if (split < 2) FAIL("no paragraph was broken, so the rule was never tested");
+
+        Layout_Free(r); r = NULL;
+        Doc_Free(doc); doc = NULL;
     }
 
     // --- an empty document still produces a page --------------------------

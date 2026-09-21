@@ -1036,7 +1036,11 @@ void MainWindow_OnCommand(HWND hwnd, int id, HWND hwndCtl, UINT codeNotify) {
             }
             break;
 
+        case IDM_VIEW_PAGE_LAYOUT:
         case IDM_FILE_PRINT_PREVIEW:
+            // One window for both: a preview of the laid-out pages and the
+            // place they can be edited are the same thing once the engine
+            // exists, which is the whole point of it.
             if (hEditor && Editor_IsRich(hEditor)) {
                 // A rich document previews through the layout engine, which
                 // shows real pages with real margins. The plain text preview

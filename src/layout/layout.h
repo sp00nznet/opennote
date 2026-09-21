@@ -43,6 +43,49 @@ float Layout_PageContentBottom(const LayoutResult* r, int pageIndex);
 int   Layout_PageTextCount(const LayoutResult* r, int pageIndex);
 int   Layout_PageCellCount(const LayoutResult* r, int pageIndex);
 
+// ---------------------------------------------------------------------------
+// Geometry: where a position is, and what is under a point
+//
+// The other half of laying a document out. A page of text is only an editor
+// once a click can name a character and a character can name a place on the
+// page -- and both of those are questions about geometry, which is why they
+// live with the engine rather than with the window that draws it.
+// ---------------------------------------------------------------------------
+
+typedef struct {
+    const DocPara* para;
+    unsigned       offset;    // into the paragraph's text
+} LayoutPos;
+
+typedef struct {
+    float x, y, width, height;   // page DIPs, from the paper corner
+} LayoutRect;
+
+// What is under a point on a page, in page DIPs. Answers the nearest position
+// when the point is in a margin, because a click below the last line of a page
+// means the end of it rather than nothing.
+BOOL Layout_HitTest(const LayoutResult* r, int page, float x, float y, LayoutPos* out);
+
+// Where a position is: which page it landed on, and the caret rectangle.
+BOOL Layout_PosRect(const LayoutResult* r, LayoutPos pos, int* pageOut, LayoutRect* out);
+
+// The rectangles covering [a, b) on one page, for drawing a selection.
+// Returns how many were written.
+int Layout_RangeRects(const LayoutResult* r, int page, LayoutPos a, LayoutPos b,
+                      LayoutRect* out, int cap);
+
+// Document order: negative, zero or positive.
+int Layout_ComparePos(const LayoutResult* r, LayoutPos a, LayoutPos b);
+
+// One line up (delta < 0) or down (delta > 0), keeping the horizontal place --
+// including across a page boundary, which is where a document stops being one
+// long column and starts being pages.
+BOOL Layout_MoveLine(const LayoutResult* r, LayoutPos pos, int delta, LayoutPos* out);
+
+// The start or end of the line a position is on, which is what Home and End
+// mean once text is wrapped: the line, not the paragraph.
+BOOL Layout_LineEdge(const LayoutResult* r, LayoutPos pos, BOOL end, LayoutPos* out);
+
 // Self-check, run by `OpenNote.exe --selftest`.
 BOOL Layout_SelfTest(char* failure, size_t failureSize);
 

@@ -146,6 +146,49 @@ int Doc_CountCells(const DocModel* doc);
 WCHAR* Doc_GetText(const DocModel* doc);
 
 // ---------------------------------------------------------------------------
+// Positions and editing
+//
+// A position is a paragraph and an offset into that paragraph's text, where
+// the text is its runs concatenated with a tab or a line break counting one
+// character each. That is the same string the layout engine flattens a
+// paragraph to, so a click on a laid-out page names a place in the model and
+// the two cannot disagree about where anything is.
+// ---------------------------------------------------------------------------
+
+typedef struct {
+    DocPara* para;
+    unsigned offset;
+} DocPos;
+
+unsigned Doc_ParaLength(const DocPara* para);
+WCHAR*   Doc_ParaText(const DocPara* para, unsigned* lenOut);   // caller frees
+
+// Paragraphs in document order, table cells included. The editor holds a
+// caret as an index rather than a pointer, because undo replaces the model.
+DocPara*        Doc_ParaAt(const DocModel* doc, int index);
+int             Doc_ParaIndexOf(const DocModel* doc, const DocPara* para);
+const DocCell*  Doc_ParaCell(const DocModel* doc, const DocPara* para);
+
+// Insert text at `at`, which is advanced past it.
+BOOL DocEdit_Insert(DocModel* doc, DocPos* at, const WCHAR* text, int len);
+
+// Break a paragraph in two at `at`, which lands at the start of the new one.
+BOOL DocEdit_SplitPara(DocModel* doc, DocPos* at);
+
+// Delete [a, b). Fails rather than half-doing it when the range runs into or
+// out of a table, which is not a splice the model can make.
+BOOL DocEdit_DeleteRange(DocModel* doc, DocPos a, DocPos b, DocPos* out);
+
+// The text of [a, b), one paragraph per line. Caller frees.
+WCHAR* DocEdit_RangeText(const DocModel* doc, DocPos a, DocPos b);
+
+// A deep copy. Undo is a stack of these.
+DocModel* Doc_Clone(const DocModel* src);
+
+// Self-check for the editing operations, run by `OpenNote.exe --selftest`.
+BOOL DocEdit_SelfTest(char* failure, size_t failureSize);
+
+// ---------------------------------------------------------------------------
 // Comparison, for measuring what a round trip lost
 // ---------------------------------------------------------------------------
 

@@ -460,6 +460,868 @@ void Doc_Compare(const DocModel* a, const DocModel* b, DocDiff* d) {
 }
 
 // ---------------------------------------------------------------------------
+// Positions and editing
+//
+// A position in the document is a paragraph and an offset into that
+// paragraph's text, where the text is its runs concatenated: a tab and a line
+// break are one character each, and an empty run is not there at all. That is
+// exactly what the layout engine flattens a paragraph to, which is what lets a
+// click on a laid-out page name a place in the model.
+// ---------------------------------------------------------------------------
+
+// The characters one run contributes.
+static unsigned RunLength(const DocRun* run) {
+    if (run->tab || run->lineBreak) return 1;
+    return run->text ? (unsigned)wcslen(run->text) : 0;
+}
+
+unsigned Doc_ParaLength(const DocPara* para) {
+    unsigned n = 0;
+    if (!para) return 0;
+    for (const DocRun* r = para->runs; r; r = r->next) n += RunLength(r);
+    return n;
+}
+
+WCHAR* Doc_ParaText(const DocPara* para, unsigned* lenOut) {
+    unsigned len = Doc_ParaLength(para);
+    WCHAR* out = (WCHAR*)malloc(((size_t)len + 1) * sizeof(WCHAR));
+    if (!out) return NULL;
+
+    unsigned at = 0;
+    for (const DocRun* r = para ? para->runs : NULL; r; r = r->next) {
+        unsigned n = RunLength(r);
+        if (!n) continue;
+        if (r->tab)            out[at] = L'\t';
+        else if (r->lineBreak) out[at] = L'\n';
+        else                   memcpy(out + at, r->text, n * sizeof(WCHAR));
+        at += n;
+    }
+    out[len] = L'\0';
+
+    if (lenOut) *lenOut = len;
+    return out;
+}
+
+// ---------------------------------------------------------------------------
+// Paragraphs in document order
+// ---------------------------------------------------------------------------
+
+DocPara* Doc_ParaAt(const DocModel* doc, int index) {
+    if (!doc || index < 0) return NULL;
+
+    int seen = 0;
+    for (const DocBlock* b = doc->blocks; b; b = b->next) {
+        if (b->kind == BLOCK_PARA) {
+            for (DocPara* p = b->para; p; p = p->next) {
+                if (seen++ == index) return p;
+            }
+        } else {
+            for (const DocRow* r = b->table.rows; r; r = r->next) {
+                for (const DocCell* c = r->cells; c; c = c->next) {
+                    for (DocPara* p = c->paras; p; p = p->next) {
+                        if (seen++ == index) return p;
+                    }
+                }
+            }
+        }
+    }
+    return NULL;
+}
+
+int Doc_ParaIndexOf(const DocModel* doc, const DocPara* para) {
+    if (!doc || !para) return -1;
+
+    int seen = 0;
+    for (const DocBlock* b = doc->blocks; b; b = b->next) {
+        if (b->kind == BLOCK_PARA) {
+            for (const DocPara* p = b->para; p; p = p->next, seen++) {
+                if (p == para) return seen;
+            }
+        } else {
+            for (const DocRow* r = b->table.rows; r; r = r->next) {
+                for (const DocCell* c = r->cells; c; c = c->next) {
+                    for (const DocPara* p = c->paras; p; p = p->next, seen++) {
+                        if (p == para) return seen;
+                    }
+                }
+            }
+        }
+    }
+    return -1;
+}
+
+// The cell a paragraph sits in, or NULL when it is a body paragraph. Two
+// positions can only be edited as one range when this agrees for both: a
+// selection running from the page into a table is not a thing the model can
+// splice.
+const DocCell* Doc_ParaCell(const DocModel* doc, const DocPara* para) {
+    if (!doc || !para) return NULL;
+    for (const DocBlock* b = doc->blocks; b; b = b->next) {
+        if (b->kind != BLOCK_TABLE) continue;
+        for (const DocRow* r = b->table.rows; r; r = r->next) {
+            for (const DocCell* c = r->cells; c; c = c->next) {
+                for (const DocPara* p = c->paras; p; p = p->next) {
+                    if (p == para) return c;
+                }
+            }
+        }
+    }
+    return NULL;
+}
+
+// The list a paragraph belongs to, and the block that owns that list. Editing
+// needs both: the head pointer to unlink through, and the block so an emptied
+// one can go with it.
+static DocPara** ParaChain(DocModel* doc, const DocPara* para, DocBlock** blockOut) {
+    if (blockOut) *blockOut = NULL;
+    if (!doc || !para) return NULL;
+
+    for (DocBlock* b = doc->blocks; b; b = b->next) {
+        if (b->kind == BLOCK_PARA) {
+            for (const DocPara* p = b->para; p; p = p->next) {
+                if (p != para) continue;
+                if (blockOut) *blockOut = b;
+                return &b->para;
+            }
+        } else {
+            for (DocRow* r = b->table.rows; r; r = r->next) {
+                for (DocCell* c = r->cells; c; c = c->next) {
+                    for (const DocPara* p = c->paras; p; p = p->next) {
+                        if (p != para) continue;
+                        if (blockOut) *blockOut = b;
+                        return &c->paras;
+                    }
+                }
+            }
+        }
+    }
+    return NULL;
+}
+
+// ---------------------------------------------------------------------------
+// Editing one paragraph's runs
+// ---------------------------------------------------------------------------
+
+// Drop runs that no longer carry anything. An empty text run would be
+// invisible but would still be counted and written out.
+static void PruneEmptyRuns(DocPara* para) {
+    DocRun* prev = NULL;
+    DocRun* run = para->runs;
+    while (run) {
+        DocRun* next = run->next;
+        if (RunLength(run) == 0) {
+            if (prev) prev->next = next;
+            else      para->runs = next;
+            free(run->text);
+            free(run);
+        } else {
+            prev = run;
+        }
+        run = next;
+    }
+}
+
+// Insert text into the run that already covers `offset`, so typing inherits
+// the formatting of what it is typed into. Only at a run boundary does the
+// neighbour on the left decide, which is what every editor does.
+static BOOL InsertIntoRuns(DocPara* para, unsigned offset, const WCHAR* text, unsigned len) {
+    DocRun* target = NULL;      // the text run to grow
+    unsigned into = 0;          // where in that run's text
+    unsigned at = 0;
+
+    for (DocRun* r = para->runs; r; r = r->next) {
+        unsigned n = RunLength(r);
+        if (!n) continue;
+
+        unsigned start = at;
+        at += n;
+        if (r->tab || r->lineBreak) continue;    // nowhere to put characters
+
+        if (offset > start && offset < at) {     // inside this run: settled
+            target = r;
+            into = offset - start;
+            break;
+        }
+        if (offset == at || (offset == start && !target)) {
+            // On a boundary. The run to the left owns it, which is why typing
+            // at the join of plain and bold text comes out plain.
+            target = r;
+            into = offset - start;
+        }
+    }
+
+    if (!target) {
+        // Nothing in the paragraph that can hold text -- it is empty, or it is
+        // all tabs and breaks.
+        CharProps props = {0};
+        if (para->runs) props = para->runs->props;
+        return Doc_AddRun(para, text, (int)len, &props) != NULL;
+    }
+
+    unsigned old = (unsigned)wcslen(target->text);
+    WCHAR* grown = (WCHAR*)realloc(target->text, ((size_t)old + len + 1) * sizeof(WCHAR));
+    if (!grown) return FALSE;
+
+    memmove(grown + into + len, grown + into, ((size_t)old - into + 1) * sizeof(WCHAR));
+    memcpy(grown + into, text, (size_t)len * sizeof(WCHAR));
+    target->text = grown;
+    return TRUE;
+}
+
+// Cut [from, to) out of one paragraph.
+static void DeleteInPara(DocPara* para, unsigned from, unsigned to) {
+    if (!para || to <= from) return;
+
+    unsigned at = 0;
+    for (DocRun* r = para->runs; r; r = r->next) {
+        unsigned n = RunLength(r);
+        if (!n) continue;
+
+        unsigned start = at, end = at + n;
+        at = end;
+
+        if (end <= from || start >= to) continue;
+
+        unsigned cutFrom = (from > start ? from : start) - start;
+        unsigned cutTo   = (to < end ? to : end) - start;
+
+        if (r->tab || r->lineBreak) {
+            // One character, and the range covers it: turn it into an empty
+            // text run and let the prune take it.
+            r->tab = FALSE;
+            r->lineBreak = FALSE;
+            if (!r->text) r->text = (WCHAR*)calloc(1, sizeof(WCHAR));
+            else          r->text[0] = L'\0';
+            continue;
+        }
+
+        unsigned len = (unsigned)wcslen(r->text);
+        memmove(r->text + cutFrom, r->text + cutTo,
+                ((size_t)len - cutTo + 1) * sizeof(WCHAR));
+    }
+
+    PruneEmptyRuns(para);
+}
+
+// Everything from `offset` to the end of the paragraph, moved onto `into`.
+// Used by both the split (the tail becomes the new paragraph) and the merge
+// that a backspace at the start of a paragraph is.
+static BOOL MoveTailRuns(DocPara* from, unsigned offset, DocPara* into) {
+    unsigned at = 0;
+    DocRun* prev = NULL;
+    DocRun* run = from->runs;
+
+    while (run) {
+        unsigned n = RunLength(run);
+        unsigned start = at;
+        at += n;
+
+        if (n && start < offset && start + n > offset) {
+            // The split falls inside this run: leave the head, carry the tail.
+            unsigned cut = offset - start;
+            CharProps props = run->props;
+            if (!Doc_AddRun(into, run->text + cut, (int)(n - cut), &props)) return FALSE;
+            run->text[cut] = L'\0';
+            prev = run;
+            run = run->next;
+            continue;
+        }
+
+        if (start >= offset) {
+            DocRun* next = run->next;
+            if (prev) prev->next = next;
+            else      from->runs = next;
+
+            run->next = NULL;
+            APPEND(into->runs, run, DocRun);
+            run = next;
+            continue;
+        }
+
+        prev = run;
+        run = run->next;
+    }
+
+    PruneEmptyRuns(from);
+    return TRUE;
+}
+
+// Unlink a paragraph and free it.
+static void RemovePara(DocModel* doc, DocPara* victim) {
+    DocBlock* block = NULL;
+    DocPara** head = ParaChain(doc, victim, &block);
+    if (!head) return;
+
+    DocPara* prev = NULL;
+    for (DocPara* p = *head; p; p = p->next) {
+        if (p == victim) break;
+        prev = p;
+    }
+
+    if (prev) prev->next = victim->next;
+    else      *head = victim->next;
+
+    victim->next = NULL;
+    FreeParas(victim);
+
+    // A paragraph block with nothing left in it is not a blank line, it is
+    // nothing at all.
+    if (block && block->kind == BLOCK_PARA && !block->para) {
+        DocBlock* prevBlock = NULL;
+        for (DocBlock* b = doc->blocks; b; b = b->next) {
+            if (b == block) break;
+            prevBlock = b;
+        }
+        if (prevBlock) prevBlock->next = block->next;
+        else           doc->blocks = block->next;
+        free(block);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// The editing operations themselves
+// ---------------------------------------------------------------------------
+
+BOOL DocEdit_Insert(DocModel* doc, DocPos* at, const WCHAR* text, int len) {
+    (void)doc;
+    if (!at || !at->para || !text) return FALSE;
+    if (len < 0) len = (int)wcslen(text);
+    if (len == 0) return TRUE;
+
+    unsigned paraLen = Doc_ParaLength(at->para);
+    if (at->offset > paraLen) at->offset = paraLen;
+
+    if (!InsertIntoRuns(at->para, at->offset, text, (unsigned)len)) return FALSE;
+
+    at->offset += (unsigned)len;
+    return TRUE;
+}
+
+BOOL DocEdit_SplitPara(DocModel* doc, DocPos* at) {
+    if (!doc || !at || !at->para) return FALSE;
+
+    DocBlock* block = NULL;
+    DocPara** head = ParaChain(doc, at->para, &block);
+    if (!head) return FALSE;
+
+    DocPara* tail = (DocPara*)calloc(1, sizeof(DocPara));
+    if (!tail) return FALSE;
+
+    // The new paragraph keeps the old one's shape -- indent, alignment,
+    // spacing -- but not its heading level: pressing Enter at the end of a
+    // heading starts body text, which is what Word does and what anybody
+    // typing expects.
+    tail->props = at->para->props;
+    tail->props.headingLevel = 0;
+
+    unsigned paraLen = Doc_ParaLength(at->para);
+    if (at->offset > paraLen) at->offset = paraLen;
+
+    if (!MoveTailRuns(at->para, at->offset, tail)) {
+        FreeParas(tail);
+        return FALSE;
+    }
+
+    tail->next = at->para->next;
+    at->para->next = tail;
+
+    at->para = tail;
+    at->offset = 0;
+    return TRUE;
+}
+
+// Is `b` reachable from `a` by walking paragraphs forward, without crossing a
+// table on the way? Fills `count` with how many paragraphs lie between them.
+static BOOL ParaReaches(DocModel* doc, DocPara* a, DocPara* b) {
+    DocBlock* blockA = NULL;
+    DocPara** chainA = ParaChain(doc, a, &blockA);
+    DocBlock* blockB = NULL;
+    DocPara** chainB = ParaChain(doc, b, &blockB);
+    if (!chainA || !chainB) return FALSE;
+
+    if (chainA == chainB) {
+        for (DocPara* p = a; p; p = p->next) {
+            if (p == b) return TRUE;
+        }
+        return FALSE;
+    }
+
+    // Different lists: only body paragraphs in consecutive paragraph blocks
+    // can be spliced together. Anything else means the range runs into or out
+    // of a table.
+    if (!blockA || !blockB) return FALSE;
+    if (blockA->kind != BLOCK_PARA || blockB->kind != BLOCK_PARA) return FALSE;
+
+    for (DocBlock* blk = blockA->next; blk; blk = blk->next) {
+        if (blk->kind != BLOCK_PARA) return FALSE;   // a table in the way
+        if (blk == blockB) return TRUE;
+    }
+    return FALSE;
+}
+
+BOOL DocEdit_DeleteRange(DocModel* doc, DocPos a, DocPos b, DocPos* out) {
+    if (!doc || !a.para || !b.para) return FALSE;
+
+    if (a.para == b.para) {
+        if (b.offset <= a.offset) return FALSE;
+        DeleteInPara(a.para, a.offset, b.offset);
+        if (out) *out = a;
+        return TRUE;
+    }
+
+    if (!ParaReaches(doc, a.para, b.para)) return FALSE;
+
+    // Everything between the two ends goes, and the walk that finds it uses
+    // the links the removal is about to change -- so it happens first, before
+    // a single character is touched.
+    DocBlock* blockA = NULL;
+    ParaChain(doc, a.para, &blockA);
+
+    DocPara** doomed = NULL;
+    int doomedCount = 0, doomedCap = 0;
+
+    DocPara* p = a.para->next;
+    DocBlock* blk = blockA;
+    for (;;) {
+        if (!p) {
+            blk = blk ? blk->next : NULL;
+            if (!blk || blk->kind != BLOCK_PARA) break;
+            p = blk->para;
+            continue;
+        }
+
+        if (doomedCount == doomedCap) {
+            int cap = doomedCap ? doomedCap * 2 : 32;
+            DocPara** grown = (DocPara**)realloc(doomed, (size_t)cap * sizeof(DocPara*));
+            if (!grown) { free(doomed); return FALSE; }
+            doomed = grown;
+            doomedCap = cap;
+        }
+        doomed[doomedCount++] = p;
+
+        if (p == b.para) break;
+        p = p->next;
+    }
+
+    if (doomedCount == 0 || doomed[doomedCount - 1] != b.para) {
+        free(doomed);
+        return FALSE;
+    }
+
+    // Trim both ends, move what is left of the last paragraph onto the first,
+    // and drop everything in between.
+    DeleteInPara(a.para, a.offset, Doc_ParaLength(a.para));
+    DeleteInPara(b.para, 0, b.offset);
+
+    BOOL moved = MoveTailRuns(b.para, 0, a.para);
+    for (int i = 0; i < doomedCount; i++) RemovePara(doc, doomed[i]);
+    free(doomed);
+
+    if (out) *out = a;
+    return moved;
+}
+
+WCHAR* DocEdit_RangeText(const DocModel* doc, DocPos a, DocPos b) {
+    if (!doc || !a.para || !b.para) return NULL;
+
+    int from = Doc_ParaIndexOf(doc, a.para);
+    int to = Doc_ParaIndexOf(doc, b.para);
+    if (from < 0 || to < 0 || to < from) return NULL;
+
+    TextAcc acc = {0};
+
+    for (int i = from; i <= to; i++) {
+        const DocPara* para = Doc_ParaAt(doc, i);
+        if (!para) break;
+
+        unsigned len = 0;
+        WCHAR* text = Doc_ParaText(para, &len);
+        if (!text) break;
+
+        unsigned start = (i == from) ? a.offset : 0;
+        unsigned end   = (i == to)   ? b.offset : len;
+        if (start > len) start = len;
+        if (end > len)   end = len;
+
+        if (end > start) AccAdd(&acc, text + start, end - start);
+        if (i != to)     AccAdd(&acc, L"\n", 1);
+
+        free(text);
+    }
+
+    if (!acc.buf) {
+        acc.buf = (WCHAR*)calloc(1, sizeof(WCHAR));
+        return acc.buf;
+    }
+
+    acc.buf[acc.len] = L'\0';
+    return acc.buf;
+}
+
+// ---------------------------------------------------------------------------
+// Cloning, which is how undo works
+//
+// A snapshot per edit rather than an inverse operation per edit: the model is
+// a few hundred kilobytes for a document anybody is typing into, and a wrong
+// inverse is a corruption that shows up three edits later.
+//
+// ponytail: the stack is bounded by its holder, not here. If documents get
+// big enough for this to hurt, the fix is an operation log, not a smaller cap.
+// ---------------------------------------------------------------------------
+
+static BOOL CloneParas(const DocPara* src, DocPara** dest) {
+    for (const DocPara* p = src; p; p = p->next) {
+        DocPara* copy = (DocPara*)calloc(1, sizeof(DocPara));
+        if (!copy) return FALSE;
+        copy->props = p->props;
+
+        for (const DocRun* r = p->runs; r; r = r->next) {
+            DocRun* rc = (DocRun*)calloc(1, sizeof(DocRun));
+            if (!rc) return FALSE;
+            rc->props = r->props;
+            rc->tab = r->tab;
+            rc->lineBreak = r->lineBreak;
+
+            size_t n = r->text ? wcslen(r->text) : 0;
+            rc->text = (WCHAR*)malloc((n + 1) * sizeof(WCHAR));
+            if (!rc->text) { free(rc); return FALSE; }
+            if (n) memcpy(rc->text, r->text, n * sizeof(WCHAR));
+            rc->text[n] = L'\0';
+
+            APPEND(copy->runs, rc, DocRun);
+        }
+
+        APPEND(*dest, copy, DocPara);
+    }
+    return TRUE;
+}
+
+DocModel* Doc_Clone(const DocModel* src) {
+    if (!src) return NULL;
+
+    DocModel* copy = (DocModel*)calloc(1, sizeof(DocModel));
+    if (!copy) return NULL;
+    copy->section = src->section;
+
+    for (const DocBlock* b = src->blocks; b; b = b->next) {
+        DocBlock* bc = (DocBlock*)calloc(1, sizeof(DocBlock));
+        if (!bc) { Doc_Free(copy); return NULL; }
+        bc->kind = b->kind;
+
+        if (b->kind == BLOCK_PARA) {
+            if (!CloneParas(b->para, &bc->para)) {
+                free(bc);
+                Doc_Free(copy);
+                return NULL;
+            }
+        } else {
+            bc->table.gridCount = b->table.gridCount;
+            memcpy(bc->table.gridEdges, b->table.gridEdges, sizeof(bc->table.gridEdges));
+
+            for (const DocRow* r = b->table.rows; r; r = r->next) {
+                DocRow* rc = (DocRow*)calloc(1, sizeof(DocRow));
+                if (!rc) { Doc_Free(copy); free(bc); return NULL; }
+
+                for (const DocCell* c = r->cells; c; c = c->next) {
+                    DocCell* cc = (DocCell*)calloc(1, sizeof(DocCell));
+                    if (!cc) { Doc_Free(copy); free(bc); return NULL; }
+                    if (!CloneParas(c->paras, &cc->paras)) {
+                        Doc_Free(copy);
+                        free(bc);
+                        return NULL;
+                    }
+                    APPEND(rc->cells, cc, DocCell);
+                }
+
+                APPEND(bc->table.rows, rc, DocRow);
+            }
+        }
+
+        APPEND(copy->blocks, bc, DocBlock);
+    }
+
+    return copy;
+}
+
+// ---------------------------------------------------------------------------
+// Self-check for the editing operations. Run with: OpenNote.exe --selftest
+//
+// Every keystroke in the page view goes through these, and undo is a stack of
+// the clone below, so a fault here is a document quietly losing text. The
+// checks assert on the resulting text rather than on the run structure: what
+// matters is that the characters are right and the formatting survived, not
+// how the runs were arranged to manage it.
+// ---------------------------------------------------------------------------
+
+static BOOL ParaTextIs(const DocPara* para, const WCHAR* want) {
+    unsigned len = 0;
+    WCHAR* got = Doc_ParaText(para, &len);
+    if (!got) return FALSE;
+    BOOL ok = wcscmp(got, want) == 0;
+    free(got);
+    return ok;
+}
+
+BOOL DocEdit_SelfTest(char* failure, size_t failureSize) {
+    DocModel* doc = NULL;
+
+    #define FAIL(msg) do { \
+        strncpy_s(failure, failureSize, (msg), _TRUNCATE); \
+        Doc_Free(doc); \
+        return FALSE; \
+    } while (0)
+
+    CharProps plain = {0};
+    CharProps bold = {0};
+    bold.bold = TRUE;
+
+    // --- a paragraph's length and its text agree, tabs and breaks included --
+    doc = Doc_New();
+    if (!doc) FAIL("could not allocate a model");
+    {
+        DocPara* p = Doc_AddPara(doc);
+        Doc_AddRun(p, L"ab", -1, &plain);
+        Doc_AddRun(p, L"", -1, &plain)->tab = TRUE;
+        Doc_AddRun(p, L"cd", -1, &bold);
+
+        if (Doc_ParaLength(p) != 5) FAIL("a tab did not count as one character");
+        if (!ParaTextIs(p, L"ab\tcd")) FAIL("a paragraph's text is not its runs in order");
+    }
+    Doc_Free(doc); doc = NULL;
+
+    // --- typing inside a run keeps that run's formatting --------------------
+    doc = Doc_New();
+    if (!doc) FAIL("could not allocate a model");
+    {
+        DocPara* p = Doc_AddPara(doc);
+        Doc_AddRun(p, L"Hello world", -1, &plain);
+
+        DocPos at = { p, 5 };
+        if (!DocEdit_Insert(doc, &at, L" big", -1)) FAIL("insert failed");
+        if (!ParaTextIs(p, L"Hello big world")) FAIL("insert put the text in the wrong place");
+        if (at.offset != 9) FAIL("insert did not advance the position past the text");
+        if (Doc_CountRuns(doc) != 1) FAIL("insert split a run it could have grown");
+    }
+    Doc_Free(doc); doc = NULL;
+
+    // --- typing at the join of two runs belongs to the one on the left ------
+    doc = Doc_New();
+    if (!doc) FAIL("could not allocate a model");
+    {
+        DocPara* p = Doc_AddPara(doc);
+        Doc_AddRun(p, L"plain", -1, &plain);
+        Doc_AddRun(p, L"BOLD", -1, &bold);
+
+        DocPos at = { p, 5 };
+        if (!DocEdit_Insert(doc, &at, L"X", -1)) FAIL("insert at a run boundary failed");
+        if (!ParaTextIs(p, L"plainXBOLD")) FAIL("insert at a boundary landed wrong");
+
+        const DocRun* first = p->runs;
+        if (!first || first->props.bold) FAIL("a character typed after plain text came out bold");
+        if (wcscmp(first->text, L"plainX") != 0) FAIL("the boundary character joined the wrong run");
+    }
+    Doc_Free(doc); doc = NULL;
+
+    // --- Enter splits a paragraph and keeps its shape ------------------------
+    doc = Doc_New();
+    if (!doc) FAIL("could not allocate a model");
+    {
+        DocPara* p = Doc_AddPara(doc);
+        p->props.indentLeft = 720;
+        p->props.headingLevel = 1;
+        Doc_AddRun(p, L"Before", -1, &plain);
+        Doc_AddRun(p, L"After", -1, &bold);
+
+        DocPos at = { p, 6 };
+        if (!DocEdit_SplitPara(doc, &at)) FAIL("split failed");
+        if (!at.para || at.offset != 0) FAIL("split left the position somewhere odd");
+        if (at.para == p) FAIL("split did not make a second paragraph");
+
+        if (!ParaTextIs(p, L"Before")) FAIL("split lost the head of the paragraph");
+        if (!ParaTextIs(at.para, L"After")) FAIL("split lost the tail of the paragraph");
+        if (at.para->props.indentLeft != 720) FAIL("split dropped the paragraph's indent");
+        if (at.para->props.headingLevel != 0) FAIL("Enter at the end of a heading made another heading");
+        if (!at.para->runs || !at.para->runs->props.bold) FAIL("split lost the tail's formatting");
+        if (Doc_CountParas(doc) != 2) FAIL("split did not leave two paragraphs");
+    }
+    Doc_Free(doc); doc = NULL;
+
+    // --- splitting mid-run cuts the run, not the paragraph's text -----------
+    doc = Doc_New();
+    if (!doc) FAIL("could not allocate a model");
+    {
+        DocPara* p = Doc_AddPara(doc);
+        Doc_AddRun(p, L"onetwo", -1, &plain);
+
+        DocPos at = { p, 3 };
+        if (!DocEdit_SplitPara(doc, &at)) FAIL("split inside a run failed");
+        if (!ParaTextIs(p, L"one")) FAIL("split inside a run kept too much");
+        if (!ParaTextIs(at.para, L"two")) FAIL("split inside a run lost the tail");
+    }
+    Doc_Free(doc); doc = NULL;
+
+    // --- deleting inside one paragraph --------------------------------------
+    doc = Doc_New();
+    if (!doc) FAIL("could not allocate a model");
+    {
+        DocPara* p = Doc_AddPara(doc);
+        Doc_AddRun(p, L"Hello ", -1, &plain);
+        Doc_AddRun(p, L"cruel ", -1, &bold);
+        Doc_AddRun(p, L"world", -1, &plain);
+
+        DocPos a = { p, 6 }, b = { p, 12 }, out = {0};
+        if (!DocEdit_DeleteRange(doc, a, b, &out)) FAIL("delete within a paragraph failed");
+        if (!ParaTextIs(p, L"Hello world")) FAIL("delete removed the wrong characters");
+        if (Doc_CountRuns(doc) != 2) FAIL("an emptied run was left behind");
+    }
+    Doc_Free(doc); doc = NULL;
+
+    // --- deleting across paragraphs merges them -----------------------------
+    doc = Doc_New();
+    if (!doc) FAIL("could not allocate a model");
+    {
+        DocPara* p1 = Doc_AddPara(doc);
+        Doc_AddRun(p1, L"First line", -1, &plain);
+        DocPara* p2 = Doc_AddPara(doc);
+        Doc_AddRun(p2, L"Second line", -1, &plain);
+        DocPara* p3 = Doc_AddPara(doc);
+        Doc_AddRun(p3, L"Third line", -1, &plain);
+
+        DocPos a = { p1, 6 }, b = { p3, 6 }, out = {0};
+        if (!DocEdit_DeleteRange(doc, a, b, &out)) FAIL("delete across paragraphs failed");
+        if (Doc_CountParas(doc) != 1) FAIL("delete across paragraphs did not merge them");
+        if (!ParaTextIs(Doc_ParaAt(doc, 0), L"First line")) FAIL("the merge kept the wrong text");
+        if (out.para != p1 || out.offset != 6) FAIL("delete left the caret somewhere odd");
+    }
+    Doc_Free(doc); doc = NULL;
+
+    // --- backspace at the start of a paragraph joins it to the one above ----
+    doc = Doc_New();
+    if (!doc) FAIL("could not allocate a model");
+    {
+        DocPara* p1 = Doc_AddPara(doc);
+        Doc_AddRun(p1, L"one", -1, &plain);
+        DocPara* p2 = Doc_AddPara(doc);
+        Doc_AddRun(p2, L"two", -1, &bold);
+
+        DocPos a = { p1, 3 }, b = { p2, 0 }, out = {0};
+        if (!DocEdit_DeleteRange(doc, a, b, &out)) FAIL("joining two paragraphs failed");
+        if (Doc_CountParas(doc) != 1) FAIL("the paragraphs did not join");
+        if (!ParaTextIs(Doc_ParaAt(doc, 0), L"onetwo")) FAIL("the join lost text");
+        if (Doc_CountRuns(doc) != 2) FAIL("the join flattened the formatting");
+    }
+    Doc_Free(doc); doc = NULL;
+
+    // --- a range running into a table is refused, not half-done -------------
+    doc = Doc_New();
+    if (!doc) FAIL("could not allocate a model");
+    {
+        DocPara* body = Doc_AddPara(doc);
+        Doc_AddRun(body, L"Body text", -1, &plain);
+
+        DocBlock* t = Doc_AddTable(doc);
+        DocRow* row = Doc_AddRow(t);
+        DocPara* cellPara = Doc_AddCellPara(Doc_AddCell(row));
+        Doc_AddRun(cellPara, L"In a cell", -1, &plain);
+
+        DocPos a = { body, 2 }, b = { cellPara, 4 }, out = {0};
+        if (DocEdit_DeleteRange(doc, a, b, &out)) FAIL("a delete running into a table was allowed");
+        if (!ParaTextIs(body, L"Body text")) FAIL("a refused delete still changed the document");
+        if (!ParaTextIs(cellPara, L"In a cell")) FAIL("a refused delete still changed the cell");
+
+        // ...but the same range inside one cell is ordinary editing.
+        DocPos ca = { cellPara, 0 }, cb = { cellPara, 3 };
+        if (!DocEdit_DeleteRange(doc, ca, cb, &out)) FAIL("editing inside a cell was refused");
+        if (!ParaTextIs(cellPara, L"a cell")) FAIL("editing inside a cell went wrong");
+
+        if (Doc_ParaCell(doc, cellPara) == NULL) FAIL("a cell paragraph was not recognised as one");
+        if (Doc_ParaCell(doc, body) != NULL) FAIL("a body paragraph was taken for a cell one");
+    }
+    Doc_Free(doc); doc = NULL;
+
+    // --- paragraph indices address cell paragraphs too ----------------------
+    doc = Doc_New();
+    if (!doc) FAIL("could not allocate a model");
+    {
+        DocPara* body = Doc_AddPara(doc);
+        Doc_AddRun(body, L"Body", -1, &plain);
+        DocBlock* t = Doc_AddTable(doc);
+        DocRow* row = Doc_AddRow(t);
+        DocPara* cellPara = Doc_AddCellPara(Doc_AddCell(row));
+        Doc_AddRun(cellPara, L"Cell", -1, &plain);
+
+        int count = Doc_CountParas(doc);
+        for (int i = 0; i < count; i++) {
+            DocPara* p = Doc_ParaAt(doc, i);
+            if (!p) FAIL("a paragraph index did not resolve");
+            if (Doc_ParaIndexOf(doc, p) != i) FAIL("paragraph index and lookup disagree");
+        }
+        if (Doc_ParaAt(doc, count) != NULL) FAIL("an index past the end resolved to something");
+    }
+    Doc_Free(doc); doc = NULL;
+
+    // --- the text of a range, which is what the clipboard gets --------------
+    doc = Doc_New();
+    if (!doc) FAIL("could not allocate a model");
+    {
+        DocPara* p1 = Doc_AddPara(doc);
+        Doc_AddRun(p1, L"First", -1, &plain);
+        DocPara* p2 = Doc_AddPara(doc);
+        Doc_AddRun(p2, L"Second", -1, &plain);
+
+        DocPos a = { p1, 2 }, b = { p2, 3 };
+        WCHAR* text = DocEdit_RangeText(doc, a, b);
+        if (!text) FAIL("range text produced nothing");
+        BOOL ok = wcscmp(text, L"rst\nSec") == 0;
+        free(text);
+        if (!ok) FAIL("range text is not what the range covers");
+    }
+    Doc_Free(doc); doc = NULL;
+
+    // --- a clone is equal, and separate -------------------------------------
+    doc = Doc_New();
+    if (!doc) FAIL("could not allocate a model");
+    {
+        DocPara* p = Doc_AddPara(doc);
+        p->props.align = ALIGN_CENTER;
+        Doc_AddRun(p, L"Cloned", -1, &bold);
+
+        DocBlock* t = Doc_AddTable(doc);
+        t->table.gridEdges[0] = 3000;
+        t->table.gridCount = 1;
+        DocRow* row = Doc_AddRow(t);
+        Doc_AddRun(Doc_AddCellPara(Doc_AddCell(row)), L"Cell", -1, &plain);
+
+        DocModel* copy = Doc_Clone(doc);
+        if (!copy) FAIL("clone produced nothing");
+
+        DocDiff diff = {0};
+        Doc_Compare(doc, copy, &diff);
+        if (diff.differences != 0) {
+            Doc_Free(copy);
+            FAIL("a clone did not compare equal to what it was cloned from");
+        }
+        if (Doc_CountCells(copy) != 1 || copy->section.pageWidth != doc->section.pageWidth) {
+            Doc_Free(copy);
+            FAIL("a clone lost the table or the page");
+        }
+
+        // Editing the copy must leave the original alone -- undo depends on it.
+        DocPos at = { Doc_ParaAt(copy, 0), 0 };
+        DocEdit_Insert(copy, &at, L"XYZ", -1);
+        BOOL leaked = !ParaTextIs(Doc_ParaAt(doc, 0), L"Cloned");
+        Doc_Free(copy);
+        if (leaked) FAIL("editing a clone changed the original");
+    }
+    Doc_Free(doc); doc = NULL;
+
+    failure[0] = '\0';
+    return TRUE;
+
+    #undef FAIL
+}
+
+// ---------------------------------------------------------------------------
 // Self-check. Run with: OpenNote.exe --selftest
 //
 // The fidelity numbers the harness reports are only worth anything if this

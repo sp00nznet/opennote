@@ -34,6 +34,7 @@ static int RunSelfTest(void) {
         { "oauth",  OAuth_SelfTest  },
         { "rich",   Rich_SelfTest   },
         { "doctree",Doc_SelfTest    },
+        { "docedit",DocEdit_SelfTest},
         { "docx",   Docx_SelfTest   },
         { "layout", Layout_SelfTest },
     };

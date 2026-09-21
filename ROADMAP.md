@@ -6,8 +6,8 @@ The short version: **Windows shipped a rich text editor for thirty years and rem
 in 2024.** WordPad is gone from Windows 11 24H2 and from Windows Server 2025. The
 replacement Microsoft points you at is a subscription. OpenNote is aiming at that hole.
 
-**v0.6.0 is released.** Published binaries — a bare executable and an installer — are
-built by CI from the tagged commit.
+**v0.8.0.** Published binaries — a bare executable and an installer — are built by CI
+from the tagged commit.
 
 Nothing below is a promise of a date.
 
@@ -131,18 +131,20 @@ paragraph's heading level, which RichEdit has no way to represent, and a table's
 widths, which it does not hand back. They are fixed by the two versions below, and until
 then they are measured rather than assumed away.
 
-### v0.8.0 — The layout engine
+### v0.8.0 — The layout engine — **done**
 
 The big one. Windows supplies the hard half: `IDWriteTextLayout` does shaping, line
-breaking, justification, bidi and font fallback. What has to be written is the part
-above it — flowing those laid-out lines into columns and pages.
+breaking, justification, bidi and font fallback. What had to be written is the part
+above it — flowing those laid-out lines into columns and pages, and then letting
+somebody edit the result.
 
 - [x] Block layout: measure and flow paragraphs into a page, break, continue. A
       paragraph too tall for the space left is split at a line boundary and continues
       on the next page, however many that takes
 - [x] Page model: paper size and margins, from the document or from Page Setup, which
-      now reaches the engine, the printer and the `.docx` writer at once
-- [ ] Widow and orphan control
+      reaches the engine, the printer and the `.docx` writer at once
+- [x] Widow and orphan control: a broken paragraph leaves at least two lines on each
+      side of the break, or moves to the next page whole
 - [x] **Table layout** — column widths from `w:tblGrid`, scaled to the page, cells
       measured and boxed. A row moves to the next page whole rather than splitting
       across the boundary, and merged cells are not handled yet. Honestly the nastiest
@@ -150,28 +152,33 @@ above it — flowing those laid-out lines into columns and pages.
 - [x] Rendering through Direct2D, to the screen and to a printer. Not through a printer
       DC: Direct2D refuses one outright, and its actual printing path is
       `ID2D1PrintControl`, which keeps the output vector rather than rasterising a page
-- [ ] Hit testing, caret movement and selection across the laid-out model. Routinely
-      underestimated; comparable in size to layout itself
-- [ ] Editing against the model, with undo
-- [ ] Ruler and tab stops, which need a page width to mean anything
-- [x] Print preview, which is just the page renderer in a window
+- [x] Hit testing, caret movement and selection across the laid-out model. Routinely
+      underestimated, and it was: a click names a character, the arrows walk lines
+      rather than runs, Home and End mean the wrapped line, and Page Up and Page Down
+      mean an actual page
+- [x] Editing against the model, with undo. Typing, Enter, Backspace and Delete,
+      selection, cut, copy and paste, and undo as a stack of model snapshots
+- [x] Ruler and tab stops, which need a page width to mean anything: margins, half-inch
+      tab stops and draggable indent markers
+- [x] Print preview, which is just the page renderer in a window — and, now that the
+      window edits, the same window
 - [x] Print-to-PDF through the in-box printer, which turned out not to be free — but is
       still a printing path and not a PDF library, and the text in the file is text
 
 The engine is deliberately free of any window and of Direct2D: it answers where
 everything goes, and drawing it is somebody else's job. That is what lets one layout
 serve the screen, the printer and the exported PDF, and it is what makes it checkable
-without a screen — `--layout-report` prints the geometry, `--export-pdf` writes the file,
-and the conformance harness asserts on every document that nothing lands below the
-bottom margin and that no table cell goes missing.
+without a screen — `--layout-report` prints the geometry, `--export-pdf` writes the
+file, and the checks assert that nothing lands below the bottom margin, that no table
+cell goes missing, that a click on a character and that character's own position agree,
+and that no broken paragraph leaves a line stranded.
 
-What is left in this version is the editing half: a caret that moves through laid-out
-text, a selection, and editing the model rather than the control. Until that lands the
-engine renders the document rather than hosting it, and the RichEdit view is still where
-typing happens.
-
-Once this lands, Scintilla can go: the plain text view becomes a degenerate case of the
-rich one, and roughly a thousand vendored files leave with it.
+What v0.8 does *not* do is replace the editor. The page view edits a model captured
+from the rich text view and writes it back through RTF when it closes; typing in the
+main window still goes through RichEdit. Making the laid-out view the only view means
+character formatting, spell check, images and find-and-replace all move across with it,
+which is v0.9 work and is what finally retires Scintilla — roughly a thousand vendored
+files leaving with it.
 
 ### v0.9.0 — Document fidelity
 

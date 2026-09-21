@@ -19,7 +19,7 @@ OpenNote/
 │   │   ├── tabcontrol.c/h  # Tab management and switching
 │   │   ├── editor.c/h      # Scintilla editor wrapper
 │   │   ├── editor_rich.c/h # RichEdit view: the rich text document
-│   │   ├── pageview.cpp/h  # Print preview: the laid-out pages, drawn with Direct2D
+│   │   ├── pageview.cpp/h  # The page view: laid-out pages, drawn and edited (Direct2D)
 │   │   ├── menubar.c/h     # Menu creation and updates
 │   │   ├── statusbar.c/h   # Status bar updates
 │   │   └── dialogs.c/h     # Find, Replace, Go To, Notes Browser, etc.
