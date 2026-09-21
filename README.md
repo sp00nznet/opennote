@@ -195,11 +195,18 @@ OpenNote.exe --selftest      # run the built-in checks and exit
 Off unless you connect an account, and it talks to GitHub or Google directly — there is
 no server in between and this project does not operate one.
 
-It is also the least finished part of the codebase. Tokens are currently stored in
-cleartext and a released build would carry an OAuth client secret inside it. Both are
-being fixed in v0.2.0; both are described in full in [SECURITY.md](SECURITY.md). A build
-made without the optional `GH_OAUTH_CLIENT_ID` / `GOOGLE_CLIENT_ID` CMake variables has
-no credentials in it and simply does not offer sync.
+**No API key ships with OpenNote** — not a client secret, and not a client ID. The
+published binaries contain neither, CI passes no credentials, and the build fails outright
+if a client secret is offered to it, so a released build can be reproduced byte for byte
+from its tag. GitHub uses the device flow and Google uses PKCE against an OAuth
+application you register yourself, which stays yours: your quota, your consent screen,
+your revocation. Tokens and the Google client secret are wrapped with DPAPI before they
+reach the database. See [SECURITY.md](SECURITY.md) and
+[docs/cloud-sync-setup.md](docs/cloud-sync-setup.md).
+
+It is still the least finished part of the codebase: a published build has no way to enter
+those credentials yet, so sync currently needs a build from source. The settings screen for
+it belongs with the rest of v0.3.
 
 ### Configuration
 
