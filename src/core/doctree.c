@@ -8,17 +8,26 @@
 // Building
 // ---------------------------------------------------------------------------
 
+// Letter paper with one inch margins, matching what the .docx writer emits
+// when a document does not say otherwise. Page Setup replaces it.
+static SectionProps g_pageDefaults = {
+    12240, 15840,
+    1440, 1440, 1440, 1440
+};
+
+void Doc_SetPageDefaults(const SectionProps* page) {
+    if (page) g_pageDefaults = *page;
+}
+
+void Doc_GetPageDefaults(SectionProps* out) {
+    if (out) *out = g_pageDefaults;
+}
+
 DocModel* Doc_New(void) {
     DocModel* doc = (DocModel*)calloc(1, sizeof(DocModel));
     if (!doc) return NULL;
 
-    // Letter paper with one inch margins, matching what the .docx writer emits
-    // when a document does not say otherwise.
-    doc->section.pageWidth  = 12240;
-    doc->section.pageHeight = 15840;
-    doc->section.marginTop = doc->section.marginRight =
-        doc->section.marginBottom = doc->section.marginLeft = 1440;
-
+    doc->section = g_pageDefaults;
     return doc;
 }
 

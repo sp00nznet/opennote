@@ -198,6 +198,7 @@
 #define IDM_FILE_NEW_RICH        7330
 #define IDM_FILE_PAGE_SETUP      7331
 #define IDM_INSERT_PICTURE       7332
+#define IDM_FILE_EXPORT_PDF      7333
 
 // Toolbar child controls
 #define IDC_TOOLBAR              7340

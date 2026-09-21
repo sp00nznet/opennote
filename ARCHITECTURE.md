@@ -18,10 +18,17 @@ OpenNote/
 │   │   ├── mainwindow.c/h  # Main window and message handling
 │   │   ├── tabcontrol.c/h  # Tab management and switching
 │   │   ├── editor.c/h      # Scintilla editor wrapper
+│   │   ├── editor_rich.c/h # RichEdit view: the rich text document
+│   │   ├── pageview.cpp/h  # Print preview: the laid-out pages, drawn with Direct2D
 │   │   ├── menubar.c/h     # Menu creation and updates
 │   │   ├── statusbar.c/h   # Status bar updates
 │   │   └── dialogs.c/h     # Find, Replace, Go To, Notes Browser, etc.
+│   ├── layout/
+│   │   ├── layout.cpp/h    # The layout engine: document model -> pages
+│   │   └── layoutprint.cpp/h # Printing those pages, and export to PDF
 │   ├── core/
+│   │   ├── doctree.c/h     # The document tree: sections, paragraphs, runs, tables
+│   │   ├── docx.c/h        # .docx reading and writing (ECMA-376)
 │   │   ├── document.c/h    # Document model (title, path, content, modified state)
 │   │   ├── fileio.c/h      # File reading/writing with encoding detection
 │   │   └── search.c/h      # Find and replace engine

@@ -5,6 +5,53 @@ All notable changes to this project are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+**The layout engine.** The document is laid out onto pages: paragraphs measured and
+flowed, broken at a line when they do not fit, tables boxed, and the result drawn to the
+screen, to a printer and to a PDF from one set of geometry. Editing still happens in the
+RichEdit view — the caret does not live on the laid-out model yet — so this version
+renders a document rather than hosting it.
+
+### Added
+- **`src/layout/layout.cpp`** - the engine. `IDWriteTextLayout` shapes, breaks and
+  justifies one paragraph at a time; this flows those paragraphs down a page, splits one
+  across a page boundary at a line, and places tables with the column widths the
+  document's `w:tblGrid` states, scaled to fit the page. It knows nothing about windows
+  or Direct2D, which is what lets one layout serve the screen, the printer and the PDF,
+  and what makes it checkable without a screen.
+- **`src/ui/pageview.cpp`** - print preview as real pages with real margins, drawn with
+  Direct2D: scrolling, Ctrl+wheel zoom, fit-to-width until you zoom, `Ctrl+P` to print.
+  Replaces the plain-text preview for rich documents.
+- **`src/layout/layoutprint.cpp`** - printing and **export to PDF** (File > Export to
+  PDF). Windows' own PDF printer does the writing, so there is no PDF library here; the
+  output is vector, with the text still text and the fonts subset into the file.
+- **`--layout-report <file.docx>`** prints a document's pagination: page size, page
+  count, and per page how much was placed and how far down the page it reached.
+- **`--export-pdf <file.docx> <out.pdf>`** does the export without a window.
+- Layout checks in `--selftest` and in the conformance harness. The harness asserts on
+  every document in the corpus that nothing is placed below the bottom margin and that
+  every cell in the model reaches a page — pagination has no page where looking at the
+  screen would reliably catch a regression.
+- **Page Setup now reaches the engine.** Paper size and margins chosen in the dialog
+  become the page a new model starts on, so the preview, the printout, the PDF and a
+  saved `.docx` all agree with it. Previously only the printed page used them.
+- Paragraph left indents are honoured by the engine.
+
+### Fixed
+- Printing measured from the printable area rather than from the paper, which shifted
+  every margin by the strip the printer cannot reach.
+
+### Known issues
+- No widow and orphan control, no first-line indent (DirectWrite lays out one rectangle;
+  a first line set differently needs its own), table rows do not split across a page
+  boundary, and merged cells are not handled.
+- Paper size and orientation come from Page Setup rather than from the print dialog's
+  own paper list: the engine lays the document out before a printer is chosen.
+- A document holding a picture still prints through the control rather than the engine:
+  the model carries no images until v0.9, and dropping a picture off a printout is a
+  worse trade than losing the engine's pagination.
+
 ## [0.7.0] - 2026-09-20
 
 **The document model.** A document is now a tree rather than whatever the editor control

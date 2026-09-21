@@ -52,6 +52,9 @@ set(SUPERNOTE_SOURCES
     src/core/doctree.c
     src/core/doctree_rtf.c
     src/core/doctree_view.c
+    src/layout/layout.cpp
+    src/layout/layoutprint.cpp
+    src/ui/pageview.cpp
     src/core/docx.c
     src/db/database.c
     src/db/notes_repo.c
@@ -102,6 +105,11 @@ target_link_libraries(OpenNote PRIVATE
     crypt32
     bcrypt
     xmllite
+    dwrite
+    d2d1
+    d3d11
+    dxgi
+    windowscodecs
 )
 
 target_compile_definitions(OpenNote PRIVATE

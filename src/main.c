@@ -4,6 +4,10 @@
 #include "sync/oauth.h"
 #include "ui/editor_rich.h"
 
+// Twips per DIP. Mirrors the engine's constant, which lives in a C++-only
+// header because DirectWrite has no C binding.
+#define TWIPS_PER_DIP 15.0f
+
 // Global application state
 AppState* g_app = NULL;
 
@@ -31,6 +35,7 @@ static int RunSelfTest(void) {
         { "rich",   Rich_SelfTest   },
         { "doctree",Doc_SelfTest    },
         { "docx",   Docx_SelfTest   },
+        { "layout", Layout_SelfTest },
     };
 
     int failed = 0;
@@ -83,6 +88,81 @@ static int RunDocxToRtf(int argc, WCHAR** argv) {
     }
 
     free(rtf);
+    return 0;
+}
+
+// --layout-report <file.docx>
+// Lay a document out and print what came of it. The engine produces geometry
+// and nothing else, so this is the whole of it made visible without a screen --
+// useful when a document paginates oddly, and cheap enough that the harness
+// runs it over the corpus.
+static int RunLayoutReport(int argc, WCHAR** argv) {
+    if (argc < 3) {
+        printf("usage: OpenNote.exe --layout-report <file.docx>\n");
+        return 2;
+    }
+
+    DocModel* doc = Docx_ReadToModel(argv[2]);
+    if (!doc) {
+        wprintf(L"FAILED: %s\n", Docx_GetLastError());
+        return 1;
+    }
+
+    LayoutResult* r = Layout_Build(doc, L"Calibri", 11.0f);
+    if (!r) {
+        wprintf(L"FAILED: the document could not be laid out\n");
+        Doc_Free(doc);
+        return 1;
+    }
+
+    float pw = 0.0f, ph = 0.0f;
+    Layout_PageSize(r, &pw, &ph);
+
+    int pages = Layout_PageCount(r);
+    wprintf(L"%s\n", argv[2]);
+    wprintf(L"  page size   %.0f x %.0f DIPs (%.2f x %.2f inches)\n",
+            pw, ph, pw / 96.0f, ph / 96.0f);
+    wprintf(L"  pages       %d\n", pages);
+    wprintf(L"  paragraphs  %d in the model\n", Doc_CountParas(doc));
+    wprintf(L"  tables      %d, %d cells\n", Doc_CountTables(doc), Doc_CountCells(doc));
+
+    for (int i = 0; i < pages; i++) {
+        wprintf(L"  page %-3d    %d text pieces, %d cell boxes, content to %.1f DIPs\n",
+                i + 1, Layout_PageTextCount(r, i), Layout_PageCellCount(r, i),
+                Layout_PageContentBottom(r, i));
+    }
+
+    Layout_Free(r);
+    Doc_Free(doc);
+    return 0;
+}
+
+// --export-pdf <file.docx> <out.pdf>
+// Lay a document out and print it to Windows' PDF printer -- the same path the
+// File menu takes, without a window. Export is the part of the engine with an
+// artefact to look at, and this is what makes that artefact checkable.
+static int RunExportPdf(int argc, WCHAR** argv) {
+    if (argc < 4) {
+        printf("usage: OpenNote.exe --export-pdf <file.docx> <out.pdf>\n");
+        return 2;
+    }
+
+    DocModel* doc = Docx_ReadToModel(argv[2]);
+    if (!doc) {
+        wprintf(L"FAILED: %s\n", Docx_GetLastError());
+        return 1;
+    }
+
+    int pages = 0;
+    BOOL ok = LayoutPrint_ToPrinter(doc, LAYOUTPRINT_PDF_DEVICE, argv[2], argv[3], &pages);
+    Doc_Free(doc);
+
+    if (!ok || pages < 1) {
+        wprintf(L"FAILED: nothing was written to %s\n", argv[3]);
+        return 1;
+    }
+
+    wprintf(L"%s -> %s, %d page%s\n", argv[2], argv[3], pages, pages == 1 ? L"" : L"s");
     return 0;
 }
 
@@ -230,6 +310,66 @@ static int RunDocxCheck(int argc, WCHAR** argv) {
         }
 
         // ------------------------------------------------------------------
+        // The layout engine, over the same corpus. The invariant that matters
+        // is that nothing is ever placed below the bottom margin: if that
+        // holds, pagination is working, and if it stops holding there is no
+        // page of a long document where looking at the screen would reliably
+        // catch it.
+        // ------------------------------------------------------------------
+        {
+            DocModel* lm = Docx_ReadToModel(docPath);
+            if (lm) {
+                LayoutResult* lr = Layout_Build(lm, L"Calibri", 11.0f);
+
+                checks++;
+                if (!lr) {
+                    wprintf(L"FAIL  %s: could not be laid out\n", fileName);
+                    failures++;
+                } else {
+                    float pw = 0.0f, ph = 0.0f;
+                    Layout_PageSize(lr, &pw, &ph);
+
+                    int pages = Layout_PageCount(lr);
+
+                    checks++;
+                    if (pages < 1) {
+                        wprintf(L"FAIL  %s: laid out to no pages at all\n", fileName);
+                        failures++;
+                    }
+
+                    // One DIP of tolerance absorbs the rounding in converting
+                    // twips to DIPs. It does not absorb a line of text.
+                    float limit = ph - (lm->section.marginBottom / TWIPS_PER_DIP) + 1.0f;
+                    for (int pg = 0; pg < pages; pg++) {
+                        checks++;
+                        float bottom = Layout_PageContentBottom(lr, pg);
+                        if (bottom > limit) {
+                            wprintf(L"FAIL  %s: page %d has content %.1f DIPs down, "
+                                    L"past the %.1f margin\n",
+                                    fileName, pg + 1, bottom, limit);
+                            failures++;
+                        }
+                    }
+
+                    // Every table cell in the model has to reach a page; a
+                    // table silently dropped by the engine would otherwise
+                    // only show up by looking.
+                    checks++;
+                    int laidCells = 0;
+                    for (int pg = 0; pg < pages; pg++) laidCells += Layout_PageCellCount(lr, pg);
+                    if (laidCells != Doc_CountCells(lm)) {
+                        wprintf(L"FAIL  %s: %d cells in the model, %d laid out\n",
+                                fileName, Doc_CountCells(lm), laidCells);
+                        failures++;
+                    }
+
+                    Layout_Free(lr);
+                }
+                Doc_Free(lm);
+            }
+        }
+
+        // ------------------------------------------------------------------
         // Round trips, measured against the document model.
         //
         // Two separate questions, and conflating them hides which half broke:
@@ -373,7 +513,10 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPWSTR lpCmdLi
     // Diagnostic and conformance modes. Both are console tools living inside a
     // windowed binary, so they borrow the caller's console the same way
     // --selftest does.
-    if (lpCmdLine && (wcsstr(lpCmdLine, L"--docx2rtf") || wcsstr(lpCmdLine, L"--docx-check"))) {
+    if (lpCmdLine && (wcsstr(lpCmdLine, L"--docx2rtf") ||
+                      wcsstr(lpCmdLine, L"--docx-check") ||
+                      wcsstr(lpCmdLine, L"--layout-report") ||
+                      wcsstr(lpCmdLine, L"--export-pdf"))) {
         BOOL attached = FALSE;
         FILE* out = NULL;
         if (GetStdHandle(STD_OUTPUT_HANDLE) == NULL) {
@@ -385,8 +528,10 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPWSTR lpCmdLi
         WCHAR** argv = CommandLineToArgvW(GetCommandLineW(), &argc);
         int rc = 2;
         if (argv) {
-            if (wcsstr(lpCmdLine, L"--docx-check")) rc = RunDocxCheck(argc, argv);
-            else                                    rc = RunDocxToRtf(argc, argv);
+            if (wcsstr(lpCmdLine, L"--docx-check"))         rc = RunDocxCheck(argc, argv);
+            else if (wcsstr(lpCmdLine, L"--layout-report")) rc = RunLayoutReport(argc, argv);
+            else if (wcsstr(lpCmdLine, L"--export-pdf"))    rc = RunExportPdf(argc, argv);
+            else                                            rc = RunDocxToRtf(argc, argv);
             LocalFree(argv);
         }
 

@@ -121,6 +121,13 @@ typedef struct {
 DocModel* Doc_New(void);
 void      Doc_Free(DocModel* doc);
 
+// The page a new model starts on. A document read from a file states its own
+// and overwrites this; a document captured from the editor states nothing,
+// because the control has no notion of a page -- so this is how Page Setup
+// reaches the layout engine, the printer and the .docx writer at once.
+void Doc_SetPageDefaults(const SectionProps* page);
+void Doc_GetPageDefaults(SectionProps* out);
+
 DocPara*  Doc_AddPara(DocModel* doc);                 // appends a paragraph block
 DocBlock* Doc_AddTable(DocModel* doc);                // appends an empty table
 DocRow*   Doc_AddRow(DocBlock* table);

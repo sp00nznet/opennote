@@ -67,7 +67,15 @@ typedef struct Document Document;
 typedef struct Tab Tab;
 typedef struct AppState AppState;
 
-// Include component headers
+// Include component headers.
+//
+// Wrapped for C++ because the layout engine is a .cpp file -- DirectWrite has
+// no C binding, unlike the packaging and XML APIs. Everything below is C, and
+// without this the engine would look for mangled names that do not exist.
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 #include "app.h"
 #include "ui/mainwindow.h"
 #include "ui/tabcontrol.h"
@@ -81,6 +89,9 @@ typedef struct AppState AppState;
 #include "core/doctree.h"
 #include "core/doctree_rtf.h"
 #include "core/doctree_view.h"
+#include "layout/layout.h"
+#include "layout/layoutprint.h"
+#include "ui/pageview.h"
 #include "core/docx.h"
 #include "core/fileio.h"
 #include "core/search.h"
@@ -91,7 +102,17 @@ typedef struct AppState AppState;
 #include "sync/github_sync.h"
 #include "sync/google_sync.h"
 
+#ifdef __cplusplus
+}
+#endif
+
 // Global application state
+#ifdef __cplusplus
+extern "C" {
+#endif
 extern AppState* g_app;
+#ifdef __cplusplus
+}
+#endif
 
 #endif // SUPERNOTE_H

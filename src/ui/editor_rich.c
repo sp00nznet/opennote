@@ -927,10 +927,13 @@ BOOL Rich_InsertPicture(HWND h, const WCHAR* path) {
 // and reports where it stopped, so paging is a loop over that.
 // ---------------------------------------------------------------------------
 
-int Rich_PrintToDC(HWND h, HDC hDC, const RECT* rcPageTwips, const WCHAR* docTitle) {
+int Rich_PrintToDC(HWND h, HDC hDC, const RECT* rcPageTwips, const WCHAR* docTitle,
+                   const WCHAR* outputFile) {
     if (!h || !hDC || !rcPageTwips) return 0;
 
-    DOCINFOW di = { sizeof(di), docTitle ? docTitle : L"Document", NULL, NULL, 0 };
+    // Naming the output is what sends a print-to-file device -- the PDF
+    // printer -- straight to that path instead of asking where to put it.
+    DOCINFOW di = { sizeof(di), docTitle ? docTitle : L"Document", outputFile, NULL, 0 };
     if (StartDocW(hDC, &di) <= 0) return 0;
 
     FORMATRANGE fr = {0};

@@ -112,8 +112,11 @@ BOOL Rich_InsertPicture(HWND h, const WCHAR* path);
 // ---------------------------------------------------------------------------
 
 // Render the document to a printer DC across as many pages as it takes.
-// `rcPageTwips` is the printable area in twips. Returns pages printed.
-int Rich_PrintToDC(HWND h, HDC hDC, const RECT* rcPageTwips, const WCHAR* docTitle);
+// `rcPageTwips` is the printable area in twips. `outputFile` names the file a
+// print-to-file device writes to, and is NULL for a real printer. Returns
+// pages printed.
+int Rich_PrintToDC(HWND h, HDC hDC, const RECT* rcPageTwips, const WCHAR* docTitle,
+                   const WCHAR* outputFile);
 
 // Self-check, run by `OpenNote.exe --selftest`.
 BOOL Rich_SelfTest(char* failure, size_t failureSize);

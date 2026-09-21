@@ -66,8 +66,19 @@ printing. The whole application is a **3.6MB executable** with no runtime to ins
 
 It is built on Windows' own RichEdit control, which is how WordPad itself worked. That
 has a known ceiling: tables are weak and the view flows rather than showing page
-boundaries. Both are lifted in v0.6 by the layout engine `.docx` needs anyway — see
-[ROADMAP.md](ROADMAP.md).
+boundaries. The layout engine lifts both — see [ROADMAP.md](ROADMAP.md).
+
+### Page layout
+
+A document is laid out onto pages rather than flowed into a window: paragraphs measured
+and broken at a line when they do not fit, tables boxed with the column widths the file
+states, pages sized by Page Setup. `IDWriteTextLayout` does the shaping, line breaking
+and font fallback; what OpenNote adds is the part above it, and it knows nothing about
+windows — the same geometry draws the print preview, the printout and the PDF, so they
+cannot disagree.
+
+**Export to PDF** goes through Windows' own PDF printer, so there is no PDF library in
+here; the output is vector and the text in it is still text.
 
 The stretch is the part Word actually gets paid for: `.docx`, real page layout, `.doc`,
 track changes. Everything needed for that is already in Windows and already paid for.
@@ -240,15 +251,19 @@ written back out as `.docx` and re-read, asserting no text is lost, and
 OpenNote's own reader.
 
 `--docx2rtf <file.docx>` prints the converted RTF, which is the thing to look at when a
-document comes out wrong.
+document comes out wrong. `--layout-report <file.docx>` prints where the layout engine
+put everything — page size, page count, and per page how much it placed and how far down
+the page it reached — and `--export-pdf <file.docx> <out.pdf>` writes the PDF without a
+window.
 
 ---
 
 ## Project structure
 
 ```
-src/ui/      Window, tabs, editors (plain + rich), toolbar, dialogs
+src/ui/      Window, tabs, editors (plain + rich), page view, toolbar, dialogs
 src/core/    Document model, serializers (.docx, RTF), file I/O, search
+src/layout/  The layout engine: document model -> pages, and printing them
 src/db/      SQLite, notes and links repositories
 src/sync/    OAuth, GitHub and Google Drive sync
 res/         Icons, dialogs, manifest

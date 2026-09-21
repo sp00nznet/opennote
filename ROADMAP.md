@@ -137,17 +137,38 @@ The big one. Windows supplies the hard half: `IDWriteTextLayout` does shaping, l
 breaking, justification, bidi and font fallback. What has to be written is the part
 above it — flowing those laid-out lines into columns and pages.
 
-- [ ] Block layout: measure and flow paragraphs into a page, break, continue
-- [ ] Page model: paper size, margins, widow and orphan control
-- [ ] **Table layout** — fixed and auto column widths, merged cells, rows that break
-      across pages. Honestly the nastiest part of the whole project
-- [ ] Rendering through Direct2D, to the screen and to a printer DC
+- [x] Block layout: measure and flow paragraphs into a page, break, continue. A
+      paragraph too tall for the space left is split at a line boundary and continues
+      on the next page, however many that takes
+- [x] Page model: paper size and margins, from the document or from Page Setup, which
+      now reaches the engine, the printer and the `.docx` writer at once
+- [ ] Widow and orphan control
+- [x] **Table layout** — column widths from `w:tblGrid`, scaled to the page, cells
+      measured and boxed. A row moves to the next page whole rather than splitting
+      across the boundary, and merged cells are not handled yet. Honestly the nastiest
+      part of the whole project, and this is the easy half of it
+- [x] Rendering through Direct2D, to the screen and to a printer. Not through a printer
+      DC: Direct2D refuses one outright, and its actual printing path is
+      `ID2D1PrintControl`, which keeps the output vector rather than rasterising a page
 - [ ] Hit testing, caret movement and selection across the laid-out model. Routinely
       underestimated; comparable in size to layout itself
 - [ ] Editing against the model, with undo
 - [ ] Ruler and tab stops, which need a page width to mean anything
-- [ ] Print preview, which is just the page renderer in a window
-- [ ] Print-to-PDF through the in-box printer, which becomes almost free once paginated
+- [x] Print preview, which is just the page renderer in a window
+- [x] Print-to-PDF through the in-box printer, which turned out not to be free — but is
+      still a printing path and not a PDF library, and the text in the file is text
+
+The engine is deliberately free of any window and of Direct2D: it answers where
+everything goes, and drawing it is somebody else's job. That is what lets one layout
+serve the screen, the printer and the exported PDF, and it is what makes it checkable
+without a screen — `--layout-report` prints the geometry, `--export-pdf` writes the file,
+and the conformance harness asserts on every document that nothing lands below the
+bottom margin and that no table cell goes missing.
+
+What is left in this version is the editing half: a caret that moves through laid-out
+text, a selection, and editing the model rather than the control. Until that lands the
+engine renders the document rather than hosting it, and the RichEdit view is still where
+typing happens.
 
 Once this lands, Scintilla can go: the plain text view becomes a degenerate case of the
 rich one, and roughly a thousand vendored files leave with it.

@@ -679,17 +679,114 @@ static void ShowPageSetup(HWND hwnd) {
         .rtMargin = g_pageMargins
     };
 
-    if (PageSetupDlgW(&psd)) {
-        g_pageMargins = psd.rtMargin;
+    if (!PageSetupDlgW(&psd)) return;
+    g_pageMargins = psd.rtMargin;
+
+    // The layout engine, the printer and the .docx writer all read the page
+    // off a new model, and a model captured from the editor has no page of
+    // its own -- the control has no notion of one. Handing the setup to the
+    // model layer is therefore the whole of applying it.
+    //
+    // Thousandths of an inch to twips, at 1440 twips to the inch.
+    SectionProps page;
+    Doc_GetPageDefaults(&page);
+    page.marginLeft   = MulDiv(psd.rtMargin.left,   1440, 1000);
+    page.marginTop    = MulDiv(psd.rtMargin.top,    1440, 1000);
+    page.marginRight  = MulDiv(psd.rtMargin.right,  1440, 1000);
+    page.marginBottom = MulDiv(psd.rtMargin.bottom, 1440, 1000);
+    if (psd.ptPaperSize.x > 0 && psd.ptPaperSize.y > 0) {
+        page.pageWidth  = MulDiv(psd.ptPaperSize.x, 1440, 1000);
+        page.pageHeight = MulDiv(psd.ptPaperSize.y, 1440, 1000);
     }
+    Doc_SetPageDefaults(&page);
+}
+
+// The printable area of a page, in twips, with the requested margins measured
+// from the paper edge rather than from wherever the driver happens to start.
+// Used by the control's own printing path, which works in these coordinates.
+static BOOL PrintableRectTwips(HDC hDC, RECT* out) {
+    int dpiX = GetDeviceCaps(hDC, LOGPIXELSX);
+    int dpiY = GetDeviceCaps(hDC, LOGPIXELSY);
+    if (dpiX <= 0 || dpiY <= 0) return FALSE;
+
+    int offXTw = MulDiv(GetDeviceCaps(hDC, PHYSICALOFFSETX), 1440, dpiX);
+    int offYTw = MulDiv(GetDeviceCaps(hDC, PHYSICALOFFSETY), 1440, dpiY);
+    int pageWTw = MulDiv(GetDeviceCaps(hDC, PHYSICALWIDTH), 1440, dpiX);
+    int pageHTw = MulDiv(GetDeviceCaps(hDC, PHYSICALHEIGHT), 1440, dpiY);
+
+    RECT m = g_pageMargins;   // thousandths of an inch
+    out->left   = MulDiv(m.left, 1440, 1000) - offXTw;
+    out->top    = MulDiv(m.top,  1440, 1000) - offYTw;
+    out->right  = pageWTw - MulDiv(m.right,  1440, 1000) - offXTw;
+    out->bottom = pageHTw - MulDiv(m.bottom, 1440, 1000) - offYTw;
+
+    if (out->left < 0) out->left = 0;
+    if (out->top < 0) out->top = 0;
+
+    return out->right > out->left && out->bottom > out->top;
+}
+
+// Does the document hold an embedded object -- in practice a picture? The
+// control marks each one with U+FFFC in the text.
+static BOOL RichHasPicture(HWND hEditor) {
+    WCHAR* text = Editor_GetText(hEditor);
+    if (!text) return FALSE;
+    BOOL found = wcschr(text, 0xFFFC) != NULL;
+    free(text);
+    return found;
+}
+
+// Put the current rich document on a device: a printer, or the PDF printer
+// with `outputFile` naming where to write. Returns pages produced.
+//
+// The layout engine does it, because the engine is what knows about paper,
+// margins and tables and is what the preview draws -- the screen and the page
+// cannot drift apart if one of them produces both.
+//
+// ponytail: a document holding a picture still prints through the control.
+// The model carries no images until v0.9, and dropping a picture off a
+// printout is a worse trade than losing the engine's pagination. Delete this
+// fallback, and `Rich_PrintToDC` with it, when images land in the model.
+static int PrintRichDocumentTo(HWND hwnd, HWND hEditor, const WCHAR* printerName,
+                               HDC hDC, const WCHAR* title, const WCHAR* outputFile) {
+    // No printer name means Direct2D has nothing to address, so the control
+    // prints instead -- as it does for a document holding a picture.
+    if (!printerName || !printerName[0] || RichHasPicture(hEditor)) {
+        RECT rc;
+        if (!hDC) return 0;
+        if (!PrintableRectTwips(hDC, &rc)) {
+            MessageBoxW(hwnd,
+                L"Those margins leave no room to print on this paper size.\n\n"
+                L"Reduce them in Page Setup.",
+                APP_NAME, MB_ICONWARNING);
+            return 0;
+        }
+        return Rich_PrintToDC(hEditor, hDC, &rc, title, outputFile);
+    }
+
+    DocModel* model = DocView_Capture(hEditor);
+    if (!model) return 0;
+
+    int pages = 0;
+    LayoutPrint_ToPrinter(model, printerName, title, outputFile, &pages);
+    Doc_Free(model);
+    return pages;
+}
+
+// The printer the user chose, out of what PrintDlg filled in. Direct2D
+// addresses a printer by name rather than by device context.
+static const WCHAR* ChosenPrinter(const PRINTDLGW* pd) {
+    if (!pd->hDevNames) return NULL;
+    const DEVNAMES* dn = (const DEVNAMES*)GlobalLock(pd->hDevNames);
+    if (!dn) return NULL;
+
+    static WCHAR name[256];
+    wcsncpy_s(name, 256, (const WCHAR*)dn + dn->wDeviceOffset, _TRUNCATE);
+    GlobalUnlock(pd->hDevNames);
+    return name;
 }
 
 // Print a rich text document across as many pages as it needs.
-//
-// EM_FORMATRANGE works in twips against the physical page, and the printable
-// area is inset from it by the hardware margin the printer cannot reach -- so
-// the requested margin is measured from the paper edge, not from wherever the
-// driver happens to start.
 static void PrintRichDocument(HWND hwnd, HWND hEditor, Document* doc) {
     PRINTDLGW pd = {
         .lStructSize = sizeof(pd),
@@ -698,57 +795,67 @@ static void PrintRichDocument(HWND hwnd, HWND hEditor, Document* doc) {
     };
     if (!PrintDlgW(&pd)) return;
 
-    HDC hDC = pd.hDC;
+    int pages = PrintRichDocumentTo(hwnd, hEditor, ChosenPrinter(&pd), pd.hDC,
+                                    doc ? Document_GetTitle(doc) : L"Document", NULL);
 
-    int dpiX = GetDeviceCaps(hDC, LOGPIXELSX);
-    int dpiY = GetDeviceCaps(hDC, LOGPIXELSY);
-
-    // Offset of the printable area from the physical paper corner.
-    int offX = GetDeviceCaps(hDC, PHYSICALOFFSETX);
-    int offY = GetDeviceCaps(hDC, PHYSICALOFFSETY);
-
-    int physW = GetDeviceCaps(hDC, PHYSICALWIDTH);
-    int physH = GetDeviceCaps(hDC, PHYSICALHEIGHT);
-
-    // Margins are thousandths of an inch; 1440 twips to the inch.
-    RECT m = g_pageMargins;
-    int leftTw   = MulDiv(m.left,   1440, 1000);
-    int topTw    = MulDiv(m.top,    1440, 1000);
-    int rightTw  = MulDiv(m.right,  1440, 1000);
-    int bottomTw = MulDiv(m.bottom, 1440, 1000);
-
-    int offXTw = MulDiv(offX, 1440, dpiX);
-    int offYTw = MulDiv(offY, 1440, dpiY);
-    int pageWTw = MulDiv(physW, 1440, dpiX);
-    int pageHTw = MulDiv(physH, 1440, dpiY);
-
-    RECT rc;
-    rc.left   = leftTw - offXTw;
-    rc.top    = topTw - offYTw;
-    rc.right  = pageWTw - rightTw - offXTw;
-    rc.bottom = pageHTw - bottomTw - offYTw;
-
-    if (rc.left < 0) rc.left = 0;
-    if (rc.top < 0) rc.top = 0;
-
-    if (rc.right <= rc.left || rc.bottom <= rc.top) {
-        MessageBoxW(hwnd,
-            L"Those margins leave no room to print on this paper size.\n\n"
-            L"Reduce them in Page Setup.",
-            APP_NAME, MB_ICONWARNING);
-        DeleteDC(hDC);
-        return;
-    }
-
-    int pages = Rich_PrintToDC(hEditor, hDC, &rc,
-                               doc ? Document_GetTitle(doc) : L"Document");
-
-    DeleteDC(hDC);
+    DeleteDC(pd.hDC);
     if (pd.hDevMode) GlobalFree(pd.hDevMode);
     if (pd.hDevNames) GlobalFree(pd.hDevNames);
 
     if (pages == 0) {
         MessageBoxW(hwnd, L"Nothing was printed.", APP_NAME, MB_ICONWARNING);
+    }
+}
+
+// Export to PDF: the printing path above, pointed at the PDF printer Windows
+// has shipped since Windows 10, with the output file named so it writes there
+// instead of asking. There is no PDF library here and there does not need to
+// be.
+static void ExportToPdf(HWND hwnd, HWND hEditor, Document* doc) {
+    WCHAR path[MAX_PATH] = {0};
+
+    const WCHAR* title = doc ? Document_GetTitle(doc) : NULL;
+    if (title) {
+        wcsncpy_s(path, MAX_PATH, title, _TRUNCATE);
+        WCHAR* dot = wcsrchr(path, L'.');
+        if (dot) *dot = L'\0';
+        wcsncat_s(path, MAX_PATH, L".pdf", _TRUNCATE);
+    }
+
+    OPENFILENAMEW ofn = {
+        .lStructSize = sizeof(ofn),
+        .hwndOwner = hwnd,
+        .lpstrFilter = L"PDF Document (*.pdf)\0*.pdf\0All Files (*.*)\0*.*\0",
+        .lpstrFile = path,
+        .nMaxFile = MAX_PATH,
+        .lpstrDefExt = L"pdf",
+        .Flags = OFN_OVERWRITEPROMPT | OFN_PATHMUSTEXIST | OFN_NOCHANGEDIR
+    };
+    if (!GetSaveFileNameW(&ofn)) return;
+
+    // A DC for the PDF printer as well as its name: the engine addresses the
+    // printer by name, and the picture fallback still needs a device context.
+    HDC hDC = CreateDCW(L"WINSPOOL", LAYOUTPRINT_PDF_DEVICE, NULL, NULL);
+    if (!hDC) {
+        MessageBoxW(hwnd,
+            L"Windows' PDF printer is not available.\n\n"
+            L"It ships as \"Microsoft Print to PDF\"; if it has been removed, "
+            L"add it again under Printers & scanners.",
+            APP_NAME, MB_ICONWARNING);
+        return;
+    }
+
+    HCURSOR old = SetCursor(LoadCursorW(NULL, IDC_WAIT));
+    int pages = PrintRichDocumentTo(hwnd, hEditor, LAYOUTPRINT_PDF_DEVICE, hDC,
+                                    doc ? Document_GetTitle(doc) : L"Document", path);
+    SetCursor(old);
+    if (hDC) DeleteDC(hDC);
+
+    if (pages > 0) {
+        StatusBar_SetMessage(L"Exported to PDF");
+        App_AddRecentFile(path);
+    } else {
+        MessageBoxW(hwnd, L"The PDF could not be written.", APP_NAME, MB_ICONERROR);
     }
 }
 
@@ -917,8 +1024,30 @@ void MainWindow_OnCommand(HWND hwnd, int id, HWND hwndCtl, UINT codeNotify) {
             }
             break;
 
+        case IDM_FILE_EXPORT_PDF:
+            // Only the rich view: exporting a plain text file to PDF is a
+            // thing nobody asks for, and the layout engine has nothing to lay
+            // out from Scintilla.
+            if (hEditor && Editor_IsRich(hEditor)) {
+                ExportToPdf(hwnd, hEditor, doc);
+            } else {
+                MessageBoxW(hwnd, L"Only rich text documents can be exported to PDF.",
+                            APP_NAME, MB_ICONINFORMATION);
+            }
+            break;
+
         case IDM_FILE_PRINT_PREVIEW:
-            if (hEditor) {
+            if (hEditor && Editor_IsRich(hEditor)) {
+                // A rich document previews through the layout engine, which
+                // shows real pages with real margins. The plain text preview
+                // below renders unformatted text into a fixed box and cannot
+                // show either.
+                if (!PageView_Show(hwnd, hEditor,
+                                   doc ? Document_GetTitle(doc) : NULL)) {
+                    MessageBoxW(hwnd, L"The page preview could not be prepared.",
+                                APP_NAME, MB_ICONWARNING);
+                }
+            } else if (hEditor) {
                 Dialogs_PrintPreview(hwnd, hEditor);
             }
             break;
