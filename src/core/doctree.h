@@ -313,6 +313,13 @@ DocRun*   Doc_AddImageRun(DocPara* para, const BYTE* bytes, size_t len,
 
 #define DOC_IMAGE_CHAR 0xFFFC
 
+// A picture from a file on disk, carried as the bytes that file holds -- so a
+// PNG chosen here is the PNG that ends up in the .docx, not a re-encoding of
+// it. WIC says how big it is and whether it is a picture at all, and
+// `maxWidthEmu` (0 for none) keeps a six-thousand-pixel photo from being laid
+// out five feet wide.
+DocRun* Doc_AddImageFromFile(DocPara* para, const WCHAR* path, int maxWidthEmu);
+
 // styles.xml, when the document had one.
 DocNote*  Doc_AddNote(DocModel* doc, int id, BOOL endnote);
 DocNote*  Doc_FindNote(const DocModel* doc, int id, BOOL endnote);

@@ -3,6 +3,7 @@
 
 #include "supernote.h"
 #include "core/doctree.h"
+#include "core/imagedib.h"
 
 // ---------------------------------------------------------------------------
 // Building
@@ -776,6 +777,73 @@ BOOL Doc_HasPageFields(const DocModel* doc) {
 }
 
 
+
+
+// A picture read off the disk.
+//
+// The bytes are kept as the file has them: that is the whole reason the model
+// carries a picture as bytes rather than as pixels, and it is what makes an
+// inserted PNG come back out of a .docx as the same PNG.
+DocRun* Doc_AddImageFromFile(DocPara* para, const WCHAR* path, int maxWidthEmu) {
+    if (!para || !path || !path[0]) return NULL;
+
+    HANDLE file = CreateFileW(path, GENERIC_READ, FILE_SHARE_READ, NULL,
+                              OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+    if (file == INVALID_HANDLE_VALUE) return NULL;
+
+    LARGE_INTEGER size = {0};
+    if (!GetFileSizeEx(file, &size) || size.QuadPart <= 0 ||
+        size.QuadPart > 64 * 1024 * 1024) {
+        CloseHandle(file);
+        return NULL;
+    }
+
+    BYTE* bytes = (BYTE*)malloc((size_t)size.QuadPart);
+    DWORD read = 0;
+    if (!bytes || !ReadFile(file, bytes, (DWORD)size.QuadPart, &read, NULL) ||
+        read != (DWORD)size.QuadPart) {
+        free(bytes);
+        CloseHandle(file);
+        return NULL;
+    }
+    CloseHandle(file);
+
+    // WIC reads it or it is not a picture, whatever the extension says.
+    BITMAPINFOHEADER header = {0};
+    size_t pixelsLen = 0;
+    BYTE* pixels = ImageDib_Decode(bytes, (size_t)read, &header, &pixelsLen);
+    if (!pixels) {
+        free(bytes);
+        return NULL;
+    }
+    free(pixels);
+
+    // Its own size in inches, taken at 96 pixels to the inch, which is what
+    // every other program assumes for a picture that states no resolution.
+    LONG heightPx = header.biHeight < 0 ? -header.biHeight : header.biHeight;
+    int widthEmu = (int)header.biWidth * 9525;
+    int heightEmu = (int)heightPx * 9525;
+
+    if (maxWidthEmu > 0 && widthEmu > maxWidthEmu) {
+        heightEmu = (int)((double)heightEmu * maxWidthEmu / widthEmu);
+        widthEmu = maxWidthEmu;
+    }
+
+    // The content type follows the file, because that is what the package
+    // will declare for the part it goes in.
+    const WCHAR* type = L"image/png";
+    const WCHAR* dot = wcsrchr(path, L'.');
+    if (dot) {
+        if (_wcsicmp(dot, L".jpg") == 0 || _wcsicmp(dot, L".jpeg") == 0) type = L"image/jpeg";
+        else if (_wcsicmp(dot, L".gif") == 0) type = L"image/gif";
+        else if (_wcsicmp(dot, L".bmp") == 0) type = L"image/bmp";
+        else if (_wcsicmp(dot, L".tif") == 0 || _wcsicmp(dot, L".tiff") == 0) type = L"image/tiff";
+    }
+
+    DocRun* run = Doc_AddImageRun(para, bytes, (size_t)read, type, widthEmu, heightEmu);
+    free(bytes);
+    return run;
+}
 
 // ---------------------------------------------------------------------------
 // Comments
@@ -2873,6 +2941,120 @@ BOOL Doc_SelfTest(char* failure, size_t failureSize) {
 
         for (DocRun* r = para->runs; r; r = r->next) {
             if (r->commentMark != COMMENT_MARK_NONE) FAIL("a deleted comment left its markers");
+        }
+    }
+
+    // --- a picture read off the disk ---
+    //
+    // Written, inserted and compared byte for byte: the point of carrying a
+    // picture as bytes is that the file gets back exactly what was chosen.
+    {
+        Doc_Free(a);
+        Doc_Free(b);
+        b = NULL;
+        a = Doc_New();
+        if (!a) FAIL("could not allocate a model");
+
+        // A 4 x 2 bitmap, written by hand. BMP because it can be built here
+        // without a compressor; what is being checked is the road from a file
+        // to the model, which is the same road for every format WIC reads.
+        const int w = 4, h = 2;
+        const int rowBytes = ((w * 3 + 3) & ~3);
+        const int pixelBytes = rowBytes * h;
+
+        BYTE file[14 + 40 + 64] = {0};
+        BYTE* fh = file;
+        fh[0] = 'B'; fh[1] = 'M';
+        *(DWORD*)(fh + 2) = 14 + 40 + pixelBytes;
+        *(DWORD*)(fh + 10) = 14 + 40;
+
+        BITMAPINFOHEADER* bi = (BITMAPINFOHEADER*)(file + 14);
+        bi->biSize = sizeof(BITMAPINFOHEADER);
+        bi->biWidth = w;
+        bi->biHeight = h;
+        bi->biPlanes = 1;
+        bi->biBitCount = 24;
+        bi->biCompression = BI_RGB;
+        bi->biSizeImage = pixelBytes;
+
+        for (int i = 0; i < pixelBytes; i++) file[14 + 40 + i] = (BYTE)(i * 7);
+
+        WCHAR path[MAX_PATH];
+        WCHAR temp[MAX_PATH];
+        GetTempPathW(MAX_PATH, temp);
+        swprintf_s(path, MAX_PATH, L"%sopennote-selftest.bmp", temp);
+
+        HANDLE out = CreateFileW(path, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS,
+                                 FILE_ATTRIBUTE_NORMAL, NULL);
+        if (out == INVALID_HANDLE_VALUE) FAIL("could not write a test picture");
+
+        DWORD written = 0;
+        DWORD total = 14 + 40 + pixelBytes;
+        BOOL wrote = WriteFile(out, file, total, &written, NULL) && written == total;
+        CloseHandle(out);
+        if (!wrote) FAIL("the test picture was not written whole");
+
+        DocPara* para = Doc_AddPara(a);
+        DocRun* run = Doc_AddImageFromFile(para, path, 0);
+        if (!run || !run->image) {
+            DeleteFileW(path);
+            FAIL("a picture on disk did not reach the model");
+        }
+
+        // The file's own bytes, not a re-encoding of them.
+        if (run->image->len != total ||
+            memcmp(run->image->bytes, file, total) != 0) {
+            DeleteFileW(path);
+            FAIL("the picture's bytes were not carried through");
+        }
+
+        // Four pixels wide at 96 to the inch is 4 * 9525 EMU.
+        if (run->image->widthEmu != w * 9525 || run->image->heightEmu != h * 9525) {
+            DeleteFileW(path);
+            FAIL("the picture came out the wrong size");
+        }
+
+        if (wcscmp(run->image->contentType, L"image/bmp") != 0) {
+            DeleteFileW(path);
+            FAIL("the picture's content type does not follow the file");
+        }
+
+        // It counts as one character, so a caret can sit either side of it.
+        if (Doc_ParaLength(para) != 1) {
+            DeleteFileW(path);
+            FAIL("a picture is not one character wide");
+        }
+
+        // ...and a wide picture is brought down to the width it is given,
+        // keeping its shape.
+        DocPara* narrow = Doc_AddPara(a);
+        DocRun* scaled = Doc_AddImageFromFile(narrow, path, 2 * 9525);
+        if (!scaled || !scaled->image) {
+            DeleteFileW(path);
+            FAIL("the second insert failed");
+        }
+        if (scaled->image->widthEmu != 2 * 9525 ||
+            scaled->image->heightEmu != 1 * 9525) {
+            DeleteFileW(path);
+            FAIL("a picture too wide for the page was not scaled to fit");
+        }
+
+        DeleteFileW(path);
+
+        // A file that is not a picture is refused rather than carried.
+        swprintf_s(path, MAX_PATH, L"%sopennote-selftest.txt", temp);
+        out = CreateFileW(path, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS,
+                          FILE_ATTRIBUTE_NORMAL, NULL);
+        if (out != INVALID_HANDLE_VALUE) {
+            WriteFile(out, "not a picture", 13, &written, NULL);
+            CloseHandle(out);
+
+            DocPara* nope = Doc_AddPara(a);
+            if (Doc_AddImageFromFile(nope, path, 0)) {
+                DeleteFileW(path);
+                FAIL("a text file was accepted as a picture");
+            }
+            DeleteFileW(path);
         }
     }
 

@@ -647,7 +647,9 @@ static BOOL HandleRichFormatCommand(HWND hwnd, int id, HWND hEditor) {
         case IDM_INSERT_PICTURE: {
             WCHAR path[MAX_PATH] = {0};
             static const WCHAR filter[] =
-                L"Bitmap Images (*.bmp)\0*.bmp\0All Files (*.*)\0*.*\0";
+                L"Images (*.png;*.jpg;*.jpeg;*.gif;*.bmp;*.tif;*.tiff)\0"
+                L"*.png;*.jpg;*.jpeg;*.gif;*.bmp;*.tif;*.tiff\0"
+                L"All Files (*.*)\0*.*\0";
             OPENFILENAMEW ofn = {
                 .lStructSize = sizeof(ofn),
                 .hwndOwner = hwnd,
@@ -658,10 +660,15 @@ static BOOL HandleRichFormatCommand(HWND hwnd, int id, HWND hEditor) {
                 .Flags = OFN_FILEMUSTEXIST | OFN_HIDEREADONLY | OFN_NOCHANGEDIR
             };
             if (GetOpenFileNameW(&ofn)) {
-                if (!Rich_InsertPicture(hEditor, path)) {
+                if (!Editor_IsRich(hEditor)) {
+                    MessageBoxW(hwnd,
+                        L"A plain text file has nowhere to keep a picture.\n\n"
+                        L"Save it as .rtf or .docx first.",
+                        APP_NAME, MB_ICONINFORMATION);
+                } else if (!InsertPicture(hwnd, path)) {
                     MessageBoxW(hwnd,
                         L"That image could not be inserted.\n\n"
-                        L"Only uncompressed bitmaps are supported for now.",
+                        L"It could not be read as a picture.",
                         APP_NAME, MB_ICONWARNING);
                 }
             }
@@ -1066,6 +1073,69 @@ static void ShowComments(HWND hwnd) {
         MainWindow_UpdateTitle();
         StatusBar_UpdateModified(TRUE);
     }
+}
+
+// A picture goes into the document rather than into the view.
+//
+// It used to go straight into the RichEdit control, which meant two things:
+// only a bitmap would load, because that is all LoadImage reads, and the
+// picture existed nowhere but the control -- so saving to .docx wrote a
+// document with no picture in it. The control cannot hold a picture's bytes,
+// which is the same wall page numbers, comments and tracked changes all ran
+// into, and the same road out: capture the document, change the model, hand
+// it back to both views.
+static BOOL InsertPicture(HWND hwnd, const WCHAR* path) {
+    Tab* tab = App_GetActiveTab();
+    if (!tab || !tab->document || !tab->hEditor) return FALSE;
+
+    // A picture wider than the text is laid out wider than the paper, so the
+    // page it is going on decides how big it may be.
+    SectionProps page;
+    Doc_GetPageDefaults(&page);
+    if (tab->document->source) page = tab->document->source->section;
+
+    // 635 EMU to the twip.
+    int maxWidthEmu = (page.pageWidth - page.marginLeft - page.marginRight) * 635;
+    int paragraph = ActiveParagraphIndex(tab);
+
+    FlushPageLayout();
+
+    Document* doc = tab->document;
+    DocModel* model = DocView_CaptureWith(tab->hEditor, doc->source);
+    if (!model) return FALSE;
+
+    // On a line of its own, after the paragraph the caret is in: a picture
+    // dropped into the middle of a sentence is a harder question than it
+    // looks, and this is what everyone expects anyway.
+    DocPara* at = Doc_ParaAt(model, paragraph);
+    DocPara* into = Doc_InsertParaBefore(model, at ? at->next : NULL);
+    if (!into) into = Doc_AddPara(model);
+
+    if (!into || !Doc_AddImageFromFile(into, path, maxWidthEmu)) {
+        Doc_Free(model);
+        return FALSE;
+    }
+
+    char* rtf = DocRtf_Emit(model);
+    if (rtf) {
+        Rich_SetRtf(tab->hEditor, rtf);
+        free(rtf);
+    }
+
+    Doc_Free(doc->source);
+    doc->source = model;
+    doc->modified = TRUE;
+
+    if (tab->hPageView) {
+        TogglePageLayout(hwnd);
+        TogglePageLayout(hwnd);
+    }
+
+    TabControl_UpdateTabTitle(tab->index);
+    MainWindow_UpdateTitle();
+    StatusBar_UpdateModified(TRUE);
+    StatusBar_SetMessage(L"Picture inserted");
+    return TRUE;
 }
 
 // What the Insert menu's field commands have in common: the document is
