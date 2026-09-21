@@ -221,6 +221,7 @@
 #define IDM_REVIEW_REJECT_ALL    7401
 
 // The comments dialog
+#define IDC_STATIC_SEARCH        1159
 #define IDD_COMMENTS             1160
 #define IDC_COMMENTS_LIST        1161
 #define IDC_COMMENTS_DELETE      1162

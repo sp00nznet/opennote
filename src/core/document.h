@@ -39,6 +39,13 @@ BOOL Document_Save(Document* doc, HWND hEditor);
 BOOL Document_SaveAs(Document* doc, HWND hEditor, const WCHAR* path);
 BOOL Document_Load(Document* doc, HWND hEditor);
 
+// Back an unsaved scratch document with a note, so what is in it survives a
+// restart. Called when such a document is first modified -- doing it when the
+// tab opened left an empty note behind on every launch. Does nothing for a
+// document that has a file, a note already, or formatting the notes table
+// cannot hold.
+void Document_BeginNote(Document* doc, HWND hEditor);
+
 // Properties
 const WCHAR* Document_GetTitle(Document* doc);
 void Document_UpdateTitle(Document* doc);

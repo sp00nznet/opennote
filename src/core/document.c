@@ -232,6 +232,31 @@ BOOL Document_SaveAs(Document* doc, HWND hEditor, const WCHAR* path) {
     return result;
 }
 
+void Document_BeginNote(Document* doc, HWND hEditor) {
+    if (!doc || !hEditor) return;
+    if (doc->noteId > 0 || doc->filePath[0] || !doc->isNew) return;
+    if (FORMAT_IS_RICH(doc->format) || !Database_IsOpen()) return;
+
+    WCHAR* text = Editor_GetText(hEditor);
+    if (!text) return;
+
+    // Nothing in it yet: the first keystroke has not landed, or the last one
+    // was a backspace. Either way there is nothing worth keeping.
+    if (!text[0]) {
+        free(text);
+        return;
+    }
+
+    int noteId = Notes_Create(doc->title[0] ? doc->title : L"Untitled", text);
+    free(text);
+
+    if (noteId <= 0) return;
+
+    doc->noteId = noteId;
+    doc->type = DOC_TYPE_NOTE;
+    wcscpy_s(doc->noteTitle, MAX_TITLE_LEN, doc->title[0] ? doc->title : L"Untitled");
+}
+
 // Load document
 BOOL Document_Load(Document* doc, HWND hEditor) {
     if (!doc || !hEditor) return FALSE;

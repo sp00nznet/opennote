@@ -136,9 +136,13 @@ See [ROADMAP.md](ROADMAP.md) for the ordering.
 
 ## Screenshots
 
-| Main Editor | Notes Browser |
-|-------------|---------------|
-| ![Main Editor](gfx/main-editor.png) | ![Notes Browser](gfx/notes-browser.png) |
+| The editor | The notes browser |
+|------------|-------------------|
+| ![The editor](gfx/main-editor.png) | ![The notes browser](gfx/notes-browser.png) |
+
+**A PDF, opened.** Windows renders the pages; opennote shows them, a tab like any other.
+
+![A PDF, opened](gfx/pdf-view.png)
 
 ---
 

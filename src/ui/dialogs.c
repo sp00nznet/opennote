@@ -356,12 +356,93 @@ BOOL Dialogs_NotesBrowser(HWND hParent, int* noteId) {
 }
 
 // Notes Browser procedure
+// The notes browser has a sizing frame, and until now nothing moved when it
+// was used: the search box kept its old width, the buttons stayed where the
+// bottom edge used to be, and the list did not grow into the space. A dialog
+// that can be resized has to lay itself out.
+typedef struct { int id, x, y, w, h; } NotesPlace;
+
+static void NotesBrowserLayout(HWND hwnd) {
+    RECT rc;
+    GetClientRect(hwnd, &rc);
+
+    const int pad = 12;
+    const int row = 24;        // one line of controls
+    const int button = 26;
+    const int syncWidth = 56;
+
+    int width = rc.right - rc.left;
+    int height = rc.bottom - rc.top;
+    if (width < 200 || height < 160) return;
+
+    int listTop = pad + row + 10;
+    int buttonY = height - pad - button;
+    int listBottom = buttonY - 10;
+
+    NotesPlace places[] = {
+        // The search line: a label, a box that takes the width, Sync at the end.
+        { IDC_STATIC_SEARCH, pad, pad + 5, 40, 16 },
+        { IDC_NOTES_SEARCH,  pad + 44, pad, width - pad * 2 - 44 - syncWidth - 8, row },
+        { IDC_NOTES_SYNC,    width - pad - syncWidth, pad, syncWidth, row },
+
+        // The list fills what is left between the two.
+        { IDC_NOTES_LIST,    pad, listTop, width - pad * 2, listBottom - listTop },
+
+        // Making on the left, opening and closing on the right.
+        { IDC_NOTES_NEW,     pad, buttonY, 70, button },
+        { IDC_NOTES_RENAME,  pad + 76, buttonY, 64, button },
+        { IDC_NOTES_DELETE,  pad + 146, buttonY, 64, button },
+        { IDOK,              width - pad - 140, buttonY, 66, button },
+        { IDCANCEL,          width - pad - 66, buttonY, 66, button },
+    };
+
+    int count = (int)(sizeof(places) / sizeof(places[0]));
+
+    HDWP defer = BeginDeferWindowPos(count);
+    if (!defer) return;
+
+    for (int i = 0; i < count; i++) {
+        HWND control = GetDlgItem(hwnd, places[i].id);
+        if (!control) continue;
+
+        defer = DeferWindowPos(defer, control, NULL, places[i].x, places[i].y,
+                               places[i].w, places[i].h, SWP_NOZORDER);
+        if (!defer) return;
+    }
+
+    EndDeferWindowPos(defer);
+
+    // The title column takes whatever the other two do not.
+    HWND list = GetDlgItem(hwnd, IDC_NOTES_LIST);
+    if (list) {
+        RECT lr;
+        GetClientRect(list, &lr);
+
+        int rest = (lr.right - lr.left) - 110 - 60 - 24;
+        if (rest > 80) ListView_SetColumnWidth(list, 0, rest);
+    }
+
+    InvalidateRect(hwnd, NULL, TRUE);
+}
+
 INT_PTR CALLBACK NotesBrowserProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
     static int* pNoteId;
     static HWND hList;
     static HWND hSearch;
 
     switch (msg) {
+        case WM_SIZE:
+            NotesBrowserLayout(hwnd);
+            return TRUE;
+
+        case WM_GETMINMAXINFO: {
+            // Small enough to be useful, not small enough to be nonsense.
+            MINMAXINFO* mmi = (MINMAXINFO*)lParam;
+            mmi->ptMinTrackSize.x = 420;
+            mmi->ptMinTrackSize.y = 300;
+            return TRUE;
+        }
+
         case WM_INITDIALOG:
             pNoteId = (int*)lParam;
             hList = GetDlgItem(hwnd, IDC_NOTES_LIST);
@@ -616,14 +697,6 @@ INT_PTR CALLBACK NotesBrowserProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPa
             }
             break;
 
-        case WM_SIZE:
-            {
-                RECT rc;
-                GetClientRect(hwnd, &rc);
-                // Resize list view
-                SetWindowPos(hList, NULL, 10, 30, rc.right - 20, rc.bottom - 70, SWP_NOZORDER);
-            }
-            return TRUE;
     }
     return FALSE;
 }

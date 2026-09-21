@@ -30,9 +30,19 @@ BOOL App_Initialize(HINSTANCE hInstance) {
     wcscpy_s(g_app->editorFont.lfFaceName, LF_FACESIZE, L"Consolas");
     g_app->hEditorFont = CreateFontIndirectW(&g_app->editorFont);
 
-    // Get database path in AppData
+    // Get database path in AppData.
+    //
+    // OPENNOTE_DB overrides it: a copy run from a stick keeps its notes beside
+    // itself rather than in the account it happens to be plugged into, and a
+    // test that opens documents does not write to the store somebody is
+    // actually using. The shell folder is where it goes when nothing says
+    // otherwise, which is every ordinary run.
     WCHAR appData[MAX_PATH];
-    if (SUCCEEDED(SHGetFolderPathW(NULL, CSIDL_APPDATA, NULL, 0, appData))) {
+    DWORD overridden = GetEnvironmentVariableW(L"OPENNOTE_DB", g_app->dbPath, MAX_PATH);
+    if (overridden > 0 && overridden < MAX_PATH) {
+        // Nothing else: the caller named the file, and a directory that does
+        // not exist is the caller's problem to hear about.
+    } else if (SUCCEEDED(SHGetFolderPathW(NULL, CSIDL_APPDATA, NULL, 0, appData))) {
         swprintf_s(g_app->dbPath, MAX_PATH, L"%s\\OpenNote", appData);
         CreateDirectoryW(g_app->dbPath, NULL);
         wcscat_s(g_app->dbPath, MAX_PATH, L"\\opennote.db");
@@ -331,18 +341,16 @@ int App_CreateTabEx(const WCHAR* title, DocumentFormat format) {
 
     tab->document->format = format;
 
-    // Auto-create note in database for persistence. A rich document is not
-    // backed by a note: the notes table stores text, and storing RTF markup in
-    // it would put braces and control words into full-text search results.
-    if (Database_IsOpen() && !FORMAT_IS_RICH(format)) {
-        const WCHAR* noteTitle = title ? title : L"Untitled";
-        int noteId = Notes_Create(noteTitle, L"");
-        if (noteId > 0) {
-            tab->document->noteId = noteId;
-            tab->document->type = DOC_TYPE_NOTE;
-            wcscpy_s(tab->document->noteTitle, MAX_TITLE_LEN, noteTitle);
-        }
-    }
+    // A scratch tab is backed by a note so that what is typed into it survives
+    // a restart -- but the note is made when something is typed, not here.
+    // Booking one per tab left an empty "Untitled" in the store on every
+    // launch and every Ctrl+N, and a store full of empty notes is worse than
+    // no persistence at all. See Document_BeginNote, called from the editor's
+    // first modification.
+    //
+    // A rich document is not backed by a note either way: the notes table
+    // stores text, and RTF markup in it would put braces and control words
+    // into full-text search results.
 
     // Add to tab control
     int index = TabControl_AddTab(title ? title : L"Untitled");

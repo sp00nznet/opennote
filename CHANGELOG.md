@@ -8,6 +8,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **`OPENNOTE_DB`** names the database file, so a copy run from a stick keeps its notes
+  beside itself rather than in whichever account it is plugged into — and a test that
+  opens documents cannot write to the store somebody is actually using.
 - **A PDF opens and is shown.** opennote has written PDFs since v0.8 and could not read
   one; a `.pdf` now opens in a tab and draws its pages — fitted to the window, scrolled
   with the wheel, `Page Up` / `Page Down` by a page, `Ctrl`+wheel to zoom, `Ctrl+0` to fit
@@ -21,6 +24,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   are what the `.docx` carries now.
 
 ### Fixed
+- **An empty note was left behind on every launch.** A new plain text tab booked a note in
+  the store the moment it opened, so starting opennote and closing it again added an
+  "Untitled", 0 bytes — as did every `Ctrl+N`. The note is made when something is typed
+  now, which is when there is anything worth keeping.
+- **The notes browser can be resized properly.** It has had a sizing frame all along, and
+  only the list moved: the search box kept its old width and the buttons stayed where the
+  bottom edge used to be.
 - **A PDF tab is honest about what it is**: the formatting toolbar greys out and the
   commands that would change, lay out or print the document say so, rather than acting on
   an editor holding nothing.

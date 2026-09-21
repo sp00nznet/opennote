@@ -178,7 +178,9 @@ The status bar shows the page count and the zoom.
 
 ## Where things are kept
 
-- Notes, settings, recent files and the session: `%APPDATA%\OpenNote\opennote.db`
+- Notes, settings, recent files and the session: `%APPDATA%\OpenNote\opennote.db`, or
+  wherever `OPENNOTE_DB` points if it is set — which is how a copy run off a stick keeps
+  its notes beside itself
 - Nothing else. No registry keys beyond file associations set by the installer, and
   nothing written next to the executable.
 

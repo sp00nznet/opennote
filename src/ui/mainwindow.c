@@ -261,6 +261,11 @@ LRESULT CALLBACK MainWindow_WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
                 if (tab && tab->document && tab->hEditor) {
                     BOOL modified = Editor_GetModified(tab->hEditor);
                     tab->document->modified = modified;
+
+                    // A scratch tab with something in it gets a note behind
+                    // it, so what was typed survives a restart.
+                    if (modified) Document_BeginNote(tab->document, tab->hEditor);
+
                     TabControl_UpdateTabTitle(tab->index);
                     MainWindow_UpdateTitle();
                     StatusBar_UpdateModified(modified);
