@@ -235,6 +235,15 @@ static int RunPdfInfo(int argc, WCHAR** argv) {
 // The form in a PDF, on the command line: what its fields are called, and
 // filling them in. The window comes later; this is where the reading and the
 // writing can be checked without one.
+static const WCHAR* FieldKindName(PdfFieldKind kind) {
+    switch (kind) {
+        case PDF_FIELD_TEXT:     return L"text";
+        case PDF_FIELD_CHECKBOX: return L"tick";
+        case PDF_FIELD_CHOICE:   return L"list";
+        default:                 return L"other";
+    }
+}
+
 static int RunPdfFields(int argc, WCHAR** argv) {
     if (argc < 3) {
         printf("usage: OpenNote.exe --pdf-fields <file.pdf>\n");
@@ -252,10 +261,19 @@ static int RunPdfFields(int argc, WCHAR** argv) {
     wprintf(L"%s: %d field%s\n", argv[2], count, count == 1 ? L"" : L"s");
 
     for (int i = 0; i < count; i++) {
-        wprintf(L"  %d  %-28s %-6s %s\n", i,
-                PdfForm_FieldName(form, i),
-                PdfForm_FieldIsText(form, i) ? L"text" : L"other",
-                PdfForm_FieldValue(form, i));
+        PdfFieldKind kind = PdfForm_FieldKind(form, i);
+
+        const WCHAR* shown = PdfForm_FieldValue(form, i);
+        if (kind == PDF_FIELD_CHECKBOX) {
+            shown = PdfForm_FieldChecked(form, i) ? L"[x]" : L"[ ]";
+        }
+
+        wprintf(L"  %d  %-28s %-6s %s\n", i, PdfForm_FieldName(form, i),
+                FieldKindName(kind), shown);
+
+        for (int o = 0; o < PdfForm_FieldOptionCount(form, i); o++) {
+            wprintf(L"         - %s\n", PdfForm_FieldOption(form, i, o));
+        }
     }
 
     PdfForm_Close(form);
@@ -292,15 +310,29 @@ static int RunPdfFill(int argc, WCHAR** argv) {
         BOOL found = FALSE;
         for (int f = 0; f < PdfForm_FieldCount(form); f++) {
             if (_wcsicmp(PdfForm_FieldName(form, f), pair) != 0) continue;
-            if (!PdfForm_SetFieldValue(form, f, equals + 1)) break;
 
-            wprintf(L"  %s = %s\n", pair, equals + 1);
+            const WCHAR* wanted = equals + 1;
+
+            if (PdfForm_FieldKind(form, f) == PDF_FIELD_CHECKBOX) {
+                // A tick box takes a word rather than a value: the ones people
+                // type, in either case.
+                BOOL tick = _wcsicmp(wanted, L"yes") == 0 || _wcsicmp(wanted, L"on") == 0 ||
+                            _wcsicmp(wanted, L"true") == 0 || _wcsicmp(wanted, L"x") == 0 ||
+                            wcscmp(wanted, L"1") == 0;
+
+                if (!PdfForm_SetFieldChecked(form, f, tick)) break;
+                wprintf(L"  %s = %s\n", pair, tick ? L"[x]" : L"[ ]");
+            } else {
+                if (!PdfForm_SetFieldValue(form, f, wanted)) break;
+                wprintf(L"  %s = %s\n", pair, wanted);
+            }
+
             filled++;
             found = TRUE;
             break;
         }
 
-        if (!found) wprintf(L"  (no text field called \"%s\")\n", pair);
+        if (!found) wprintf(L"  (nothing called \"%s\" that can be filled in)\n", pair);
     }
 
     BOOL ok = filled > 0 && PdfForm_Save(form, argv[3]);
@@ -424,13 +456,17 @@ static int RunPdfVerify(int argc, WCHAR** argv) {
             ? L"unchanged since it was signed"
             : L"DO NOT MATCH the signature");
 
+    if (report.intact) {
+        wprintf(L"  trust:    %s\n", PdfSign_TrustSentence(report.trust));
+    }
+
     if (!report.coversWholeFile) {
         wprintf(L"  warning:  something was appended after the signature, "
                 L"and that part is not covered\n");
     }
 
-    wprintf(L"  note:     this says nothing about whether the certificate is "
-            L"one to trust\n");
+    wprintf(L"  note:     a signature says the bytes have not changed; who is "
+            L"behind the certificate is what the trust line is about\n");
     return report.intact ? 0 : 1;
 }
 

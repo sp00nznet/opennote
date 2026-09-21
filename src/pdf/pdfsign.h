@@ -43,6 +43,28 @@ BOOL PdfSign_VerifyDetached(const BYTE* signature, size_t signatureLen,
                             const BYTE* a, size_t aLen,
                             const BYTE* b, size_t bLen);
 
+// What can be said about the certificate behind a signature, beyond the fact
+// that the bytes match.
+//
+// These are deliberately separate from "the bytes are unchanged". A signature
+// can be perfectly intact and made with a certificate nobody has any reason to
+// believe -- a self-signed one, for instance, which anybody can make in a
+// minute. Reporting the two as one thing is how a green tick comes to mean
+// nothing.
+typedef enum {
+    PDFTRUST_NOT_CHECKED,
+    PDFTRUST_TRUSTED,             // chain built to a trusted root, in date
+    PDFTRUST_UNTRUSTED_ROOT,      // the chain ends somewhere this machine does not trust
+    PDFTRUST_EXPIRED,
+    PDFTRUST_REVOKED,
+    PDFTRUST_REVOCATION_UNKNOWN,  // ...could not be checked, which is not the same as fine
+    PDFTRUST_NO_CHAIN             // the chain could not be built at all
+} PdfTrust;
+
+// A sentence for the status bar or the console, saying what was and was not
+// checked. Never claims more than was.
+const WCHAR* PdfSign_TrustSentence(PdfTrust trust);
+
 // The same check, reporting who the signature says it is from. The name comes
 // out of the certificate carried inside the signature, so it is a claim rather
 // than a fact: this says the bytes have not changed since somebody holding
@@ -51,7 +73,8 @@ BOOL PdfSign_VerifyDetached(const BYTE* signature, size_t signatureLen,
 BOOL PdfSign_VerifyDetachedNamed(const BYTE* signature, size_t signatureLen,
                                  const BYTE* a, size_t aLen,
                                  const BYTE* b, size_t bLen,
-                                 WCHAR* signerOut, size_t signerChars);
+                                 WCHAR* signerOut, size_t signerChars,
+                                 PdfTrust* trustOut);
 
 // A certificate made for a self-check: self-signed, in a key container that
 // is deleted with it, and worth nothing to anybody. It exists so that the

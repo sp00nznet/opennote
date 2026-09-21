@@ -183,10 +183,11 @@ afterwards can be detected. A signed PDF says so in the status bar when it opens
 says whether its bytes still match. That is all it says: whether the certificate is one
 anybody should trust is a separate question, and opennote does not answer it.
 
-**File → Fill PDF Form…** lists the fields the PDF carries. Double-click one to fill it
-in, then **Save As** writes the filled copy — the original file is not changed, and the
+**File → Fill PDF Form…** lists the fields the PDF carries — boxes to type in, boxes to
+tick and lists to choose from. Double-click one to fill it in (a tick box turns over; a
+list tells you what it will take), then **Save As** writes the filled copy — the original file is not changed, and the
 copy is the original with the answers appended, which is how PDF is meant to be edited.
-Text fields are filled; tick boxes and choice lists are listed but not written yet.
+Buttons that run something when they are clicked are listed but not filled.
 
 The status bar shows the page count and the zoom.
 

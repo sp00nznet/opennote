@@ -527,10 +527,15 @@ void MainWindow_OpenDocument(Document* newDoc) {
         if (PdfForm_CheckSignature(newDoc->filePath, &signature) && signature.present) {
             WCHAR note[256];
 
-            if (signature.intact && signature.signer[0]) {
-                swprintf_s(note, 256, L" - signed by %s, unchanged since", signature.signer);
+            if (signature.intact && signature.trust == PDFTRUST_TRUSTED) {
+                swprintf_s(note, 256, L" - signed by %s, unchanged, certificate trusted",
+                           signature.signer[0] ? signature.signer : L"an unnamed signer");
             } else if (signature.intact) {
-                wcscpy_s(note, 256, L" - signed, and unchanged since");
+                // Intact but not trusted is the common case and the one worth
+                // saying carefully: the bytes are fine, the signer is a claim.
+                swprintf_s(note, 256, L" - signed by %s, unchanged - but %s",
+                           signature.signer[0] ? signature.signer : L"an unnamed signer",
+                           PdfSign_TrustSentence(signature.trust));
             } else {
                 wcscpy_s(note, 256, L" - SIGNED, BUT THE BYTES DO NOT MATCH");
             }

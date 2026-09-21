@@ -27,10 +27,17 @@ cross-reference table compressed and there was no reading one without it.
   range using a certificate from your own Windows store. Windows does the cryptography;
   opennote does the placeholder dance that lets a signature cover the file it is part of,
   and verifies what it wrote before handing the file back.
+- **Tick boxes and choice lists** are read and written, not just listed. A tick box keeps
+  the two drawings the form gave it and only changes which is showing — replacing them
+  with a tick of opennote's own is how a box ends up ticked in the file and blank on the
+  page. In the dialog, double-clicking a tick box turns it over; a choice list says what
+  it will take.
 - **A signature can be checked.** `--pdf-verify`, and a line in the status bar when a
-  signed PDF opens. It reports exactly one thing — whether the bytes covered by the
-  signature have changed since it was made. Whether the certificate is one to trust is a
-  different question, and this does not answer it.
+  signed PDF opens. It reports two things, kept apart on purpose: whether the bytes covered by
+  the signature have changed, and what the certificate behind it is worth — the chain
+  built, the policy checked, revocation read from the cache. A signature can be perfectly
+  intact and made with a certificate anybody could have produced in a minute, and
+  reporting those as one thing is how a green tick comes to mean nothing.
 - **A PDF can be signed** — visibly. **File → Sign PDF…** takes a picture of a signature
   and the next drag across the page says where it goes; the picture is stamped in with
   its transparency kept, and the file is written as an incremental update like a filled

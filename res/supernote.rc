@@ -105,7 +105,8 @@ STYLE DS_SETFONT | DS_FIXEDSYS | WS_POPUP | WS_CAPTION | WS_SYSMENU | WS_THICKFR
 CAPTION "Fill Form"
 FONT 8, "MS Shell Dlg"
 BEGIN
-    LTEXT           "Double-click a field to fill it in.", IDC_STATIC, 12, 10, 200, 10
+    LTEXT           "Double-click a field to fill it in. A tick box turns over.",
+                    IDC_STATIC, 12, 10, 260, 10
     CONTROL         "", IDC_PDF_FORM_LIST, WC_LISTVIEW,
                     LVS_REPORT | LVS_SINGLESEL | LVS_SHOWSELALWAYS | WS_BORDER | WS_TABSTOP,
                     12, 24, 316, 160

@@ -39,9 +39,31 @@ int  PdfForm_FieldCount(const PdfForm* form);
 const WCHAR* PdfForm_FieldName(const PdfForm* form, int index);
 const WCHAR* PdfForm_FieldValue(const PdfForm* form, int index);
 
-// Is this one a text field somebody is meant to type in? Buttons and choice
-// lists are listed but not filled.
+// What kind of field it is. A form is mostly boxes to type in, but the two
+// that get ticked and chosen are half of what anybody is actually sent.
+typedef enum {
+    PDF_FIELD_OTHER,
+    PDF_FIELD_TEXT,
+    PDF_FIELD_CHECKBOX,
+    PDF_FIELD_CHOICE
+} PdfFieldKind;
+
+PdfFieldKind PdfForm_FieldKind(const PdfForm* form, int index);
+
+// Is this one a text field somebody is meant to type in?
 BOOL PdfForm_FieldIsText(const PdfForm* form, int index);
+
+// A tick box: whether it is ticked, and ticking it. The name of the "on"
+// state comes out of the widget's own appearance dictionary -- it is /Yes in
+// most forms and something else in plenty of them, and writing the wrong one
+// leaves a box that is ticked according to the file and blank on the page.
+BOOL PdfForm_FieldChecked(const PdfForm* form, int index);
+BOOL PdfForm_SetFieldChecked(PdfForm* form, int index, BOOL checked);
+
+// A choice list: what it offers. The value is set with PdfForm_SetFieldValue,
+// like a text field, because that is what a choice's value is.
+int          PdfForm_FieldOptionCount(const PdfForm* form, int index);
+const WCHAR* PdfForm_FieldOption(const PdfForm* form, int index, int option);
 
 // Put text in a field. Nothing is written to disk until PdfForm_Save.
 BOOL PdfForm_SetFieldValue(PdfForm* form, int index, const WCHAR* text);
@@ -82,10 +104,14 @@ BOOL PdfForm_Save(PdfForm* form, const WCHAR* path);
 // anybody's in particular -- that is a chain of checks this does not do, and
 // a green tick that implied otherwise would be worse than none.
 typedef struct {
-    BOOL  present;
-    BOOL  intact;
-    BOOL  coversWholeFile;     // FALSE when something was appended afterwards
-    WCHAR signer[256];
+    BOOL     present;
+    BOOL     intact;
+    BOOL     coversWholeFile;  // FALSE when something was appended afterwards
+    WCHAR    signer[256];
+
+    // What the certificate is worth, which is a separate question from
+    // whether the bytes match. See PdfTrust.
+    PdfTrust trust;
 } PdfSignatureReport;
 
 BOOL PdfForm_CheckSignature(const WCHAR* path, PdfSignatureReport* out);

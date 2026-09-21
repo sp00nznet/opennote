@@ -119,11 +119,83 @@ extern "C" BOOL PdfSign_VerifyDetached(const BYTE* signature, size_t signatureLe
                                                count, parts, sizes, NULL);
 }
 
+// ---------------------------------------------------------------------------
+// Trust
+//
+// Whether the certificate means anything is a different question from whether
+// the bytes match, and a harder one: it is a chain from the signer up to a
+// root this machine has been told to believe, with every link in date and none
+// of them revoked.
+//
+// Revocation is checked from the cache only. Going out to the network for it
+// would hang the window on somebody else's web server, and an answer that
+// takes thirty seconds is one nobody waits for -- so "not checked" is reported
+// as "not checked" rather than quietly counted as fine.
+// ---------------------------------------------------------------------------
+
+static PdfTrust TrustOfCertificate(PCCERT_CONTEXT signer) {
+    if (!signer) return PDFTRUST_NO_CHAIN;
+
+    CERT_CHAIN_PARA para = {};
+    para.cbSize = sizeof(para);
+
+    // Signing is what the certificate has to be for; a chain that is fine for
+    // a web server is not automatically fine for this.
+    LPSTR usage[] = { (LPSTR)szOID_PKIX_KP_CODE_SIGNING, (LPSTR)szOID_PKIX_KP_EMAIL_PROTECTION };
+    para.RequestedUsage.dwType = USAGE_MATCH_TYPE_OR;
+    para.RequestedUsage.Usage.cUsageIdentifier = 2;
+    para.RequestedUsage.Usage.rgpszUsageIdentifier = usage;
+
+    PCCERT_CHAIN_CONTEXT chain = NULL;
+    if (!CertGetCertificateChain(NULL, signer, NULL, NULL, &para,
+                                 CERT_CHAIN_REVOCATION_CHECK_CHAIN_EXCLUDE_ROOT |
+                                 CERT_CHAIN_REVOCATION_CHECK_CACHE_ONLY,
+                                 NULL, &chain)) {
+        return PDFTRUST_NO_CHAIN;
+    }
+
+    DWORD status = chain->TrustStatus.dwErrorStatus;
+    CertFreeCertificateChain(chain);
+
+    // Reported in the order somebody would want to hear them: the worst first.
+    if (status & CERT_TRUST_IS_REVOKED)              return PDFTRUST_REVOKED;
+    if (status & CERT_TRUST_IS_UNTRUSTED_ROOT)       return PDFTRUST_UNTRUSTED_ROOT;
+    if (status & CERT_TRUST_IS_PARTIAL_CHAIN)        return PDFTRUST_NO_CHAIN;
+    if (status & CERT_TRUST_IS_NOT_TIME_VALID)       return PDFTRUST_EXPIRED;
+    if (status & CERT_TRUST_REVOCATION_STATUS_UNKNOWN) return PDFTRUST_REVOCATION_UNKNOWN;
+    if (status & CERT_TRUST_IS_OFFLINE_REVOCATION)   return PDFTRUST_REVOCATION_UNKNOWN;
+    if (status != CERT_TRUST_NO_ERROR)               return PDFTRUST_NO_CHAIN;
+
+    return PDFTRUST_TRUSTED;
+}
+
+extern "C" const WCHAR* PdfSign_TrustSentence(PdfTrust trust) {
+    switch (trust) {
+        case PDFTRUST_TRUSTED:
+            return L"the certificate chains to a root this machine trusts";
+        case PDFTRUST_UNTRUSTED_ROOT:
+            return L"the certificate is not one this machine trusts -- anybody can make one";
+        case PDFTRUST_EXPIRED:
+            return L"the certificate is out of date";
+        case PDFTRUST_REVOKED:
+            return L"the certificate has been revoked";
+        case PDFTRUST_REVOCATION_UNKNOWN:
+            return L"the certificate chains to a trusted root, but whether it has been "
+                   L"revoked could not be checked";
+        case PDFTRUST_NO_CHAIN:
+            return L"the certificate could not be traced to any root";
+        default:
+            return L"the certificate was not checked";
+    }
+}
+
 extern "C" BOOL PdfSign_VerifyDetachedNamed(const BYTE* signature, size_t signatureLen,
                                             const BYTE* a, size_t aLen,
                                             const BYTE* b, size_t bLen,
-                                            WCHAR* signerOut, size_t signerChars) {
+                                            WCHAR* signerOut, size_t signerChars,
+                                            PdfTrust* trustOut) {
     if (signerOut && signerChars) signerOut[0] = L'\0';
+    if (trustOut) *trustOut = PDFTRUST_NOT_CHECKED;
     if (!signature || signatureLen == 0 || !a || aLen == 0) return FALSE;
 
     CRYPT_VERIFY_MESSAGE_PARA para = {};
@@ -143,6 +215,11 @@ extern "C" BOOL PdfSign_VerifyDetachedNamed(const BYTE* signature, size_t signat
             CertGetNameStringW(signer, CERT_NAME_SIMPLE_DISPLAY_TYPE, 0, NULL,
                                signerOut, (DWORD)signerChars);
         }
+
+        // Only worth asking when the bytes matched: a certificate behind a
+        // broken signature is not evidence of anything.
+        if (ok && trustOut) *trustOut = TrustOfCertificate(signer);
+
         CertFreeCertificateContext(signer);
     }
 
@@ -269,6 +346,28 @@ extern "C" BOOL PdfSign_SelfTest(char* failure, size_t failureSize) {
     if (!PdfSign_SubjectName(cert, name, 256) || !name[0]) {
         FAIL("the certificate would not say who it is");
     }
+
+    // The whole point of keeping trust separate: this signature is perfectly
+    // intact and made with a certificate worth nothing, and the two answers
+    // have to come back different.
+    PdfTrust trust = PDFTRUST_NOT_CHECKED;
+    WCHAR signer[256] = L"";
+
+    if (!PdfSign_VerifyDetachedNamed(signature, signatureLen,
+                                     before, sizeof(before) - 1,
+                                     after, sizeof(after) - 1,
+                                     signer, 256, &trust)) {
+        FAIL("the named verify disagreed with the plain one");
+    }
+
+    if (!wcsstr(signer, L"opennote self-check")) FAIL("the signer was not reported");
+
+    if (trust == PDFTRUST_TRUSTED) {
+        FAIL("a certificate made a moment ago was reported as trusted");
+    }
+    if (trust == PDFTRUST_NOT_CHECKED) FAIL("the certificate was not checked at all");
+
+    if (!PdfSign_TrustSentence(trust)[0]) FAIL("there is nothing to say about the trust");
 
     free(signature);
     PdfSign_DiscardTemporary(cert);

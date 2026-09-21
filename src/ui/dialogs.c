@@ -1437,9 +1437,22 @@ static void PdfFormFill(HWND hwnd, PdfFormData* data) {
         int at = ListView_InsertItem(list, &item);
         if (at < 0) continue;
 
-        ListView_SetItemText(list, at, 1, (WCHAR*)PdfForm_FieldValue(data->form, i));
-        ListView_SetItemText(list, at, 2,
-                             PdfForm_FieldIsText(data->form, i) ? L"text" : L"other");
+        PdfFieldKind kind = PdfForm_FieldKind(data->form, i);
+
+        // A tick box shows as a tick rather than as the name of whatever its
+        // "on" state happens to be called in this form.
+        const WCHAR* shown = PdfForm_FieldValue(data->form, i);
+        if (kind == PDF_FIELD_CHECKBOX) {
+            shown = PdfForm_FieldChecked(data->form, i) ? L"Yes" : L"No";
+        }
+
+        const WCHAR* kindName = kind == PDF_FIELD_TEXT     ? L"text"
+                              : kind == PDF_FIELD_CHECKBOX ? L"tick"
+                              : kind == PDF_FIELD_CHOICE   ? L"list"
+                                                           : L"other";
+
+        ListView_SetItemText(list, at, 1, (WCHAR*)shown);
+        ListView_SetItemText(list, at, 2, (WCHAR*)kindName);
     }
 }
 
@@ -1448,16 +1461,35 @@ static void PdfFormEditSelected(HWND hwnd, PdfFormData* data) {
     int selected = ListView_GetNextItem(list, -1, LVNI_SELECTED);
     if (selected < 0) return;
 
-    if (!PdfForm_FieldIsText(data->form, selected)) {
+    PdfFieldKind kind = PdfForm_FieldKind(data->form, selected);
+
+    // A tick box has two states and no question to ask: it turns over.
+    if (kind == PDF_FIELD_CHECKBOX) {
+        PdfForm_SetFieldChecked(data->form, selected,
+                                !PdfForm_FieldChecked(data->form, selected));
+        PdfFormFill(hwnd, data);
+        return;
+    }
+
+    if (kind != PDF_FIELD_TEXT && kind != PDF_FIELD_CHOICE) {
         MessageBoxW(hwnd,
-            L"Only text fields can be filled in here.\n\n"
-            L"Tick boxes and choice lists are read but not written yet.",
+            L"This one cannot be filled in here.\n\n"
+            L"Buttons that do something when they are clicked are listed, not filled.",
             APP_NAME, MB_ICONINFORMATION);
         return;
     }
 
-    WCHAR prompt[256];
-    swprintf_s(prompt, 256, L"%s:", PdfForm_FieldName(data->form, selected));
+    // A choice list says what it will take, because typing something it does
+    // not offer is a value the form will not accept.
+    WCHAR prompt[1024];
+    swprintf_s(prompt, 1024, L"%s:", PdfForm_FieldName(data->form, selected));
+
+    int options = PdfForm_FieldOptionCount(data->form, selected);
+    for (int i = 0; i < options && wcslen(prompt) < 900; i++) {
+        wcscat_s(prompt, 1024, i == 0 ? L"    (" : L", ");
+        wcscat_s(prompt, 1024, PdfForm_FieldOption(data->form, selected, i));
+        if (i == options - 1) wcscat_s(prompt, 1024, L")");
+    }
 
     WCHAR value[1024];
     wcsncpy_s(value, 1024, PdfForm_FieldValue(data->form, selected), _TRUNCATE);

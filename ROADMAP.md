@@ -255,12 +255,19 @@ the free tools for it are adware or a web upload.
       checks this does not do -- and a green tick that implied otherwise would be worse
       than none, which is why the wording says what it says.
 
+- [x] **Trust**: the chain is built and the policy checked, so "signed by" is reported
+      separately from "these bytes are unchanged" -- and a certificate made a minute ago
+      is reported as what it is. Revocation is checked from the cache, because going to
+      the network for it would hang the window on somebody else's web server; "not
+      checked" is said out loud rather than counted as fine.
+- [x] **Tick boxes and choice lists**, read and written. A tick box keeps the drawings
+      the form gave it and only changes which one is showing: replacing them with a tick
+      of our own is how a box ends up ticked in the file and blank on the page.
+
 ### After v0.11
 
-- [ ] Trust: chain building and revocation, so "signed by" can mean more than "says it
-      is signed by". That is `CertGetCertificateChain` and a policy, and it is the part
-      where being wrong is dangerous rather than annoying.
-- [ ] Tick boxes and choice lists, which are read today and not written.
+- [ ] Radio groups, where the value lives on the parent and the state on each kid.
+- [ ] Timestamping a signature, so it outlives the certificate's expiry date.
 
 Everything above uses what Windows already ships. Nothing in it needs a PDF library.
 
