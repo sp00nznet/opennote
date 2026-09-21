@@ -29,6 +29,19 @@ void           PdfSign_ReleaseCertificate(PdfCertificate certificate);
 // Who it says they are, for writing into the signature.
 BOOL PdfSign_SubjectName(PdfCertificate certificate, WCHAR* out, size_t outChars);
 
+// Where to ask for a timestamp, and whether to ask at all.
+//
+// A signature says "these bytes have not changed since somebody signed them".
+// It does not say *when* -- and once the certificate expires, or is revoked,
+// there is no way to tell a signature made while it was valid from one made
+// afterwards. A timestamp from a third party is what fixes that, and it is
+// why a signature from 2015 is still worth something today.
+//
+// It costs a network call to somebody else's server. If that fails, the
+// signature is still made and still covers the bytes; what is lost is the
+// proof of when, and the caller is told so rather than left to assume.
+extern const WCHAR* PDFSIGN_DEFAULT_TIMESTAMP;
+
 // A detached PKCS#7 signature over `a` followed by `b` -- the two halves a
 // PDF's byte range leaves either side of the signature itself. The caller
 // frees the result.
@@ -36,6 +49,16 @@ BYTE* PdfSign_Detached(PdfCertificate certificate,
                        const BYTE* a, size_t aLen,
                        const BYTE* b, size_t bLen,
                        size_t* outLen);
+
+// The same, timestamped by `timestampUrl` when one is given and reachable.
+// `timestampedOut` says whether it was: FALSE means the signature is made and
+// carries no proof of when.
+BYTE* PdfSign_DetachedTimestamped(PdfCertificate certificate,
+                                  const BYTE* a, size_t aLen,
+                                  const BYTE* b, size_t bLen,
+                                  const WCHAR* timestampUrl,
+                                  BOOL* timestampedOut,
+                                  size_t* outLen);
 
 // Check one, over the same two ranges. This is what makes the self-check mean
 // anything, and it is the first half of reading somebody else's signature.

@@ -1780,6 +1780,7 @@ void MainWindow_OnCommand(HWND hwnd, int id, HWND hwndCtl, UINT codeNotify) {
 
             PdfForm_SignWithCertificate(form, certificate, who, L"Signed with opennote");
             BOOL ok = PdfForm_Save(form, saveTo);
+            BOOL timestamped = PdfForm_WasTimestamped(form);
 
             PdfForm_Close(form);
             PdfSign_ReleaseCertificate(certificate);
@@ -1795,8 +1796,11 @@ void MainWindow_OnCommand(HWND hwnd, int id, HWND hwndCtl, UINT codeNotify) {
             Document* signedDoc = Document_CreateFromFile(saveTo);
             if (signedDoc) MainWindow_OpenDocument(signedDoc);
 
-            WCHAR message[320];
-            swprintf_s(message, 320, L"Signed by %s", who[0] ? who : L"the chosen certificate");
+            WCHAR message[380];
+            swprintf_s(message, 380, L"Signed by %s%s",
+                       who[0] ? who : L"the chosen certificate",
+                       timestamped ? L", timestamped"
+                                   : L" - no timestamp, so it proves what but not when");
             StatusBar_SetMessage(message);
             break;
         }

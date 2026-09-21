@@ -227,6 +227,120 @@ extern "C" BOOL PdfSign_VerifyDetachedNamed(const BYTE* signature, size_t signat
 }
 
 // ---------------------------------------------------------------------------
+// Timestamping
+//
+// RFC 3161: hand a hash to somebody else's server, get back a token saying
+// they saw it at a particular moment, and carry that token inside the
+// signature as an unauthenticated attribute. Windows fetches the token
+// (CryptRetrieveTimeStamp) and attaches it (CryptMsgControl), so again there
+// is no cryptography here -- only the plumbing and the honesty about what
+// happens when the server does not answer.
+// ---------------------------------------------------------------------------
+
+const WCHAR* PDFSIGN_DEFAULT_TIMESTAMP = L"http://timestamp.digicert.com";
+
+extern "C" BYTE* PdfSign_DetachedTimestamped(PdfCertificate certificate,
+                                             const BYTE* a, size_t aLen,
+                                             const BYTE* b, size_t bLen,
+                                             const WCHAR* timestampUrl,
+                                             BOOL* timestampedOut,
+                                             size_t* outLen) {
+    if (timestampedOut) *timestampedOut = FALSE;
+
+    BYTE* signature = PdfSign_Detached(certificate, a, aLen, b, bLen, outLen);
+    if (!signature || !timestampUrl || !timestampUrl[0]) return signature;
+
+    size_t signatureLen = outLen ? *outLen : 0;
+    if (signatureLen == 0) return signature;
+
+    // The token is over the signature itself -- what is being timestamped is
+    // "this signature existed", not "this document existed".
+    CRYPT_TIMESTAMP_CONTEXT* token = NULL;
+    CRYPT_TIMESTAMP_PARA para = {};
+    para.fRequestCerts = TRUE;
+
+    // The one thing that can hang here is somebody else's web server, so it
+    // is given a few seconds and no more.
+    if (!CryptRetrieveTimeStamp(timestampUrl, TIMESTAMP_NO_AUTH_RETRIEVAL, 8000,
+                                szOID_NIST_sha256, &para,
+                                signature, (DWORD)signatureLen,
+                                &token, NULL, NULL)) {
+        return signature;      // unstamped, and the caller is told
+    }
+
+    // Open the signature again so the token can be added to it.
+    HCRYPTMSG message = CryptMsgOpenToDecode(X509_ASN_ENCODING | PKCS_7_ASN_ENCODING,
+                                             0, 0, 0, NULL, NULL);
+    BYTE* stamped = NULL;
+
+    if (message) {
+        if (CryptMsgUpdate(message, signature, (DWORD)signatureLen, TRUE)) {
+            CRYPT_ATTRIBUTE attribute = {};
+            CRYPT_ATTR_BLOB blob = { token->cbEncoded, token->pbEncoded };
+
+            // RFC 3161's signature-time-stamp attribute. The SDK header does
+            // not name it, so it is written out: 1.2.840.113549.1.9.16.2.14.
+            attribute.pszObjId = (LPSTR)"1.2.840.113549.1.9.16.2.14";
+            attribute.cValue = 1;
+            attribute.rgValue = &blob;
+
+            BYTE* encodedAttribute = NULL;
+            DWORD encodedLen = 0;
+
+            if (CryptEncodeObject(X509_ASN_ENCODING | PKCS_7_ASN_ENCODING,
+                                  PKCS_ATTRIBUTE, &attribute, NULL, &encodedLen) &&
+                encodedLen > 0) {
+                encodedAttribute = (BYTE*)malloc(encodedLen);
+            }
+
+            if (encodedAttribute &&
+                CryptEncodeObject(X509_ASN_ENCODING | PKCS_7_ASN_ENCODING,
+                                  PKCS_ATTRIBUTE, &attribute, encodedAttribute,
+                                  &encodedLen)) {
+
+                CMSG_CTRL_ADD_SIGNER_UNAUTH_ATTR_PARA add = {};
+                add.cbSize = sizeof(add);
+                add.dwSignerIndex = 0;
+                add.blob.cbData = encodedLen;
+                add.blob.pbData = encodedAttribute;
+
+                if (CryptMsgControl(message, 0, CMSG_CTRL_ADD_SIGNER_UNAUTH_ATTR, &add)) {
+                    DWORD stampedLen = 0;
+
+                    if (CryptMsgGetParam(message, CMSG_ENCODED_MESSAGE, 0, NULL,
+                                         &stampedLen) && stampedLen > 0) {
+                        stamped = (BYTE*)malloc(stampedLen);
+
+                        if (stamped && CryptMsgGetParam(message, CMSG_ENCODED_MESSAGE, 0,
+                                                        stamped, &stampedLen)) {
+                            if (outLen) *outLen = stampedLen;
+                            if (timestampedOut) *timestampedOut = TRUE;
+                        } else {
+                            free(stamped);
+                            stamped = NULL;
+                        }
+                    }
+                }
+            }
+
+            free(encodedAttribute);
+        }
+        CryptMsgClose(message);
+    }
+
+    CryptMemFree(token);
+
+    if (stamped) {
+        free(signature);
+        return stamped;
+    }
+
+    // The token came back and could not be attached: better an untimestamped
+    // signature than a broken one.
+    return signature;
+}
+
+// ---------------------------------------------------------------------------
 // A certificate for a self-check
 // ---------------------------------------------------------------------------
 

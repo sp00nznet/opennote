@@ -168,8 +168,8 @@ See [ROADMAP.md](ROADMAP.md) for the ordering.
 | **Printing** | The pages that come out are the pages the view showed — the same engine measures both |
 | **PDF export** | Vector, through Windows' own PDF printer. The text stays text and the fonts are embedded |
 | **PDF reading** | A `.pdf` opens in a tab and shows its pages, fitted, zoomable, a page at a time |
-| **PDF forms** | Boxes to type in, boxes to tick and lists to choose from — filled in and written back as an *incremental update*, so your original bytes stay in the file |
-| **PDF signing** | Sign in a box with the mouse, or use one you drew before — kept in your notes database, transparent background, dragged where you want it. Or a certificate signature: a detached PKCS#7 over the byte range, from your own Windows certificate store |
+| **PDF forms** | Boxes to type in, boxes to tick, lists to choose from and radio groups — filled in and written back as an *incremental update*, so your original bytes stay in the file |
+| **PDF signing** | Sign in a box with the mouse, or use one you drew before — kept in your notes database, transparent background, dragged where you want it. Or a certificate signature: a detached PKCS#7 over the byte range, from your own Windows certificate store, timestamped so it outlives the certificate |
 | **Forms that fill themselves** | An answer given to one form is offered to the next one that asks the same question. Offered, never applied behind your back, and everything kept can be seen and forgotten |
 | **PDF checking** | Whether the bytes have changed since signing, and what the certificate behind it is worth, reported as two separate answers |
 

@@ -45,7 +45,12 @@ typedef enum {
     PDF_FIELD_OTHER,
     PDF_FIELD_TEXT,
     PDF_FIELD_CHECKBOX,
-    PDF_FIELD_CHOICE
+    PDF_FIELD_CHOICE,
+
+    // One question with several buttons: the answer lives on the field and
+    // the state lives on each button, so choosing one means writing to all of
+    // them. The options are what the buttons call themselves.
+    PDF_FIELD_RADIO
 } PdfFieldKind;
 
 PdfFieldKind PdfForm_FieldKind(const PdfForm* form, int index);
@@ -98,6 +103,16 @@ BOOL PdfForm_StampImageBytes(PdfForm* form, int pageIndex,
 // happens: the bytes have to exist before they can be signed.
 BOOL PdfForm_SignWithCertificate(PdfForm* form, PdfCertificate certificate,
                                  const WCHAR* name, const WCHAR* reason);
+
+// Where to ask for a timestamp. Empty means do not ask -- which is what a
+// self-check does, because a check that needs somebody else's web server is a
+// check that fails on a train. `OPENNOTE_TSA` overrides the default for a
+// machine that has its own authority to use.
+void PdfForm_SetTimestampUrl(PdfForm* form, const WCHAR* url);
+
+// Was the last signature timestamped? A signature without one stops being
+// worth anything the day its certificate expires.
+BOOL PdfForm_WasTimestamped(const PdfForm* form);
 
 // Write the filled form. `path` may be the file it came from -- the update is
 // appended -- or another name, in which case the original is copied first.

@@ -194,7 +194,8 @@ same question. **Remember these** keeps this form's answers for the next one.
 tick and lists to choose from. Double-click one to fill it in (a tick box turns over; a
 list tells you what it will take), then **Save As** writes the filled copy — the original file is not changed, and the
 copy is the original with the answers appended, which is how PDF is meant to be edited.
-Buttons that run something when they are clicked are listed but not filled.
+A radio group is one row, not one per button: filling it in takes one of the options it
+offers. Buttons that run something when they are clicked are listed but not filled.
 
 The status bar shows the page count and the zoom.
 

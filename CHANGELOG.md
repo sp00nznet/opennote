@@ -8,6 +8,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **Radio groups** are one question with several buttons, and are read and written as
+  one: the answer goes on the field and the state on every button, including the ones
+  being turned off. A value the group has no button for is refused rather than written,
+  because that leaves a question answered in the file and blank on the page.
+- **Signatures are timestamped** — RFC 3161, from the built-in authority or whichever one
+  `OPENNOTE_TSA` names. A signature without one stops proving anything the day its
+  certificate expires. If the authority cannot be reached the signature is still made,
+  and both the status bar and `--pdf-sign` say what is missing.
+- **`--timestamp-check`** answers "is timestamping working from this machine?" — it makes
+  a throwaway certificate, signs with it, asks the authority for a token and reports
+  whether the result still verifies. Nothing touches the real certificate store.
 - **A signature pad.** **File → Sign PDF…** opens a box to sign in with the mouse if
   there is nothing kept yet, and offers what was kept if there is. The drawing is
   rendered with Direct2D, so the diagonals a signature is made of come out smooth, and

@@ -242,6 +242,7 @@ static const WCHAR* FieldKindName(PdfFieldKind kind) {
         case PDF_FIELD_TEXT:     return L"text";
         case PDF_FIELD_CHECKBOX: return L"tick";
         case PDF_FIELD_CHOICE:   return L"list";
+        case PDF_FIELD_RADIO:    return L"choice";
         default:                 return L"other";
     }
 }
@@ -427,6 +428,9 @@ static int RunPdfSign(int argc, WCHAR** argv) {
     }
 
     wprintf(L"%s -> %s, signed by %s\n", argv[2], argv[3], who);
+    wprintf(L"  timestamp: %s\n", PdfForm_WasTimestamped(form)
+            ? L"yes -- it proves when as well as what"
+            : L"no -- it proves what, not when");
     return 0;
 }
 
@@ -470,6 +474,54 @@ static int RunPdfVerify(int argc, WCHAR** argv) {
     wprintf(L"  note:     a signature says the bytes have not changed; who is "
             L"behind the certificate is what the trust line is about\n");
     return report.intact ? 0 : 1;
+}
+
+// Is timestamping working from this machine?
+//
+// Makes a certificate for the occasion, signs a few bytes with it, and asks
+// the authority for a token -- which is the one part of signing that depends
+// on somebody else's server being up and this machine being allowed to reach
+// it. Nothing touches the real certificate store, and the throwaway key is
+// deleted afterwards.
+static int RunTimestampCheck(int argc, WCHAR** argv) {
+    const WCHAR* url = argc >= 3 ? argv[2] : PDFSIGN_DEFAULT_TIMESTAMP;
+
+    PdfCertificate certificate = PdfSign_TemporaryCertificate();
+    if (!certificate) {
+        wprintf(L"FAILED: a certificate for the check could not be made\n");
+        return 1;
+    }
+
+    const BYTE bytes[] = "opennote timestamp check";
+
+    size_t plainLen = 0;
+    BYTE* plain = PdfSign_Detached(certificate, bytes, sizeof(bytes) - 1, NULL, 0, &plainLen);
+
+    BOOL stamped = FALSE;
+    size_t stampedLen = 0;
+    BYTE* withToken = PdfSign_DetachedTimestamped(certificate, bytes, sizeof(bytes) - 1,
+                                                  NULL, 0, url, &stamped, &stampedLen);
+
+    wprintf(L"authority: %s\n", url);
+    wprintf(L"signature: %zu bytes\n", plainLen);
+
+    if (stamped) {
+        wprintf(L"timestamp: yes -- the token added %zu bytes\n", stampedLen - plainLen);
+    } else {
+        wprintf(L"timestamp: NO -- the authority could not be reached, or refused\n");
+        wprintf(L"           signing still works; what is missing is proof of when\n");
+    }
+
+    // A timestamped signature still has to verify, or the token has broken it.
+    BOOL verifies = withToken && PdfSign_VerifyDetached(withToken, stampedLen,
+                                                        bytes, sizeof(bytes) - 1, NULL, 0);
+    wprintf(L"verifies:  %s\n", verifies ? L"yes" : L"NO");
+
+    free(plain);
+    free(withToken);
+    PdfSign_DiscardTemporary(certificate);
+
+    return (stamped && verifies) ? 0 : 1;
 }
 
 // Does `b` contain the same characters as `a`, ignoring whitespace and the
@@ -832,7 +884,8 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPWSTR lpCmdLi
                       wcsstr(lpCmdLine, L"--pdf-fill") ||
                       wcsstr(lpCmdLine, L"--pdf-stamp") ||
                       wcsstr(lpCmdLine, L"--pdf-sign") ||
-                      wcsstr(lpCmdLine, L"--pdf-verify"))) {
+                      wcsstr(lpCmdLine, L"--pdf-verify") ||
+                      wcsstr(lpCmdLine, L"--timestamp-check"))) {
         BOOL attached = FALSE;
         FILE* out = NULL;
         if (GetStdHandle(STD_OUTPUT_HANDLE) == NULL) {
@@ -852,6 +905,7 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPWSTR lpCmdLi
             else if (wcsstr(lpCmdLine, L"--pdf-fill"))      rc = RunPdfFill(argc, argv);
             else if (wcsstr(lpCmdLine, L"--pdf-stamp"))     rc = RunPdfStamp(argc, argv);
             else if (wcsstr(lpCmdLine, L"--pdf-verify"))    rc = RunPdfVerify(argc, argv);
+            else if (wcsstr(lpCmdLine, L"--timestamp-check")) rc = RunTimestampCheck(argc, argv);
             else if (wcsstr(lpCmdLine, L"--pdf-sign"))      rc = RunPdfSign(argc, argv);
             else                                            rc = RunDocxToRtf(argc, argv);
             LocalFree(argv);

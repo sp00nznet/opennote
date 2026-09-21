@@ -264,10 +264,20 @@ the free tools for it are adware or a web upload.
       the form gave it and only changes which one is showing: replacing them with a tick
       of our own is how a box ends up ticked in the file and blank on the page.
 
+- [x] **Radio groups**, which are one question rather than several: the answer lives on
+      the field and only the state lives on each button, so choosing one means writing to
+      all of them.
+- [x] **Timestamping**, so a signature outlives its certificate. RFC 3161, from the
+      built-in authority or whichever one `OPENNOTE_TSA` names, with the signature still
+      made -- and the missing proof of *when* said out loud -- if the authority cannot be
+      reached.
+
 ### After v0.11
 
-- [ ] Radio groups, where the value lives on the parent and the state on each kid.
-- [ ] Timestamping a signature, so it outlives the certificate's expiry date.
+- [ ] Reading the timestamp back, so "signed on" can be shown beside "signed by".
+- [ ] Forms whose fields are drawn rather than declared -- the scanned kind, with lines
+      to write on and no AcroForm at all. Typing on top of those is a different feature
+      and a bigger one.
 
 Everything above uses what Windows already ships. Nothing in it needs a PDF library.
 
