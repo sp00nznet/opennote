@@ -82,6 +82,12 @@ int PdfForm_PageCount(PdfForm* form);
 BOOL PdfForm_StampImage(PdfForm* form, int pageIndex, const WCHAR* imagePath,
                         float x, float y, float width, float height);
 
+// The same, for a picture that is already in hand -- one drawn a moment ago,
+// or one out of the signature store, neither of which is a file on disk.
+BOOL PdfForm_StampImageBytes(PdfForm* form, int pageIndex,
+                             const BYTE* bytes, size_t len,
+                             float x, float y, float width, float height);
+
 // Sign the document with a certificate, cryptographically: a detached PKCS#7
 // over the whole file except the hole the signature sits in. What it proves is
 // that the bytes have not changed since the holder of that key saw them --

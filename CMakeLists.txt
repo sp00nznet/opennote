@@ -58,6 +58,7 @@ set(SUPERNOTE_SOURCES
     src/layout/layoutimage.cpp
     src/ui/pageview.cpp
     src/ui/richole.c
+    src/ui/signpad.cpp
     src/core/inflate.c
     src/core/docx.c
     src/pdf/pdfread.cpp
@@ -66,6 +67,7 @@ set(SUPERNOTE_SOURCES
     src/pdf/pdfview.cpp
     src/db/database.c
     src/db/notes_repo.c
+    src/db/fill_repo.c
     src/db/links_repo.c
     src/sync/oauth.c
     src/sync/crypto.c

@@ -1731,6 +1731,10 @@ void MainWindow_OnCommand(HWND hwnd, int id, HWND hwndCtl, UINT codeNotify) {
             }
             break;
 
+        case IDM_SETTINGS_ANSWERS:
+            Dialogs_RememberedAnswers(hwnd);
+            break;
+
         // Settings menu
         case IDM_SETTINGS_DEFAULTS:
             Dialogs_Defaults(hwnd);
@@ -1798,8 +1802,10 @@ void MainWindow_OnCommand(HWND hwnd, int id, HWND hwndCtl, UINT codeNotify) {
         }
 
         case IDM_FILE_SIGN_PDF: {
-            // A signature is a picture of one: the file says what it looks
-            // like, and the next drag on the page says where it goes.
+            // A signature is a picture of one. If there is a picture kept
+            // already it is offered; if there is not, the pad opens and one is
+            // drawn -- which is the difference between "sign this PDF" meaning
+            // "find a scanner" and meaning "sign it".
             Tab* tab = App_GetActiveTab();
             if (!tab || !tab->hPdfView) {
                 MessageBoxW(hwnd,
@@ -1809,26 +1815,15 @@ void MainWindow_OnCommand(HWND hwnd, int id, HWND hwndCtl, UINT codeNotify) {
                 break;
             }
 
-            WCHAR path[MAX_PATH] = {0};
-            static const WCHAR filter[] =
-                L"Images (*.png;*.jpg;*.jpeg;*.bmp;*.gif;*.tif;*.tiff)\0"
-                L"*.png;*.jpg;*.jpeg;*.bmp;*.gif;*.tif;*.tiff\0"
-                L"All Files (*.*)\0*.*\0";
+            size_t len = 0;
+            BYTE* png = Dialogs_ChooseSignature(hwnd, &len);
+            if (!png) break;
 
-            OPENFILENAMEW ofn = {
-                .lStructSize = sizeof(ofn),
-                .hwndOwner = hwnd,
-                .lpstrFilter = filter,
-                .nFilterIndex = 1,
-                .lpstrFile = path,
-                .nMaxFile = MAX_PATH,
-                .lpstrTitle = L"Choose a picture of your signature",
-                .Flags = OFN_FILEMUSTEXIST | OFN_HIDEREADONLY | OFN_NOCHANGEDIR
-            };
-
-            if (GetOpenFileNameW(&ofn)) PdfView_BeginStamp(tab->hPdfView, path);
+            PdfView_BeginStamp(tab->hPdfView, png, len);
+            free(png);
             break;
         }
+
 
         case IDM_FILE_FILL_FORM: {
             // The form belongs to the file rather than to anything drawn, so

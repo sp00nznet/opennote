@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **A signature pad.** **File → Sign PDF…** opens a box to sign in with the mouse if
+  there is nothing kept yet, and offers what was kept if there is. The drawing is
+  rendered with Direct2D, so the diagonals a signature is made of come out smooth, and
+  saved as a PNG with a transparent background — a signature on a white rectangle covers
+  the line it is meant to sit on.
+- **Signatures are kept** in the notes database, listed, reused and deleted from the same
+  dialog. Drawn once, used on every form after that.
+- **Forms fill themselves in.** An answer typed into one form can be remembered and
+  offered to the next form that asks the same question — matched on the field's name with
+  its case and punctuation removed, so "Full Name", "full_name" and "FullName" are one
+  question. It is offered, never applied silently, and **Settings → Remembered Answers**
+  shows everything kept with a way to forget one or all of it.
+
 ## [0.11.0] - 2026-09-21
 
 **PDF, the other direction.** opennote has written PDFs since v0.8 and could not read one

@@ -223,11 +223,34 @@
 // The comments dialog
 #define IDC_STATIC_SEARCH        1159
 
+// Drawing a signature
+#define IDD_SIGNPAD              1180
+#define IDC_SIGNPAD_CANVAS       1181
+#define IDC_SIGNPAD_CLEAR        1182
+#define IDC_SIGNPAD_REMEMBER     1183
+#define IDC_SIGNPAD_NAME         1184
+
+// Choosing one that was drawn before
+#define IDD_SIGNATURES           1190
+#define IDC_SIGNATURES_LIST      1191
+#define IDC_SIGNATURES_DRAW      1192
+#define IDC_SIGNATURES_FILE      1193
+#define IDC_SIGNATURES_DELETE    1194
+
+// What this machine remembers about the person using it
+#define IDD_ANSWERS              1200
+#define IDC_ANSWERS_LIST         1201
+#define IDC_ANSWERS_FORGET       1202
+#define IDC_ANSWERS_FORGET_ALL   1203
+#define IDM_SETTINGS_ANSWERS     7430
+
 // Filling in a PDF form
 #define IDD_PDF_FORM             1170
 #define IDC_PDF_FORM_LIST        1171
 #define IDC_PDF_FORM_EDIT        1172
 #define IDC_PDF_FORM_SAVE        1173
+#define IDC_PDF_FORM_RECALL      1174
+#define IDC_PDF_FORM_REMEMBER     1175
 #define IDM_FILE_FILL_FORM       7420
 #define IDM_FILE_SIGN_PDF        7421
 #define IDM_FILE_SIGN_CERT       7422

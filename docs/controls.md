@@ -172,8 +172,10 @@ so rather than half-working.
 | `Ctrl` + wheel | Zoom |
 | `Ctrl+0` | Fit the page across the window, which is how it opens |
 
-**File → Sign PDF…** puts a picture of your signature on a page: choose the image, then
-drag a box where it goes (or click to drop one at a sensible size). It is written to a
+**File → Sign PDF…** puts your signature on a page. The first time, it opens a box to
+sign in with the mouse — tick "keep it for next time" and it is saved, so every form
+after that is two clicks. Then drag a box where the signature goes (or click to drop one
+at a sensible size). It is written to a
 copy, with the original bytes untouched underneath. This is a *visible* signature — what
 it proves is what ink on paper proves, and no more.
 
@@ -182,6 +184,11 @@ bytes with a certificate you hold the private key for, so that a change to the d
 afterwards can be detected. A signed PDF says so in the status bar when it opens — and
 says whether its bytes still match. That is all it says: whether the certificate is one
 anybody should trust is a separate question, and opennote does not answer it.
+
+**Use answers**, in the fill dialog, puts back what you told a previous form — matched on
+the field's name with case and punctuation ignored, so `Full Name` and `full_name` are the
+same question. **Remember these** keeps this form's answers for the next one.
+**Settings → Remembered Answers** shows everything kept, and forgets it.
 
 **File → Fill PDF Form…** lists the fields the PDF carries — boxes to type in, boxes to
 tick and lists to choose from. Double-click one to fill it in (a tick box turns over; a

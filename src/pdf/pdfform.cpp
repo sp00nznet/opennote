@@ -1434,41 +1434,20 @@ extern "C" BOOL PdfForm_SignWithCertificate(PdfForm* form, PdfCertificate certif
     return TRUE;
 }
 
-extern "C" BOOL PdfForm_StampImage(PdfForm* form, int pageIndex, const WCHAR* imagePath,
-                                   float x, float y, float width, float height) {
-    if (!form || !imagePath || width <= 0.0f || height <= 0.0f) return FALSE;
+extern "C" BOOL PdfForm_StampImageBytes(PdfForm* form, int pageIndex,
+                                        const BYTE* encoded, size_t len,
+                                        float x, float y, float width, float height) {
+    if (!form || !encoded || len == 0 || width <= 0.0f || height <= 0.0f) return FALSE;
     if (form->stampCount >= MAX_STAMPS) return FALSE;
 
     ReadPages(form);
     if (pageIndex < 0 || pageIndex >= form->pageCount) return FALSE;
 
-    // The picture, as pixels. WIC reads whatever the file is; what a PDF wants
-    // is three bytes a pixel with the top row first, which a DIB is upside
-    // down from.
-    HANDLE file = CreateFileW(imagePath, GENERIC_READ, FILE_SHARE_READ, NULL,
-                              OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
-    if (file == INVALID_HANDLE_VALUE) return FALSE;
-
-    LARGE_INTEGER size = {};
-    if (!GetFileSizeEx(file, &size) || size.QuadPart <= 0 ||
-        size.QuadPart > 64 * 1024 * 1024) {
-        CloseHandle(file);
-        return FALSE;
-    }
-
-    BYTE* encoded = (BYTE*)malloc((size_t)size.QuadPart);
-    DWORD read = 0;
-    if (!encoded || !ReadFile(file, encoded, (DWORD)size.QuadPart, &read, NULL) ||
-        read != (DWORD)size.QuadPart) {
-        free(encoded);
-        CloseHandle(file);
-        return FALSE;
-    }
-    CloseHandle(file);
-
+    // WIC reads it or it is not a picture. The transparency is kept: a
+    // signature is mostly transparent, and dropping that paints a box over
+    // whatever it was signed on top of.
     int imageWidth = 0, imageHeight = 0;
-    BYTE* bgra = ImageDib_DecodeAlpha(encoded, (size_t)read, &imageWidth, &imageHeight);
-    free(encoded);
+    BYTE* bgra = ImageDib_DecodeAlpha(encoded, len, &imageWidth, &imageHeight);
 
     if (!bgra || imageWidth <= 0 || imageHeight <= 0) {
         free(bgra);
@@ -1516,6 +1495,41 @@ extern "C" BOOL PdfForm_StampImage(PdfForm* form, int pageIndex, const WCHAR* im
     stamp->width = imageWidth;
     stamp->height = imageHeight;
     return TRUE;
+}
+
+// The same thing, for a picture that is a file. Reading it is the only
+// difference, so that is all this does.
+extern "C" BOOL PdfForm_StampImage(PdfForm* form, int pageIndex, const WCHAR* imagePath,
+                                   float x, float y, float width, float height) {
+    if (!imagePath || !imagePath[0]) return FALSE;
+
+    HANDLE file = CreateFileW(imagePath, GENERIC_READ, FILE_SHARE_READ, NULL,
+                              OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+    if (file == INVALID_HANDLE_VALUE) return FALSE;
+
+    LARGE_INTEGER size = {};
+    if (!GetFileSizeEx(file, &size) || size.QuadPart <= 0 ||
+        size.QuadPart > 64 * 1024 * 1024) {
+        CloseHandle(file);
+        return FALSE;
+    }
+
+    BYTE* bytes = (BYTE*)malloc((size_t)size.QuadPart);
+    DWORD read = 0;
+
+    BOOL ok = bytes && ReadFile(file, bytes, (DWORD)size.QuadPart, &read, NULL) &&
+              read == (DWORD)size.QuadPart;
+    CloseHandle(file);
+
+    if (!ok) {
+        free(bytes);
+        return FALSE;
+    }
+
+    BOOL stamped = PdfForm_StampImageBytes(form, pageIndex, bytes, (size_t)read,
+                                           x, y, width, height);
+    free(bytes);
+    return stamped;
 }
 
 // ---------------------------------------------------------------------------

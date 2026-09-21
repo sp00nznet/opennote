@@ -148,6 +148,7 @@ HMENU MenuBar_Create(void) {
     // Settings menu
     HMENU hSettingsMenu = CreatePopupMenu();
     AppendMenuW(hSettingsMenu, MF_STRING, IDM_SETTINGS_DEFAULTS, L"&Default Settings...");
+    AppendMenuW(hSettingsMenu, MF_STRING, IDM_SETTINGS_ANSWERS, L"&Remembered Answers...");
     AppendMenuW(hMenu, MF_POPUP, (UINT_PTR)hSettingsMenu, L"&Settings");
 
     // Help menu

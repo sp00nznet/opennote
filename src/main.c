@@ -8,6 +8,7 @@
 #include "pdf/pdfform.h"
 #include "pdf/pdfview.h"
 #include "pdf/pdfsign.h"
+#include "db/fill_repo.h"
 
 // Twips per DIP. Mirrors the engine's constant, which lives in a C++-only
 // header because DirectWrite has no C binding.
@@ -47,6 +48,7 @@ static int RunSelfTest(void) {
         { "pdfform",PdfForm_SelfTest},
         { "pdfview",PdfView_SelfTest},
         { "pdfsign",PdfSign_SelfTest},
+        { "fill",   Fill_SelfTest   },
     };
 
     int failed = 0;

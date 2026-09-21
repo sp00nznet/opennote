@@ -64,9 +64,11 @@ struct PdfViewState {
     CachedPage cache[CACHE_SIZE];
     UINT64     clock;
 
-    // Placing a picture: the file to put down, and the box being dragged for
-    // it, in view coordinates.
-    WCHAR stampPath[MAX_PATH];
+    // Placing a picture: the one to put down -- held as bytes, because it may
+    // have been drawn a moment ago rather than opened from disk -- and the box
+    // being dragged for it, in view coordinates.
+    BYTE* stampPng;
+    size_t stampLen;
     BOOL  placing;
     BOOL  dragging;
     float dragFrom[2];
@@ -447,6 +449,7 @@ static LRESULT CALLBACK PdfViewProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
 
         case WM_DESTROY:
             if (st) {
+                free(st->stampPng);
                 DiscardTarget(st);
                 if (st->d2d) st->d2d->Release();
                 Pdf_Close(st->pdf);
@@ -591,6 +594,8 @@ static BOOL PageAt(HWND hwnd, PdfViewState* st, float x, float y,
 static void FinishStamp(HWND hwnd, PdfViewState* st) {
     st->dragging = FALSE;
     st->placing = FALSE;
+
+    if (!st->stampPng || st->stampLen == 0) return;
     InvalidateRect(hwnd, NULL, FALSE);
 
     int page = 0;
@@ -622,7 +627,8 @@ static void FinishStamp(HWND hwnd, PdfViewState* st) {
         return;
     }
 
-    if (!PdfForm_StampImage(form, page, st->stampPath, x, y, width, height)) {
+    if (!PdfForm_StampImageBytes(form, page, st->stampPng, st->stampLen,
+                                 x, y, width, height)) {
         PdfForm_Close(form);
         MessageBoxW(GetAncestor(hwnd, GA_ROOT),
                     L"That picture could not be placed on the page.",
@@ -651,13 +657,21 @@ static void FinishStamp(HWND hwnd, PdfViewState* st) {
     if (signedDoc) MainWindow_OpenDocument(signedDoc);
 }
 
-extern "C" BOOL PdfView_BeginStamp(HWND hPdfView, const WCHAR* imagePath) {
-    if (!hPdfView || !IsWindow(hPdfView) || !imagePath || !imagePath[0]) return FALSE;
+extern "C" BOOL PdfView_BeginStamp(HWND hPdfView, const BYTE* png, size_t len) {
+    if (!hPdfView || !IsWindow(hPdfView) || !png || len == 0) return FALSE;
 
     PdfViewState* st = (PdfViewState*)GetWindowLongPtrW(hPdfView, GWLP_USERDATA);
     if (!st) return FALSE;
 
-    wcsncpy_s(st->stampPath, MAX_PATH, imagePath, _TRUNCATE);
+    // The view takes a copy: the caller's bytes may be freed the moment this
+    // returns, and the drag that uses them happens later.
+    BYTE* copy = (BYTE*)malloc(len);
+    if (!copy) return FALSE;
+    memcpy(copy, png, len);
+
+    free(st->stampPng);
+    st->stampPng = copy;
+    st->stampLen = len;
     st->placing = TRUE;
     st->dragging = FALSE;
 

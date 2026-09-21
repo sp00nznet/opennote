@@ -38,6 +38,26 @@ static const char* SCHEMA_SQL =
     "    FOREIGN KEY (tag_id) REFERENCES tags(id) ON DELETE CASCADE"
     ");"
 
+    // A signature somebody drew, kept so they never have to draw it twice.
+    // The bytes are a PNG with a transparent background, which is what goes
+    // onto a page.
+    "CREATE TABLE IF NOT EXISTS signatures ("
+    "    id          INTEGER PRIMARY KEY AUTOINCREMENT,"
+    "    name        TEXT NOT NULL DEFAULT 'Signature',"
+    "    png         BLOB NOT NULL,"
+    "    created_at  TEXT DEFAULT (datetime('now'))"
+    ");"
+
+    // What somebody has already typed into a form, by the name of the field
+    // they typed it into -- so the next form asking for a name, an address or
+    // a date of birth can offer what the last one was told.
+    "CREATE TABLE IF NOT EXISTS form_answers ("
+    "    field       TEXT PRIMARY KEY,"   // the question, with case and punctuation out
+    "    label       TEXT,"               // ...and how it was last written
+    "    value       TEXT NOT NULL,"
+    "    updated_at  TEXT DEFAULT (datetime('now'))"
+    ");"
+
     "CREATE TABLE IF NOT EXISTS settings ("
     "    key     TEXT PRIMARY KEY,"
     "    value   TEXT"

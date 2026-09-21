@@ -21,7 +21,7 @@ HWND PdfView_Create(HWND hParent, const WCHAR* path);
 // Put a picture on a page: the next drag across the view says where it goes,
 // and the file is written when it lands. This is a visible signature -- a
 // picture of one -- rather than a cryptographic one.
-BOOL PdfView_BeginStamp(HWND hPdfView, const WCHAR* imagePath);
+BOOL PdfView_BeginStamp(HWND hPdfView, const BYTE* png, size_t len);
 
 // Which file this view is showing, for the commands that work on the file
 // rather than on what is drawn -- filling in its form, for one.

@@ -28,6 +28,12 @@ BYTE* ImageDib_Decode(const BYTE* bytes, size_t len,
 BYTE* ImageDib_DecodeAlpha(const BYTE* bytes, size_t len,
                            int* widthOut, int* heightOut);
 
+// Encode 32-bit BGRA pixels, top row first, as a PNG. WIC does the encoding,
+// the same way it does the decoding above -- it has always been able to, and
+// this is the first thing here that had something of its own to write out: a
+// signature somebody drew.
+BYTE* ImageDib_EncodePng(const BYTE* bgra, int width, int height, size_t* lenOut);
+
 // ...and wrap that DIB in a Windows metafile, which is the only picture
 // RichEdit's RTF reader will actually take. Caller frees.
 BYTE* ImageDib_ToMetafile(const BYTE* pixels, const BITMAPINFOHEADER* header,

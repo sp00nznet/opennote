@@ -1,5 +1,7 @@
 #include "supernote.h"
 #include "pdf/pdfform.h"
+#include "db/fill_repo.h"
+#include "ui/signpad.h"
 #include "res/resource.h"
 
 // About dialog
@@ -1410,6 +1412,347 @@ BOOL Dialogs_Comments(HWND hParent, DocModel* doc) {
 }
 
 // ---------------------------------------------------------------------------
+// What this machine remembers
+//
+// The answers are personal -- a name, an address, a date of birth -- so there
+// has to be somewhere to see them and take them away. It is one list and two
+// buttons, and it is the reason the feature is defensible.
+// ---------------------------------------------------------------------------
+
+typedef struct {
+    RememberedAnswer items[MAX_ANSWERS];
+    int              count;
+} AnswersData;
+
+static void AnswersFill(HWND hwnd, AnswersData* data) {
+    HWND list = GetDlgItem(hwnd, IDC_ANSWERS_LIST);
+    ListView_DeleteAllItems(list);
+
+    data->count = Fill_ListAnswers(data->items, MAX_ANSWERS);
+
+    for (int i = 0; i < data->count; i++) {
+        LVITEMW item = {0};
+        item.mask = LVIF_TEXT | LVIF_PARAM;
+        item.iItem = i;
+        item.lParam = i;
+        item.pszText = data->items[i].field;
+
+        int at = ListView_InsertItem(list, &item);
+        if (at < 0) continue;
+
+        ListView_SetItemText(list, at, 1, data->items[i].value);
+
+        WCHAR day[16] = L"";
+        wcsncpy_s(day, 16, data->items[i].updatedAt, 10);
+        ListView_SetItemText(list, at, 2, day);
+    }
+
+    BOOL any = data->count > 0;
+    EnableWindow(GetDlgItem(hwnd, IDC_ANSWERS_FORGET), any);
+    EnableWindow(GetDlgItem(hwnd, IDC_ANSWERS_FORGET_ALL), any);
+}
+
+static INT_PTR CALLBACK AnswersProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
+    AnswersData* data = (AnswersData*)GetWindowLongPtrW(hwnd, GWLP_USERDATA);
+
+    switch (msg) {
+        case WM_INITDIALOG: {
+            data = (AnswersData*)lParam;
+            SetWindowLongPtrW(hwnd, GWLP_USERDATA, (LONG_PTR)data);
+
+            HWND list = GetDlgItem(hwnd, IDC_ANSWERS_LIST);
+            ListView_SetExtendedListViewStyle(list, LVS_EX_FULLROWSELECT);
+
+            LVCOLUMNW column = {0};
+            column.mask = LVCF_TEXT | LVCF_WIDTH;
+
+            column.cx = 130;
+            column.pszText = (WCHAR*)L"Question";
+            ListView_InsertColumn(list, 0, &column);
+
+            column.cx = 120;
+            column.pszText = (WCHAR*)L"Answer";
+            ListView_InsertColumn(list, 1, &column);
+
+            column.cx = 62;
+            column.pszText = (WCHAR*)L"Last used";
+            ListView_InsertColumn(list, 2, &column);
+
+            AnswersFill(hwnd, data);
+            return TRUE;
+        }
+
+        case WM_COMMAND:
+            switch (LOWORD(wParam)) {
+                case IDC_ANSWERS_FORGET: {
+                    HWND list = GetDlgItem(hwnd, IDC_ANSWERS_LIST);
+                    int selected = ListView_GetNextItem(list, -1, LVNI_SELECTED);
+                    if (selected < 0 || selected >= data->count) return TRUE;
+
+                    Fill_ForgetAnswer(data->items[selected].field);
+                    AnswersFill(hwnd, data);
+                    return TRUE;
+                }
+
+                case IDC_ANSWERS_FORGET_ALL:
+                    if (MessageBoxW(hwnd,
+                            L"Forget every answer this machine has kept?\n\n"
+                            L"Forms will stop filling themselves in until you tell it "
+                            L"something again.",
+                            APP_NAME, MB_YESNO | MB_ICONQUESTION) != IDYES) {
+                        return TRUE;
+                    }
+
+                    Fill_ForgetAllAnswers();
+                    AnswersFill(hwnd, data);
+                    return TRUE;
+
+                case IDCANCEL:
+                case IDOK:
+                    EndDialog(hwnd, IDOK);
+                    return TRUE;
+            }
+            break;
+
+        case WM_CLOSE:
+            EndDialog(hwnd, IDOK);
+            return TRUE;
+    }
+
+    return FALSE;
+}
+
+void Dialogs_RememberedAnswers(HWND hParent) {
+    AnswersData data = {0};
+    DialogBoxParamW(g_app->hInstance, MAKEINTRESOURCEW(IDD_ANSWERS),
+                    hParent, AnswersProc, (LPARAM)&data);
+}
+
+// ---------------------------------------------------------------------------
+// Signatures
+//
+// Drawn once and kept, because a signature is the same every time and asking
+// somebody to find a scanner is how "sign this PDF" turns into an afternoon.
+// What is kept is a PNG with a transparent background, in the same SQLite
+// file as the notes -- it never leaves the machine.
+// ---------------------------------------------------------------------------
+
+typedef struct {
+    SignatureInfo items[MAX_SIGNATURES];
+    int           count;
+    BYTE*         chosen;
+    size_t        chosenLen;
+} SignatureChooser;
+
+static void SignaturesFill(HWND hwnd, SignatureChooser* data) {
+    HWND list = GetDlgItem(hwnd, IDC_SIGNATURES_LIST);
+    ListView_DeleteAllItems(list);
+
+    data->count = Fill_ListSignatures(data->items, MAX_SIGNATURES);
+
+    for (int i = 0; i < data->count; i++) {
+        LVITEMW item = {0};
+        item.mask = LVIF_TEXT | LVIF_PARAM;
+        item.iItem = i;
+        item.lParam = i;
+        item.pszText = data->items[i].name;
+
+        int at = ListView_InsertItem(list, &item);
+        if (at < 0) continue;
+
+        WCHAR day[16] = L"";
+        wcsncpy_s(day, 16, data->items[i].createdAt, 10);
+        ListView_SetItemText(list, at, 1, day);
+    }
+
+    if (data->count > 0) {
+        ListView_SetItemState(list, 0, LVIS_SELECTED | LVIS_FOCUSED,
+                              LVIS_SELECTED | LVIS_FOCUSED);
+    }
+
+    EnableWindow(GetDlgItem(hwnd, IDOK), data->count > 0);
+    EnableWindow(GetDlgItem(hwnd, IDC_SIGNATURES_DELETE), data->count > 0);
+}
+
+// A picture from disk, for somebody who already has a scan of theirs.
+static BYTE* ReadPictureFile(HWND hwnd, size_t* lenOut) {
+    WCHAR path[MAX_PATH] = {0};
+    static const WCHAR filter[] =
+        L"Images (*.png;*.jpg;*.jpeg;*.bmp;*.gif;*.tif;*.tiff)\0"
+        L"*.png;*.jpg;*.jpeg;*.bmp;*.gif;*.tif;*.tiff\0"
+        L"All Files (*.*)\0*.*\0";
+
+    OPENFILENAMEW ofn = {
+        .lStructSize = sizeof(ofn),
+        .hwndOwner = hwnd,
+        .lpstrFilter = filter,
+        .nFilterIndex = 1,
+        .lpstrFile = path,
+        .nMaxFile = MAX_PATH,
+        .lpstrTitle = L"Choose a picture of your signature",
+        .Flags = OFN_FILEMUSTEXIST | OFN_HIDEREADONLY | OFN_NOCHANGEDIR
+    };
+
+    if (!GetOpenFileNameW(&ofn)) return NULL;
+
+    HANDLE file = CreateFileW(path, GENERIC_READ, FILE_SHARE_READ, NULL,
+                              OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+    if (file == INVALID_HANDLE_VALUE) return NULL;
+
+    LARGE_INTEGER size = {0};
+    if (!GetFileSizeEx(file, &size) || size.QuadPart <= 0 ||
+        size.QuadPart > 8 * 1024 * 1024) {
+        CloseHandle(file);
+        return NULL;
+    }
+
+    BYTE* bytes = (BYTE*)malloc((size_t)size.QuadPart);
+    DWORD read = 0;
+    BOOL ok = bytes && ReadFile(file, bytes, (DWORD)size.QuadPart, &read, NULL) &&
+              read == (DWORD)size.QuadPart;
+    CloseHandle(file);
+
+    if (!ok) {
+        free(bytes);
+        return NULL;
+    }
+
+    if (lenOut) *lenOut = (size_t)read;
+    return bytes;
+}
+
+static INT_PTR CALLBACK SignaturesProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
+    SignatureChooser* data = (SignatureChooser*)GetWindowLongPtrW(hwnd, GWLP_USERDATA);
+
+    switch (msg) {
+        case WM_INITDIALOG: {
+            data = (SignatureChooser*)lParam;
+            SetWindowLongPtrW(hwnd, GWLP_USERDATA, (LONG_PTR)data);
+
+            HWND list = GetDlgItem(hwnd, IDC_SIGNATURES_LIST);
+            ListView_SetExtendedListViewStyle(list, LVS_EX_FULLROWSELECT);
+
+            LVCOLUMNW column = {0};
+            column.mask = LVCF_TEXT | LVCF_WIDTH;
+
+            column.cx = 180;
+            column.pszText = (WCHAR*)L"Signature";
+            ListView_InsertColumn(list, 0, &column);
+
+            column.cx = 88;
+            column.pszText = (WCHAR*)L"Drawn";
+            ListView_InsertColumn(list, 1, &column);
+
+            SignaturesFill(hwnd, data);
+            return TRUE;
+        }
+
+        case WM_NOTIFY:
+            if (((LPNMHDR)lParam)->idFrom == IDC_SIGNATURES_LIST &&
+                ((LPNMHDR)lParam)->code == NM_DBLCLK) {
+                SendMessageW(hwnd, WM_COMMAND, IDOK, 0);
+                return TRUE;
+            }
+            break;
+
+        case WM_COMMAND:
+            switch (LOWORD(wParam)) {
+                case IDC_SIGNATURES_DRAW: {
+                    BOOL keep = FALSE;
+                    WCHAR name[64] = L"";
+                    size_t len = 0;
+
+                    BYTE* png = SignPad_Draw(hwnd, &len, &keep, name, 64);
+                    if (!png) return TRUE;
+
+                    if (keep) Fill_SaveSignature(name, png, len);
+
+                    data->chosen = png;
+                    data->chosenLen = len;
+                    EndDialog(hwnd, IDOK);
+                    return TRUE;
+                }
+
+                case IDC_SIGNATURES_FILE: {
+                    size_t len = 0;
+                    BYTE* png = ReadPictureFile(hwnd, &len);
+                    if (!png) return TRUE;
+
+                    data->chosen = png;
+                    data->chosenLen = len;
+                    EndDialog(hwnd, IDOK);
+                    return TRUE;
+                }
+
+                case IDC_SIGNATURES_DELETE: {
+                    HWND list = GetDlgItem(hwnd, IDC_SIGNATURES_LIST);
+                    int selected = ListView_GetNextItem(list, -1, LVNI_SELECTED);
+                    if (selected < 0 || selected >= data->count) return TRUE;
+
+                    Fill_DeleteSignature(data->items[selected].id);
+                    SignaturesFill(hwnd, data);
+                    return TRUE;
+                }
+
+                case IDOK: {
+                    HWND list = GetDlgItem(hwnd, IDC_SIGNATURES_LIST);
+                    int selected = ListView_GetNextItem(list, -1, LVNI_SELECTED);
+                    if (selected < 0 || selected >= data->count) return TRUE;
+
+                    data->chosen = Fill_ReadSignature(data->items[selected].id,
+                                                      &data->chosenLen);
+                    EndDialog(hwnd, data->chosen ? IDOK : IDCANCEL);
+                    return TRUE;
+                }
+
+                case IDCANCEL:
+                    EndDialog(hwnd, IDCANCEL);
+                    return TRUE;
+            }
+            break;
+
+        case WM_CLOSE:
+            EndDialog(hwnd, IDCANCEL);
+            return TRUE;
+    }
+
+    return FALSE;
+}
+
+BYTE* Dialogs_ChooseSignature(HWND hParent, size_t* lenOut) {
+    if (lenOut) *lenOut = 0;
+
+    SignatureChooser data = {0};
+
+    // Nothing kept yet: straight to the pad rather than showing an empty list
+    // and making somebody find the button.
+    if (Fill_ListSignatures(data.items, MAX_SIGNATURES) == 0) {
+        BOOL keep = FALSE;
+        WCHAR name[64] = L"";
+        size_t len = 0;
+
+        BYTE* png = SignPad_Draw(hParent, &len, &keep, name, 64);
+        if (!png) return NULL;
+
+        if (keep) Fill_SaveSignature(name, png, len);
+
+        if (lenOut) *lenOut = len;
+        return png;
+    }
+
+    INT_PTR result = DialogBoxParamW(g_app->hInstance, MAKEINTRESOURCEW(IDD_SIGNATURES),
+                                     hParent, SignaturesProc, (LPARAM)&data);
+
+    if (result != IDOK || !data.chosen) {
+        free(data.chosen);
+        return NULL;
+    }
+
+    if (lenOut) *lenOut = data.chosenLen;
+    return data.chosen;
+}
+
+// ---------------------------------------------------------------------------
 // Filling in a PDF form
 //
 // The fields as the file states them, each with what is in it. Filling one in
@@ -1421,6 +1764,47 @@ typedef struct {
     PdfForm* form;
     WCHAR    savedTo[MAX_PATH];
 } PdfFormData;
+
+// Fill in what this machine has been told before.
+//
+// A form asks the same questions every other form asks, so an answer typed
+// once is offered to the next form that asks for the same thing. Matching is
+// on the field's name with its case and punctuation taken out -- "Full Name",
+// "full_name" and "FullName" are one question asked by three form designers --
+// and nothing else: a field called "name3" gets no help, because guessing
+// what it wants would put somebody's address in the wrong box on a form they
+// are about to sign.
+static int PdfFormRecall(PdfFormData* data) {
+    int filled = 0;
+
+    for (int i = 0; i < PdfForm_FieldCount(data->form); i++) {
+        PdfFieldKind kind = PdfForm_FieldKind(data->form, i);
+        if (kind != PDF_FIELD_TEXT && kind != PDF_FIELD_CHOICE) continue;
+
+        // What is already in the box stays: a form that came with an answer
+        // knows something this does not.
+        if (PdfForm_FieldValue(data->form, i)[0]) continue;
+
+        WCHAR remembered[1024];
+        if (!Fill_RecallAnswer(PdfForm_FieldName(data->form, i), remembered, 1024)) continue;
+
+        if (PdfForm_SetFieldValue(data->form, i, remembered)) filled++;
+    }
+
+    return filled;
+}
+
+static void PdfFormRemember(PdfFormData* data) {
+    for (int i = 0; i < PdfForm_FieldCount(data->form); i++) {
+        PdfFieldKind kind = PdfForm_FieldKind(data->form, i);
+        if (kind != PDF_FIELD_TEXT && kind != PDF_FIELD_CHOICE) continue;
+
+        const WCHAR* value = PdfForm_FieldValue(data->form, i);
+        if (!value[0]) continue;
+
+        Fill_RememberAnswer(PdfForm_FieldName(data->form, i), value);
+    }
+}
 
 static void PdfFormFill(HWND hwnd, PdfFormData* data) {
     HWND list = GetDlgItem(hwnd, IDC_PDF_FORM_LIST);
@@ -1543,7 +1927,22 @@ static INT_PTR CALLBACK PdfFormProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
             column.pszText = (WCHAR*)L"Kind";
             ListView_InsertColumn(list, 2, &column);
 
+            CheckDlgButton(hwnd, IDC_PDF_FORM_REMEMBER, BST_CHECKED);
             PdfFormFill(hwnd, data);
+
+            // Offered rather than done: filling somebody's form in for them
+            // without asking is how the wrong address ends up signed.
+            {
+                BOOL anything = FALSE;
+                for (int i = 0; i < PdfForm_FieldCount(data->form) && !anything; i++) {
+                    WCHAR remembered[1024];
+                    if (PdfForm_FieldValue(data->form, i)[0]) continue;
+                    anything = Fill_RecallAnswer(PdfForm_FieldName(data->form, i),
+                                                 remembered, 1024);
+                }
+
+                EnableWindow(GetDlgItem(hwnd, IDC_PDF_FORM_RECALL), anything);
+            }
             return TRUE;
         }
 
@@ -1561,7 +1960,26 @@ static INT_PTR CALLBACK PdfFormProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
                     PdfFormEditSelected(hwnd, data);
                     return TRUE;
 
+                case IDC_PDF_FORM_RECALL: {
+                    int filled = PdfFormRecall(data);
+                    PdfFormFill(hwnd, data);
+
+                    if (filled == 0) {
+                        MessageBoxW(hwnd,
+                            L"Nothing here matches an answer this machine has "
+                            L"been given before.\n\n"
+                            L"Fill the form in and tick \"Remember these\" when you "
+                            L"save it; the next form that asks the same questions "
+                            L"will know them.",
+                            APP_NAME, MB_ICONINFORMATION);
+                    }
+                    return TRUE;
+                }
+
                 case IDC_PDF_FORM_SAVE:
+                    if (IsDlgButtonChecked(hwnd, IDC_PDF_FORM_REMEMBER) == BST_CHECKED) {
+                        PdfFormRemember(data);
+                    }
                     PdfFormSave(hwnd, data);
                     return TRUE;
 
