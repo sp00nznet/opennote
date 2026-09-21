@@ -730,6 +730,10 @@ typedef struct {
     int  numId;
     int  ilvl;
 
+    // The page setup, which arrives at the end of the body -- and again at the
+    // end of any paragraph that closes a section.
+    BOOL inSection;
+
     // A picture, which arrives in pieces: an extent, then a relationship id
     // several elements later.
     BOOL  inDrawing;
@@ -848,6 +852,8 @@ static BOOL BuildModel(IStream* stream, DocModel* doc, const NumTable* numbering
                         }
                     }
                 }
+            } else if (b.inParaProps && b.para && NameIs(local, len, L"pageBreakBefore")) {
+                b.para->props.pageBreakBefore = AttrIsOn(reader);
             } else if (b.inParaProps && b.para &&
                        ReadParaProp(reader, local, len, &b.para->props)) {
                 // jc, ind and spacing, read the same way styles.xml reads them.
@@ -863,6 +869,53 @@ static BOOL BuildModel(IStream* stream, DocModel* doc, const NumTable* numbering
                 }
             } else if (b.inRunProps && ReadRunProp(reader, local, len, &b.run)) {
                 // b, i, u, strike, sz, color, vertAlign, rFonts.
+            }
+
+            // --- the page ---
+            //
+            // `w:sectPr` states the paper, the margins and the columns. A
+            // document can hold several of them, one per section; the last is
+            // the document's own and is the one kept -- see the roadmap for
+            // why several page setups in one document is a later problem.
+            else if (NameIs(local, len, L"sectPr")) {
+                b.inSection = TRUE;
+
+                // A section break in the middle of a document starts a new
+                // page, which is the part of it that can be honoured now.
+                if (b.para) b.para->props.pageBreakBefore = FALSE;
+            } else if (b.inSection && NameIs(local, len, L"pgSz")) {
+                int w = AttrInt(reader, L"w", 0);
+                int h = AttrInt(reader, L"h", 0);
+                if (w > 0 && h > 0) {
+                    doc->section.pageWidth = w;
+                    doc->section.pageHeight = h;
+                }
+
+                WCHAR orient[16];
+                if (GetAttr(reader, L"orient", orient, 16) &&
+                    _wcsicmp(orient, L"landscape") == 0 &&
+                    doc->section.pageWidth < doc->section.pageHeight) {
+                    // Word states the turned-round size as well, but not
+                    // always; swapping when it did not is how a landscape
+                    // document comes out portrait.
+                    int swap = doc->section.pageWidth;
+                    doc->section.pageWidth = doc->section.pageHeight;
+                    doc->section.pageHeight = swap;
+                }
+            } else if (b.inSection && NameIs(local, len, L"pgMar")) {
+                int top = AttrInt(reader, L"top", -1);
+                int right = AttrInt(reader, L"right", -1);
+                int bottom = AttrInt(reader, L"bottom", -1);
+                int left = AttrInt(reader, L"left", -1);
+                if (top >= 0)    doc->section.marginTop = top;
+                if (right >= 0)  doc->section.marginRight = right;
+                if (bottom >= 0) doc->section.marginBottom = bottom;
+                if (left >= 0)   doc->section.marginLeft = left;
+            } else if (b.inSection && NameIs(local, len, L"cols")) {
+                int num = AttrInt(reader, L"num", 1);
+                int space = AttrInt(reader, L"space", 720);
+                if (num >= 1 && num <= 8) doc->section.columns = num;
+                if (space >= 0) doc->section.columnSpace = space;
             }
 
             // --- pictures ---
@@ -911,8 +964,15 @@ static BOOL BuildModel(IStream* stream, DocModel* doc, const NumTable* numbering
                 b.inText = TRUE;
             } else if (NameIs(local, len, L"br")) {
                 if (b.para) {
+                    WCHAR type[16];
+                    BOOL page = GetAttr(reader, L"type", type, 16) &&
+                                _wcsicmp(type, L"page") == 0;
+
                     DocRun* r = Doc_AddRun(b.para, L"", 0, &b.run);
-                    if (r) r->lineBreak = TRUE;
+                    if (r) {
+                        if (page) r->pageBreak = TRUE;
+                        else      r->lineBreak = TRUE;
+                    }
                 }
             } else if (NameIs(local, len, L"tab")) {
                 if (b.para) {
@@ -971,7 +1031,8 @@ static BOOL BuildModel(IStream* stream, DocModel* doc, const NumTable* numbering
             }
             if (b.skipDepth > 0) continue;
 
-            if (NameIs(local, len, L"drawing")) b.inDrawing = FALSE;
+            if (NameIs(local, len, L"sectPr")) b.inSection = FALSE;
+            else if (NameIs(local, len, L"drawing")) b.inDrawing = FALSE;
             else if (NameIs(local, len, L"pict")) b.inPicture = FALSE;
             else if (NameIs(local, len, L"numPr")) {
                 if (b.inNumPr && b.para) {
@@ -1112,6 +1173,10 @@ static void EmitRunProps(StrBuf* x, const CharProps* p) {
 // The properties themselves. `styleRefs` is off when writing a style, which
 // cannot refer to itself and cannot be in a list.
 static void EmitParaPropsInner(StrBuf* inner, const ParaProps* p, BOOL styleRefs) {
+    if (styleRefs && p->pageBreakBefore) {
+        SB_Add(inner, "<w:pageBreakBefore/>");
+    }
+
     if (styleRefs) {
         if (p->style[0]) {
             SB_Add(inner, "<w:pStyle w:val=\"");
@@ -1206,6 +1271,8 @@ static void EmitPara(StrBuf* x, const DocPara* para, ImagePlan* plan) {
         if (r->image) {
             int index = PlanImage(plan, r->image);
             if (index >= 0) EmitDrawing(x, r->image, index);
+        } else if (r->pageBreak) {
+            SB_Add(x, "<w:br w:type=\"page\"/>");
         } else if (r->tab) {
             SB_Add(x, "<w:tab/>");
         } else if (r->lineBreak) {
@@ -1495,12 +1562,21 @@ static BOOL BuildDocumentXml(const DocModel* doc, StrBuf* x, ImagePlan* plan) {
     // A body with no paragraph at all is not a document Word will open.
     if (!any) SB_Add(x, "<w:p/>");
 
-    SB_AddF(x, "<w:sectPr><w:pgSz w:w=\"%d\" w:h=\"%d\"/>"
+    SB_AddF(x, "<w:sectPr><w:pgSz w:w=\"%d\" w:h=\"%d\"%s/>"
                "<w:pgMar w:top=\"%d\" w:right=\"%d\" w:bottom=\"%d\" w:left=\"%d\" "
-               "w:header=\"720\" w:footer=\"720\" w:gutter=\"0\"/></w:sectPr>",
+               "w:header=\"720\" w:footer=\"720\" w:gutter=\"0\"/>",
             doc->section.pageWidth, doc->section.pageHeight,
+            doc->section.pageWidth > doc->section.pageHeight
+                ? " w:orient=\"landscape\"" : "",
             doc->section.marginTop, doc->section.marginRight,
             doc->section.marginBottom, doc->section.marginLeft);
+
+    if (doc->section.columns > 1) {
+        SB_AddF(x, "<w:cols w:num=\"%d\" w:space=\"%d\"/>",
+                doc->section.columns, doc->section.columnSpace);
+    }
+
+    SB_Add(x, "</w:sectPr>");
 
     SB_Add(x, "</w:body></w:document>");
 

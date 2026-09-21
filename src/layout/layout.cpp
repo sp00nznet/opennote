@@ -118,6 +118,10 @@ static BOOL FlattenPara(const DocPara* para, FlatText* out) {
             // space is what goes there: it draws nothing, and the picture is
             // placed over it once the line is laid out.
             one[0] = L' '; one[1] = 0; piece = one; pieceLen = 1;
+        } else if (r->pageBreak) {
+            // The break itself is handled before the paragraph is laid out;
+            // here it is one character of nothing, so offsets still line up.
+            one[0] = L' '; one[1] = 0; piece = one; pieceLen = 1;
         } else if (r->tab) {
             one[0] = L'\t'; one[1] = 0; piece = one; pieceLen = 1;
         } else if (r->lineBreak) {
@@ -455,15 +459,43 @@ struct Flow {
     LayoutResult* result;
     LaidPage*     page;
     float         y;              // pen position, DIPs from the page top
-    float         contentWidth;
+    float         contentWidth;   // one column's worth
     float         bottom;         // nothing may be placed beyond this
     Ctx           ctx;
     Numbering     numbering;
+
+    // Columns. A one-column page is the same code with the loop running once,
+    // which is why there is no separate path for it.
+    int   columns;
+    int   column;                 // 0-based, left to right
+    float columnLeft;             // where this column starts, DIPs
+    float columnGap;
 };
+
+// Where a column begins across the page.
+static float ColumnLeft(const Flow* f, int column) {
+    return f->result->marginLeft + column * (f->contentWidth + f->columnGap);
+}
 
 static void NewPage(Flow* f) {
     f->page = AddPage(f->result);
     f->y = f->result->marginTop;
+    f->column = 0;
+    f->columnLeft = ColumnLeft(f, 0);
+}
+
+// The next place text can go: the column beside this one, or the top of a new
+// page when this was the last column. Everything that used to start a page now
+// goes through here, so a two-column document fills both columns of a page
+// before it reaches for another sheet.
+static void NextColumn(Flow* f) {
+    if (f->column + 1 < f->columns) {
+        f->column++;
+        f->columnLeft = ColumnLeft(f, f->column);
+        f->y = f->result->marginTop;
+        return;
+    }
+    NewPage(f);
 }
 
 static float SpaceLeft(const Flow* f) {
@@ -560,6 +592,17 @@ static void PlacePara(Flow* f, const DocPara* para, float x, float width,
                       BOOL isCellText) {
     FlatText flat;
     if (!FlattenPara(para, &flat)) return;
+
+    // A page break before this paragraph, whether the document said so in the
+    // paragraph's properties or put a break run at the front of it. Both mean
+    // the same thing and both are common; neither does anything at the top of
+    // a page, where a second break would leave a blank one.
+    BOOL breakBefore = para->props.pageBreakBefore;
+    if (!breakBefore && para->runs && para->runs->pageBreak) breakBefore = TRUE;
+
+    if (breakBefore && !isCellText && f->y > f->result->marginTop) {
+        NewPage(f);
+    }
 
     // A left indent moves the whole paragraph in and narrows it; the margin is
     // where indentation is measured from, so it cannot be folded into the
@@ -662,7 +705,7 @@ static void PlacePara(Flow* f, const DocPara* para, float x, float width,
                 if (!orphan && fit.fitted >= 3) {
                     take = fit.charsMinusOne;                  // carry two lines instead
                 } else if (f->y > f->result->marginTop) {
-                    NewPage(f);                                // move the paragraph whole
+                    NextColumn(f);                             // move the paragraph whole
                     continue;
                 }
                 // Already at the top of a page: a line that fills a page on its
@@ -675,7 +718,7 @@ static void PlacePara(Flow* f, const DocPara* para, float x, float width,
             // pen is already at the top of one then a single line is taller
             // than the page, and it is placed anyway rather than looping.
             if (f->y > f->result->marginTop) {
-                NewPage(f);
+                NextColumn(f);
                 continue;
             }
 
@@ -698,7 +741,7 @@ static void PlacePara(Flow* f, const DocPara* para, float x, float width,
         }
 
         from += take;
-        NewPage(f);
+        NextColumn(f);
     }
 
     f->y += para->props.spaceAfter / TWIPS_PER_DIP;
@@ -771,10 +814,10 @@ static void PlaceTable(Flow* f, const DocBlock* block) {
         // case a letter or a report rarely hits. A row taller than a page is
         // placed anyway rather than looping forever.
         if (rowHeight > SpaceLeft(f) && f->y > f->result->marginTop) {
-            NewPage(f);
+            NextColumn(f);
         }
 
-        float x = f->result->marginLeft;
+        float x = f->columnLeft;
         float rowTop = f->y;
 
         col = 0;
@@ -857,8 +900,14 @@ extern "C" LayoutResult* Layout_Build(const DocModel* doc, const WCHAR* defaultF
     Flow f = {};
     f.result = r;
     f.ctx = ctx;
-    f.contentWidth = r->pageWidth - r->marginLeft - r->marginRight;
     f.bottom = r->pageHeight - r->marginBottom;
+
+    f.columns = doc->section.columns > 0 ? doc->section.columns : 1;
+    if (f.columns > 8) f.columns = 8;
+    f.columnGap = doc->section.columnSpace / TWIPS_PER_DIP;
+
+    float textWidth = r->pageWidth - r->marginLeft - r->marginRight;
+    f.contentWidth = (textWidth - f.columnGap * (f.columns - 1)) / f.columns;
     if (f.contentWidth < 1.0f) f.contentWidth = 1.0f;
 
     NewPage(&f);
@@ -866,7 +915,7 @@ extern "C" LayoutResult* Layout_Build(const DocModel* doc, const WCHAR* defaultF
     for (const DocBlock* b = doc->blocks; b; b = b->next) {
         if (b->kind == BLOCK_PARA) {
             for (const DocPara* p = b->para; p; p = p->next) {
-                PlacePara(&f, p, r->marginLeft, f.contentWidth, FALSE);
+                PlacePara(&f, p, f.columnLeft, f.contentWidth, FALSE);
             }
         } else {
             PlaceTable(&f, b);
@@ -1610,6 +1659,74 @@ extern "C" BOOL Layout_SelfTest(char* failure, size_t failureSize) {
             if (t->y < pictureBottom - 1.0f) clear = FALSE;
         }
         if (!clear) FAIL("the paragraph after a picture was drawn over it");
+
+        Layout_Free(r); r = NULL;
+        Doc_Free(doc); doc = NULL;
+    }
+
+    // --- columns fill across the page before reaching for another ---------
+    {
+        doc = Doc_New();
+        if (!doc) FAIL("could not allocate a model");
+        doc->section.columns = 2;
+        doc->section.columnSpace = 480;
+
+        for (int i = 0; i < 120; i++) {
+            AddTextPara(doc, L"A paragraph of body text, filling a column so that "
+                             L"the next one has to be used.", &plain);
+        }
+
+        r = Layout_Build(doc, L"Calibri", 11.0f);
+        if (!r) FAIL("Layout_Build failed on a two-column document");
+
+        // Two columns means two bands of text across the page, and the right
+        // one starts past the middle.
+        float middle = r->pageWidth / 2.0f;
+        BOOL leftBand = FALSE, rightBand = FALSE;
+        for (int i = 0; i < r->pages[0].textCount; i++) {
+            const LaidText* t = &r->pages[0].texts[i];
+            if (t->x < middle)  leftBand = TRUE;
+            if (t->x >= middle) rightBand = TRUE;
+            if (t->x + t->width > r->pageWidth - r->marginRight + 1.0f) {
+                FAIL("a column ran past the right margin");
+            }
+        }
+        if (!leftBand || !rightBand) FAIL("a two-column page used only one column");
+
+        // A column is about half the width of the text area, not the whole of
+        // it -- two columns hold the same amount of text as one, arranged
+        // differently, so counting pages proves nothing.
+        float textWidth = r->pageWidth - r->marginLeft - r->marginRight;
+        for (int i = 0; i < r->pages[0].textCount; i++) {
+            const LaidText* t = &r->pages[0].texts[i];
+            if (t->width > textWidth * 0.6f) FAIL("a column is as wide as the page");
+        }
+
+        Layout_Free(r); r = NULL;
+        Doc_Free(doc); doc = NULL;
+    }
+
+    // --- a page break starts a page ---------------------------------------
+    {
+        doc = Doc_New();
+        if (!doc) FAIL("could not allocate a model");
+
+        AddTextPara(doc, L"First page.", &plain);
+
+        DocPara* second = AddTextPara(doc, L"Second page, because of a property.", &plain);
+        if (!second) FAIL("could not build the page break case");
+        second->props.pageBreakBefore = TRUE;
+
+        DocPara* third = Doc_AddPara(doc);
+        if (!third) FAIL("could not build the page break case");
+        DocRun* brk = Doc_AddRun(third, L"", 0, &plain);
+        if (!brk) FAIL("could not add a break run");
+        brk->pageBreak = TRUE;
+        Doc_AddRun(third, L"Third page, because of a break run.", -1, &plain);
+
+        r = Layout_Build(doc, L"Calibri", 11.0f);
+        if (!r) FAIL("Layout_Build failed on a document with page breaks");
+        if (Layout_PageCount(r) != 3) FAIL("page breaks did not produce three pages");
 
         Layout_Free(r); r = NULL;
         Doc_Free(doc); doc = NULL;

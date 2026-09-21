@@ -12,7 +12,8 @@
 // when a document does not say otherwise. Page Setup replaces it.
 static SectionProps g_pageDefaults = {
     12240, 15840,
-    1440, 1440, 1440, 1440
+    1440, 1440, 1440, 1440,
+    1, 720
 };
 
 void Doc_SetPageDefaults(const SectionProps* page) {
@@ -466,6 +467,10 @@ static void CompareParaProps(const ParaProps* a, const ParaProps* b, int idx, Do
     CMP(a->align == b->align,             "para %d: alignment %d -> %d", idx, a->align, b->align);
     CMP(a->list == b->list,               "para %d: list kind %d -> %d", idx, a->list, b->list);
     CMP(a->headingLevel == b->headingLevel, "para %d: heading level %d -> %d", idx, a->headingLevel, b->headingLevel);
+    if (a->pageBreakBefore) {
+        CMP(a->pageBreakBefore == b->pageBreakBefore,
+            "para %d: page break before was lost", idx);
+    }
 
     // Indents and spacing are only asserted where the source set them; a
     // document that said nothing has nothing to lose.
@@ -495,8 +500,9 @@ typedef struct {
 static void Flatten(const DocPara* para, FlatPara* out) {
     out->len = 0;
     for (const DocRun* r = para->runs; r && out->len < MAX_FLAT; r = r->next) {
-        if (r->tab || r->lineBreak || r->image) {
+        if (r->tab || r->lineBreak || r->image || r->pageBreak) {
             out->text[out->len] = r->tab ? L'\t'
+                                : r->pageBreak ? L'\f'
                                 : r->lineBreak ? L'\n'
                                 : (WCHAR)DOC_IMAGE_CHAR;
             out->props[out->len] = r->props;
@@ -576,12 +582,26 @@ static void CollectFn(const DocPara* para, void* ctx) {
     if (list->count < 4096) list->paras[list->count++] = para;
 }
 
+// The page the document is set on. A document that stated its paper size and
+// came back on a different one has lost something that changes every page.
+static void CompareSections(const SectionProps* a, const SectionProps* b, DocDiff* d) {
+    CMP(a->pageWidth == b->pageWidth && a->pageHeight == b->pageHeight,
+        "page size %dx%d -> %dx%d", a->pageWidth, a->pageHeight,
+        b->pageWidth, b->pageHeight);
+    CMP(a->marginTop == b->marginTop && a->marginBottom == b->marginBottom &&
+        a->marginLeft == b->marginLeft && a->marginRight == b->marginRight,
+        "page margins changed: left %d -> %d", a->marginLeft, b->marginLeft);
+    CMP(a->columns == b->columns, "columns %d -> %d", a->columns, b->columns);
+}
+
 void Doc_Compare(const DocModel* a, const DocModel* b, DocDiff* d) {
     memset(d, 0, sizeof(*d));
     if (!a || !b) {
         DiffNote(d, "a document is missing");
         return;
     }
+
+    CompareSections(&a->section, &b->section, d);
 
     d->compared++;
     if (Doc_CountTables(a) != Doc_CountTables(b)) {
@@ -656,7 +676,7 @@ void Doc_Compare(const DocModel* a, const DocModel* b, DocDiff* d) {
 
 // The characters one run contributes.
 static unsigned RunLength(const DocRun* run) {
-    if (run->tab || run->lineBreak || run->image) return 1;
+    if (run->tab || run->lineBreak || run->image || run->pageBreak) return 1;
     return run->text ? (unsigned)wcslen(run->text) : 0;
 }
 
@@ -677,6 +697,7 @@ WCHAR* Doc_ParaText(const DocPara* para, unsigned* lenOut) {
         unsigned n = RunLength(r);
         if (!n) continue;
         if (r->tab)            out[at] = L'\t';
+        else if (r->pageBreak) out[at] = L'\f';
         else if (r->lineBreak) out[at] = L'\n';
         else if (r->image)     out[at] = DOC_IMAGE_CHAR;
         else                   memcpy(out + at, r->text, n * sizeof(WCHAR));
@@ -1195,6 +1216,7 @@ static BOOL CloneParas(const DocPara* src, DocPara** dest) {
             rc->props = r->props;
             rc->tab = r->tab;
             rc->lineBreak = r->lineBreak;
+            rc->pageBreak = r->pageBreak;
 
             if (r->image) {
                 rc->image = (DocImage*)calloc(1, sizeof(DocImage));

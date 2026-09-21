@@ -52,17 +52,18 @@ def r(text, props=""):
     return f'<w:r>{props}<w:t xml:space="preserve">{text}</w:t></w:r>'
 
 
-def document(body):
+def document(body, sect=None):
+    sect = sect or '<w:sectPr><w:pgSz w:w="12240" w:h="15840"/></w:sectPr>'
     return (
         '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n'
         f'<w:document xmlns:w="{W}" xmlns:r="{R}" xmlns:wp="{WP}" xmlns:o="{O}" xmlns:v="{V}"><w:body>'
         + "".join(body)
-        + '<w:sectPr><w:pgSz w:w="12240" w:h="15840"/></w:sectPr>'
-        "</w:body></w:document>"
+        + sect
+        + "</w:body></w:document>"
     )
 
 
-def write(outdir, name, body, expect, target="word/document.xml", parts=None):
+def write(outdir, name, body, expect, target="word/document.xml", parts=None, sect=None):
     """parts: [(partname, content_type, rel_type, xml)], related to the document."""
     parts = parts or []
     path = os.path.join(outdir, name + ".docx")
@@ -75,7 +76,7 @@ def write(outdir, name, body, expect, target="word/document.xml", parts=None):
     with zipfile.ZipFile(path, "w", zipfile.ZIP_DEFLATED) as z:
         z.writestr("[Content_Types].xml", CONTENT_TYPES.format(target=target, extra=extra))
         z.writestr("_rels/.rels", RELS.format(target=target))
-        z.writestr(target, document(body))
+        z.writestr(target, document(body, sect))
 
         if parts:
             rels = ""
@@ -410,6 +411,39 @@ def fixture_images(outdir):
     return write(outdir, "images", body, expect, parts=parts)
 
 
+# --------------------------------------------------------------------------
+# pages: the paper, the margins, the columns, and a break in the middle
+# --------------------------------------------------------------------------
+def fixture_pages(outdir):
+    # A4 landscape, narrow margins, two columns.
+    sect = (
+        '<w:sectPr>'
+        '<w:pgSz w:w="16838" w:h="11906" w:orient="landscape"/>'
+        '<w:pgMar w:top="720" w:right="600" w:bottom="720" w:left="600"/>'
+        '<w:cols w:num="2" w:space="480"/>'
+        '</w:sectPr>'
+    )
+
+    body = [
+        p([r("First page, first column.")]),
+        p([r("Still the first section.")]),
+        p([r("This paragraph starts a page of its own.")],
+          '<w:pPr><w:pageBreakBefore/></w:pPr>'),
+        "<w:p><w:r><w:br w:type=\"page\"/></w:r><w:r><w:t>After a break run.</w:t></w:r></w:p>",
+    ]
+
+    expect = [
+        "# the text survives whatever the page is doing",
+        "contains:First page, first column.",
+        "contains:This paragraph starts a page of its own.",
+        "contains:After a break run.",
+        "# a page break reaches the view as one",
+        "contains:\\page",
+    ]
+
+    return write(outdir, "pages", body, expect, sect=sect)
+
+
 def main():
     outdir = sys.argv[1] if len(sys.argv) > 1 else "build/corpus"
     os.makedirs(outdir, exist_ok=True)
@@ -422,6 +456,7 @@ def main():
         fixture_relocated(outdir),
         fixture_styles(outdir),
         fixture_images(outdir),
+        fixture_pages(outdir),
     ]
     for path in made:
         print(f"  {os.path.basename(path)}  {os.path.getsize(path)} bytes")

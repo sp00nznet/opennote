@@ -125,6 +125,7 @@ static void EmitRun(StrBuf* sb, const DocRun* run, Tables* t) {
     SB_Add(sb, " ");
 
     if (run->image)          EmitPicture(sb, run->image);
+    else if (run->pageBreak) SB_Add(sb, "\\page ");
     else if (run->tab)       SB_Add(sb, "\\tab ");
     else if (run->lineBreak) SB_Add(sb, "\\line ");
     else                     SB_AddRtfText(sb, run->text, -1);
@@ -133,6 +134,7 @@ static void EmitRun(StrBuf* sb, const DocRun* run, Tables* t) {
 static void EmitParaProps(StrBuf* sb, const ParaProps* p, BOOL inTable) {
     SB_Add(sb, "\\pard");
     if (inTable) SB_Add(sb, "\\intbl");
+    if (p->pageBreakBefore) SB_Add(sb, "\\pagebb");
 
     switch (p->align) {
         case ALIGN_CENTER:  SB_Add(sb, "\\qc"); break;

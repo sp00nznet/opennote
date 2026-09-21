@@ -71,6 +71,7 @@ typedef struct {
     DocListKind list;
     int         listLevel;
     int         headingLevel;     // 0 = body text, 1..6 = Heading1..6
+    BOOL        pageBreakBefore;  // this paragraph starts a page
 
     // Which list this paragraph belongs to (`w:numId`), so two lists in one
     // document count separately, and how that list counts.
@@ -105,6 +106,7 @@ typedef struct DocRun {
     WCHAR*         text;          // owned; never NULL, may be empty
     BOOL           lineBreak;     // a soft break rather than text
     BOOL           tab;
+    BOOL           pageBreak;     // `w:br w:type="page"`
     DocImage*      image;         // owned; a run is a picture or it is text
 } DocRun;
 
@@ -141,6 +143,11 @@ typedef struct DocBlock {
 typedef struct {
     int pageWidth, pageHeight;   // twips
     int marginTop, marginRight, marginBottom, marginLeft;
+
+    // Columns, from `w:cols`. One column is a page like any other; the space
+    // between them is the gutter, in twips.
+    int columns;
+    int columnSpace;
 } SectionProps;
 
 // A named style out of styles.xml. Paragraphs carry their resolved properties,

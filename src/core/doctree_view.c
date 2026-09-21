@@ -180,6 +180,9 @@ static void ToParaProps(const PARAFORMAT2* pf, ParaProps* out) {
     if (out->indentFirst < 0) out->indentLeft += -out->indentFirst;
     if (pf->dwMask & PFM_SPACEBEFORE) out->spaceBefore = pf->dySpaceBefore;
     if (pf->dwMask & PFM_SPACEAFTER)  out->spaceAfter = pf->dySpaceAfter;
+    if ((pf->dwMask & PFM_PAGEBREAKBEFORE) && (pf->wEffects & PFE_PAGEBREAKBEFORE)) {
+        out->pageBreakBefore = TRUE;
+    }
 
     if (pf->dwMask & PFM_NUMBERING) {
     }
@@ -449,6 +452,12 @@ DocModel* DocView_CaptureWith(HWND h, const DocModel* source) {
     DocBlock* table = NULL;
     DocRow*   row = NULL;
     ListRun   lists = {0};
+
+    // The control has no notion of a page: no paper size, no margins, no
+    // columns. When the document came from a file, its page comes from there
+    // rather than from the defaults -- otherwise saving an A4 document from
+    // the editor would quietly put it on Letter.
+    if (source) doc->section = source->section;
 
     ImageSource pictures;
     CollectImages(source, &pictures);
