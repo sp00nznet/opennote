@@ -795,6 +795,11 @@ typedef struct {
     int   imageHeightEmu;
 
     int  skipDepth;             // >0 inside content that is not document text
+
+    // Track changes. `w:ins` and `w:del` wrap whole runs, so the mark is held
+    // here while their children go past and stamped onto every run inside.
+    RevisionMark rev;
+    int          revDepth;      // nesting, because an insertion can be deleted
 } Build;
 
 static DocPara* NewParagraph(Build* b) {
@@ -835,9 +840,19 @@ static BOOL BuildModel(IStream* stream, DocModel* doc, const NumTable* numbering
         if (nt == XmlNodeType_Element) {
             BOOL empty = IXmlReader_IsEmptyElement(reader);
 
-            // Content inside a deletion is revision history, not the document.
-            if (NameIs(local, len, L"del")) {
-                if (!empty) b.skipDepth++;
+            // A tracked change wraps the runs it applies to. It used to be
+            // skipped, which read correctly and threw the history away: a
+            // document saved after being opened had lost its deletions.
+            if (NameIs(local, len, L"ins") || NameIs(local, len, L"del")) {
+                // `w:ins` also appears inside `w:rPr` as a *paragraph mark*
+                // revision, which is a different thing and applies to nothing
+                // this model holds.
+                if (b.inRunProps || b.inParaProps) continue;
+
+                b.rev.kind = NameIs(local, len, L"del") ? REV_DELETED : REV_INSERTED;
+                GetAttr(reader, L"author", b.rev.author, 64);
+                GetAttr(reader, L"date", b.rev.date, 32);
+                if (!empty) b.revDepth++;
                 continue;
             }
             if (b.skipDepth > 0) continue;
@@ -952,6 +967,7 @@ static BOOL BuildModel(IStream* stream, DocModel* doc, const NumTable* numbering
                     if (r) {
                         r->noteId = id;
                         r->noteIsEnd = endnote;
+                        r->rev = b.rev;
                     }
                 }
             }
@@ -1068,7 +1084,7 @@ static BOOL BuildModel(IStream* stream, DocModel* doc, const NumTable* numbering
             }
 
             // --- content ---
-            else if (NameIs(local, len, L"t")) {
+            else if (NameIs(local, len, L"t") || NameIs(local, len, L"delText")) {
                 b.inText = TRUE;
             } else if (NameIs(local, len, L"br")) {
                 if (b.para) {
@@ -1080,12 +1096,16 @@ static BOOL BuildModel(IStream* stream, DocModel* doc, const NumTable* numbering
                     if (r) {
                         if (page) r->pageBreak = TRUE;
                         else      r->lineBreak = TRUE;
+                        r->rev = b.rev;
                     }
                 }
             } else if (NameIs(local, len, L"tab")) {
                 if (b.para) {
                     DocRun* r = Doc_AddRun(b.para, L"", 0, &b.run);
-                    if (r) r->tab = TRUE;
+                    if (r) {
+                        r->tab = TRUE;
+                        r->rev = b.rev;
+                    }
                 }
             }
 
@@ -1129,12 +1149,17 @@ static BOOL BuildModel(IStream* stream, DocModel* doc, const NumTable* numbering
             const WCHAR* val = NULL;
             UINT vlen = 0;
             if (SUCCEEDED(IXmlReader_GetValue(reader, &val, &vlen)) && vlen) {
-                Doc_AddRun(b.para, val, (int)vlen, &b.run);
+                DocRun* r = Doc_AddRun(b.para, val, (int)vlen, &b.run);
+                if (r) r->rev = b.rev;
             }
 
         } else if (nt == XmlNodeType_EndElement) {
-            if (NameIs(local, len, L"del")) {
-                if (b.skipDepth > 0) b.skipDepth--;
+            if (NameIs(local, len, L"ins") || NameIs(local, len, L"del")) {
+                if (b.inRunProps || b.inParaProps) continue;
+                if (b.revDepth > 0 && --b.revDepth == 0) {
+                    RevisionMark none = {0};
+                    b.rev = none;
+                }
                 continue;
             }
             if (b.skipDepth > 0) continue;
@@ -1152,7 +1177,8 @@ static BOOL BuildModel(IStream* stream, DocModel* doc, const NumTable* numbering
                 }
                 b.inNumPr = FALSE;
             }
-            else if (NameIs(local, len, L"t"))       b.inText = FALSE;
+            else if (NameIs(local, len, L"t") ||
+                     NameIs(local, len, L"delText"))     b.inText = FALSE;
             else if (NameIs(local, len, L"pPr"))     b.inParaProps = FALSE;
             else if (NameIs(local, len, L"rPr"))     b.inRunProps = FALSE;
             else if (NameIs(local, len, L"tblGrid")) b.inTblGrid = FALSE;
@@ -1542,11 +1568,53 @@ static void EmitDrawing(StrBuf* x, const DocImage* image, int index) {
         image->widthEmu, image->heightEmu);
 }
 
+// Track changes, on the way out. `w:ins` and `w:del` are elements around the
+// runs they apply to, so consecutive runs sharing a mark share one wrapper --
+// which is both what Word writes and what makes a round trip come back with
+// the run boundaries it went out with.
+static BOOL SameMark(const RevisionMark* a, const RevisionMark* b) {
+    return a->kind == b->kind &&
+           wcscmp(a->author, b->author) == 0 &&
+           wcscmp(a->date, b->date) == 0;
+}
+
+static void OpenMark(StrBuf* x, const RevisionMark* m, int* idOut) {
+    if (m->kind == REV_NONE) return;
+
+    SB_AddF(x, "<w:%s w:id=\"%d\"", m->kind == REV_DELETED ? "del" : "ins", ++(*idOut));
+    if (m->author[0]) {
+        SB_Add(x, " w:author=\"");
+        SB_AddXmlText(x, m->author, -1);
+        SB_Add(x, "\"");
+    }
+    if (m->date[0]) {
+        SB_Add(x, " w:date=\"");
+        SB_AddXmlText(x, m->date, -1);
+        SB_Add(x, "\"");
+    }
+    SB_Add(x, ">");
+}
+
+static void CloseMark(StrBuf* x, const RevisionMark* m) {
+    if (m->kind == REV_NONE) return;
+    SB_AddF(x, "</w:%s>", m->kind == REV_DELETED ? "del" : "ins");
+}
+
+static int g_revId = 0;    // ids only have to be unique within the document
+
 static void EmitPara(StrBuf* x, const DocPara* para, ImagePlan* plan) {
     SB_Add(x, "<w:p>");
     EmitParaProps(x, &para->props);
 
+    RevisionMark open = {0};
+
     for (const DocRun* r = para->runs; r; r = r->next) {
+        if (!SameMark(&open, &r->rev)) {
+            CloseMark(x, &open);
+            open = r->rev;
+            OpenMark(x, &open, &g_revId);
+        }
+
         SB_Add(x, "<w:r>");
         EmitRunProps(x, &r->props);
 
@@ -1566,13 +1634,17 @@ static void EmitPara(StrBuf* x, const DocPara* para, ImagePlan* plan) {
         } else if (r->lineBreak) {
             SB_Add(x, "<w:br/>");
         } else {
-            SB_Add(x, "<w:t xml:space=\"preserve\">");
+            // Deleted text is `w:delText`; the same characters under another
+            // name, which is how a reader knows not to show them.
+            const char* tag = r->rev.kind == REV_DELETED ? "delText" : "t";
+            SB_AddF(x, "<w:%s xml:space=\"preserve\">", tag);
             SB_AddXmlText(x, r->text, -1);
-            SB_Add(x, "</w:t>");
+            SB_AddF(x, "</w:%s>", tag);
         }
         SB_Add(x, "</w:r>");
     }
 
+    CloseMark(x, &open);
     SB_Add(x, "</w:p>");
 }
 

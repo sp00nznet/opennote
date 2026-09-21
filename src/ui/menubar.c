@@ -105,6 +105,12 @@ HMENU MenuBar_Create(void) {
 
     AppendMenuW(hMenu, MF_POPUP, (UINT_PTR)hFormatMenu, L"F&ormat");
 
+    // Review: what a document carries besides its text.
+    HMENU hReviewMenu = CreatePopupMenu();
+    AppendMenuW(hReviewMenu, MF_STRING, IDM_REVIEW_ACCEPT_ALL, L"&Accept All Changes");
+    AppendMenuW(hReviewMenu, MF_STRING, IDM_REVIEW_REJECT_ALL, L"&Reject All Changes");
+    AppendMenuW(hMenu, MF_POPUP, (UINT_PTR)hReviewMenu, L"&Review");
+
     // View menu
     HMENU hViewMenu = CreatePopupMenu();
     HMENU hZoomMenu = CreatePopupMenu();

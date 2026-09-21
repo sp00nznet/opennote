@@ -481,6 +481,98 @@ WCHAR* Doc_GetText(const DocModel* doc) {
 }
 
 // ---------------------------------------------------------------------------
+// Tracked changes
+//
+// Both operations are the same walk with the verdict swapped: one kind of
+// marked run is dropped, the other loses its mark and becomes text.
+// ---------------------------------------------------------------------------
+
+static void ResolveRuns(DocPara* para, DocRevision drop) {
+    DocRun* prev = NULL;
+    DocRun* run = para->runs;
+
+    while (run) {
+        DocRun* next = run->next;
+
+        if (run->rev.kind == drop) {
+            if (prev) prev->next = next;
+            else      para->runs = next;
+            free(run->text);
+            if (run->image) {
+                free(run->image->bytes);
+                free(run->image);
+            }
+            free(run);
+        } else {
+            run->rev.kind = REV_NONE;
+            run->rev.author[0] = L'\0';
+            run->rev.date[0] = L'\0';
+            prev = run;
+        }
+        run = next;
+    }
+}
+
+static void ResolveParas(DocPara* paras, DocRevision drop) {
+    for (DocPara* p = paras; p; p = p->next) ResolveRuns(p, drop);
+}
+
+static void ResolveModel(DocModel* doc, DocRevision drop) {
+    if (!doc) return;
+
+    for (DocBlock* b = doc->blocks; b; b = b->next) {
+        if (b->kind == BLOCK_PARA) {
+            ResolveParas(b->para, drop);
+            continue;
+        }
+        for (DocRow* row = b->table.rows; row; row = row->next) {
+            for (DocCell* c = row->cells; c; c = c->next) ResolveParas(c->paras, drop);
+        }
+    }
+
+    ResolveParas(doc->header, drop);
+    ResolveParas(doc->footer, drop);
+    for (DocNote* n = doc->notes; n; n = n->next) ResolveParas(n->paras, drop);
+}
+
+void Doc_AcceptRevisions(DocModel* doc) { ResolveModel(doc, REV_DELETED); }
+void Doc_RejectRevisions(DocModel* doc) { ResolveModel(doc, REV_INSERTED); }
+
+static int CountRevisionsIn(const DocPara* paras) {
+    int n = 0;
+    for (const DocPara* p = paras; p; p = p->next) {
+        for (const DocRun* r = p->runs; r; r = r->next) {
+            if (r->rev.kind != REV_NONE) n++;
+        }
+    }
+    return n;
+}
+
+int Doc_CountRevisions(const DocModel* doc) {
+    if (!doc) return 0;
+
+    int n = 0;
+    for (const DocBlock* b = doc->blocks; b; b = b->next) {
+        if (b->kind == BLOCK_PARA) {
+            n += CountRevisionsIn(b->para);
+            continue;
+        }
+        for (const DocRow* row = b->table.rows; row; row = row->next) {
+            for (const DocCell* c = row->cells; c; c = c->next) {
+                n += CountRevisionsIn(c->paras);
+            }
+        }
+    }
+
+    n += CountRevisionsIn(doc->header);
+    n += CountRevisionsIn(doc->footer);
+    for (const DocNote* note = doc->notes; note; note = note->next) {
+        n += CountRevisionsIn(note->paras);
+    }
+    return n;
+}
+
+// ---------------------------------------------------------------------------
 // Comparison
 //
 // The point is a number that can get worse. Every property that a save and
@@ -570,9 +662,10 @@ static void CompareParaProps(const ParaProps* a, const ParaProps* b, int idx, Do
 #define MAX_FLAT 8192
 
 typedef struct {
-    WCHAR     text[MAX_FLAT];
-    CharProps props[MAX_FLAT];
-    int       len;
+    WCHAR        text[MAX_FLAT];
+    CharProps    props[MAX_FLAT];
+    RevisionMark rev[MAX_FLAT];
+    int          len;
 } FlatPara;
 
 static void Flatten(const DocPara* para, FlatPara* out) {
@@ -584,12 +677,14 @@ static void Flatten(const DocPara* para, FlatPara* out) {
                                 : r->lineBreak ? L'\n'
                                 : (WCHAR)DOC_IMAGE_CHAR;
             out->props[out->len] = r->props;
+            out->rev[out->len] = r->rev;
             out->len++;
             continue;
         }
         for (const WCHAR* c = r->text; *c && out->len < MAX_FLAT; c++) {
             out->text[out->len] = *c;
             out->props[out->len] = r->props;
+            out->rev[out->len] = r->rev;
             out->len++;
         }
     }
@@ -647,6 +742,16 @@ static void CompareParas(const DocPara* pa, const DocPara* pb, int idx, DocDiff*
 
     for (int i = 0; i < fa.len; i++) {
         CompareChar(&fa.props[i], &fb.props[i], idx, i, d);
+
+        // A tracked change is part of the document, so losing one is a loss
+        // like any other -- and dropping deletions on read is exactly what
+        // this number is here to stop happening again.
+        CMP(fa.rev[i].kind == fb.rev[i].kind, "para %d char %d: revision %d -> %d",
+            idx, i, fa.rev[i].kind, fb.rev[i].kind);
+        if (fa.rev[i].kind != REV_NONE && fa.rev[i].author[0]) {
+            CMP(wcscmp(fa.rev[i].author, fb.rev[i].author) == 0,
+                "para %d char %d: revision author changed", idx, i);
+        }
     }
 }
 
@@ -796,9 +901,26 @@ void Doc_Compare(const DocModel* a, const DocModel* b, DocDiff* d) {
 // ---------------------------------------------------------------------------
 
 // The characters one run contributes.
+// Content the document carries but does not show. A tracked deletion is the
+// only one today; this is the hook for anything else that has to survive a
+// round trip without occupying a character -- which is why it is a predicate
+// rather than a test against one field.
+static BOOL RunIsHidden(const DocRun* run) {
+    return run->rev.kind == REV_DELETED;
+}
+
+BOOL Doc_RunIsHidden(const DocRun* run) {
+    return run && RunIsHidden(run);
+}
+
 static unsigned RunLength(const DocRun* run) {
+    if (RunIsHidden(run)) return 0;
     if (run->tab || run->lineBreak || run->image || run->pageBreak) return 1;
     return run->text ? (unsigned)wcslen(run->text) : 0;
+}
+
+unsigned Doc_RunLength(const DocRun* run) {
+    return run ? RunLength(run) : 0;
 }
 
 unsigned Doc_ParaLength(const DocPara* para) {
@@ -937,7 +1059,7 @@ static void PruneEmptyRuns(DocPara* para) {
     DocRun* run = para->runs;
     while (run) {
         DocRun* next = run->next;
-        if (RunLength(run) == 0) {
+        if (RunLength(run) == 0 && !RunIsHidden(run)) {
             if (prev) prev->next = next;
             else      para->runs = next;
             free(run->text);
@@ -1340,6 +1462,7 @@ static BOOL CloneParas(const DocPara* src, DocPara** dest) {
             rc->pageBreak = r->pageBreak;
             rc->noteId = r->noteId;
             rc->noteIsEnd = r->noteIsEnd;
+            rc->rev = r->rev;
 
             if (r->image) {
                 rc->image = (DocImage*)calloc(1, sizeof(DocImage));
@@ -1362,6 +1485,16 @@ static BOOL CloneParas(const DocPara* src, DocPara** dest) {
         APPEND(*dest, copy, DocPara);
     }
     return TRUE;
+}
+
+void Doc_SetRuns(DocPara* para, DocRun* runs) {
+    if (!para) return;
+    FreeRuns(para->runs);
+    para->runs = runs;
+}
+
+void Doc_FreeParas(DocPara* paras) {
+    FreeParas(paras);
 }
 
 DocPara* Doc_CloneParas(const DocPara* src) {
@@ -1876,6 +2009,75 @@ BOOL Doc_SelfTest(char* failure, size_t failureSize) {
         FAIL("DocRtf_Emit did not carry the table grid");
     }
     free(rtf);
+
+    // --- tracked changes ---
+    //
+    // A deletion is carried and not shown; an insertion is shown and marked.
+    // Accepting leaves the text as it reads; rejecting turns it round.
+    {
+        Doc_Free(a);
+        Doc_Free(b);
+        a = Doc_New();
+        b = NULL;
+        if (!a) FAIL("could not allocate a model");
+
+        CharProps plain = {0};
+        DocPara* p = Doc_AddPara(a);
+
+        Doc_AddRun(p, L"Kept ", -1, &plain);
+
+        DocRun* gone = Doc_AddRun(p, L"deleted", -1, &plain);
+        gone->rev.kind = REV_DELETED;
+        wcscpy_s(gone->rev.author, 64, L"someone");
+
+        DocRun* added = Doc_AddRun(p, L"new", -1, &plain);
+        added->rev.kind = REV_INSERTED;
+
+        if (Doc_CountRevisions(a) != 2) FAIL("revisions were not counted");
+
+        unsigned len = 0;
+        WCHAR* text = Doc_ParaText(p, &len);
+        if (!text || wcscmp(text, L"Kept new") != 0) {
+            free(text);
+            FAIL("a deleted run must not appear in the text");
+        }
+        free(text);
+
+        // Editing walks the same offsets the text has, so a deleted run must
+        // not shift anything: inserting at the end appends to the insertion.
+        DocPos at = { p, len };
+        if (!DocEdit_Insert(a, &at, L"!", 1)) FAIL("insert past a deletion failed");
+        text = Doc_ParaText(p, NULL);
+        if (!text || wcscmp(text, L"Kept new!") != 0) {
+            free(text);
+            FAIL("editing did not land where the text said it would");
+        }
+        free(text);
+
+        b = Doc_Clone(a);
+        if (!b || Doc_CountRevisions(b) != 2) FAIL("cloning lost the marks");
+
+        Doc_AcceptRevisions(a);
+        if (Doc_CountRevisions(a) != 0) FAIL("accepting left marks behind");
+        text = Doc_ParaText(Doc_ParaAt(a, 0), NULL);
+        if (!text || wcscmp(text, L"Kept new!") != 0) {
+            free(text);
+            FAIL("accepting changed what the document reads");
+        }
+        free(text);
+
+        // The "!" was typed inside the insertion, so it is part of it and
+        // goes with it: rejecting leaves the paragraph as it was before
+        // anybody touched it.
+        Doc_RejectRevisions(b);
+        if (Doc_CountRevisions(b) != 0) FAIL("rejecting left marks behind");
+        text = Doc_ParaText(Doc_ParaAt(b, 0), NULL);
+        if (!text || wcscmp(text, L"Kept deleted") != 0) {
+            free(text);
+            FAIL("rejecting did not put the deleted text back");
+        }
+        free(text);
+    }
 
     Doc_Free(a);
     Doc_Free(b);

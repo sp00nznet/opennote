@@ -938,6 +938,67 @@ static void FlushPageLayout(void) {
     if (tab && tab->hPageView) PageView_Apply(tab->hPageView);
 }
 
+// Accept or reject every tracked change in the document.
+//
+// The document is captured first, exactly as saving captures it, so anything
+// typed since it was opened is part of what gets resolved rather than thrown
+// away. The result becomes the document's model and the view is rebuilt from
+// it: accepting changes nothing on screen, rejecting brings deleted text back
+// and takes inserted text away.
+static void ResolveRevisions(HWND hwnd, BOOL accept) {
+    Tab* tab = App_GetActiveTab();
+    if (!tab || !tab->document || !tab->hEditor) return;
+
+    if (!Editor_IsRich(tab->hEditor)) {
+        MessageBoxW(hwnd, L"A plain text file cannot carry tracked changes.",
+                    APP_NAME, MB_ICONINFORMATION);
+        return;
+    }
+
+    FlushPageLayout();
+
+    Document* doc = tab->document;
+    DocModel* model = DocView_CaptureWith(tab->hEditor, doc->source);
+    if (!model) return;
+
+    int count = Doc_CountRevisions(model);
+    if (count == 0) {
+        Doc_Free(model);
+        MessageBoxW(hwnd, L"This document has no tracked changes.",
+                    APP_NAME, MB_ICONINFORMATION);
+        return;
+    }
+
+    if (accept) Doc_AcceptRevisions(model);
+    else        Doc_RejectRevisions(model);
+
+    char* rtf = DocRtf_Emit(model);
+    if (rtf) {
+        Rich_SetRtf(tab->hEditor, rtf);
+        free(rtf);
+    }
+
+    Doc_Free(doc->source);
+    doc->source = model;
+    doc->modified = TRUE;
+
+    // The laid-out view is a view of the model, so it is rebuilt from the new
+    // one rather than left showing the old.
+    if (tab->hPageView) {
+        TogglePageLayout(hwnd);
+        TogglePageLayout(hwnd);
+    }
+
+    TabControl_UpdateTabTitle(tab->index);
+    MainWindow_UpdateTitle();
+    StatusBar_UpdateModified(TRUE);
+
+    WCHAR message[128];
+    swprintf_s(message, 128, L"%d tracked change%s %s",
+               count, count == 1 ? L"" : L"s", accept ? L"accepted" : L"rejected");
+    StatusBar_SetMessage(message);
+}
+
 void MainWindow_OnCommand(HWND hwnd, int id, HWND hwndCtl, UINT codeNotify) {
     (void)hwndCtl;
     (void)codeNotify;
@@ -1258,6 +1319,15 @@ void MainWindow_OnCommand(HWND hwnd, int id, HWND hwndCtl, UINT codeNotify) {
         // Settings menu
         case IDM_SETTINGS_DEFAULTS:
             Dialogs_Defaults(hwnd);
+            break;
+
+        // Review menu
+        case IDM_REVIEW_ACCEPT_ALL:
+            ResolveRevisions(hwnd, TRUE);
+            break;
+
+        case IDM_REVIEW_REJECT_ALL:
+            ResolveRevisions(hwnd, FALSE);
             break;
 
         // Help menu

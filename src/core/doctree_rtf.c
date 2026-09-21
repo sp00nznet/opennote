@@ -186,7 +186,13 @@ static void EmitParaProps(StrBuf* sb, const ParaProps* p, BOOL inTable) {
 
 static void EmitPara(StrBuf* sb, const DocPara* para, Tables* t, BOOL inTable) {
     EmitParaProps(sb, &para->props, inTable);
-    for (const DocRun* r = para->runs; r; r = r->next) EmitRun(sb, r, t);
+    for (const DocRun* r = para->runs; r; r = r->next) {
+        // A tracked deletion is content the document carries and does not
+        // show. The view is the document as it reads once the changes are
+        // accepted, which is what the model shows everywhere else.
+        if (r->rev.kind == REV_DELETED) continue;
+        EmitRun(sb, r, t);
+    }
 }
 
 static void EmitTable(StrBuf* sb, const DocBlock* block, Tables* t) {

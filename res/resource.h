@@ -210,6 +210,11 @@
 #define IDM_FILE_EXPORT_PDF      7333
 #define IDM_VIEW_PAGE_LAYOUT     7334
 
+// Review: what a document carries besides its text -- tracked changes, and
+// (from below) comments.
+#define IDM_REVIEW_ACCEPT_ALL    7340
+#define IDM_REVIEW_REJECT_ALL    7341
+
 // Toolbar child controls
 #define IDC_TOOLBAR              7340
 #define IDC_FONT_COMBO           7341

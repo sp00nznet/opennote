@@ -115,6 +115,11 @@ static BOOL FlattenPara(const DocPara* para, FlatText* out) {
         size_t pieceLen;
         WCHAR one[2];
 
+        // Content the document carries without showing it -- a tracked
+        // deletion -- is not laid out and takes up no offsets, which is what
+        // the model says about it everywhere else.
+        if (Doc_RunIsHidden(r)) continue;
+
         if (r->image) {
             // A picture is one character wide in the text, so every offset
             // either side of it still means what it meant in the model. A
@@ -561,10 +566,7 @@ static float PlaceImages(Flow* f, const DocPara* para, const LaidText* piece) {
     unsigned at = 0;
 
     for (const DocRun* r = para->runs; r; r = r->next) {
-        unsigned length = 1;
-        if (!r->image && !r->tab && !r->lineBreak) {
-            length = r->text ? (unsigned)wcslen(r->text) : 0;
-        }
+        unsigned length = Doc_RunLength(r);
         if (!length) continue;
 
         unsigned start = at;
@@ -706,10 +708,7 @@ static BOOL OweNotesFor(Flow* f, const DocPara* para, const LaidText* piece) {
     BOOL owed = FALSE;
 
     for (const DocRun* r = para->runs; r; r = r->next) {
-        unsigned length = 1;
-        if (!r->image && !r->tab && !r->lineBreak && !r->pageBreak) {
-            length = r->text ? (unsigned)wcslen(r->text) : 0;
-        }
+        unsigned length = Doc_RunLength(r);
         if (!length) continue;
 
         unsigned start = at;

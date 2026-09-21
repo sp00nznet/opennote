@@ -427,6 +427,56 @@ static void ReattachImages(DocModel* captured, const DocModel* source) {
     }
 }
 
+// Put the tracked changes back.
+//
+// The control has nowhere to keep them: a deletion is not in its text at all,
+// and an insertion is ordinary characters once they are in. So a paragraph
+// whose visible text came back unchanged takes its runs from the source
+// instead of from the control -- the model already says what those characters
+// are, and it says which of them are marked.
+//
+// ponytail: formatting applied in the editor to a paragraph carrying tracked
+// changes is lost on the way back out, because the whole paragraph is taken
+// from the source. The page view edits the model directly and has no such
+// problem; this exists because the RichEdit view is still where typing
+// happens, and losing a bold is better than losing the history.
+static BOOL ParaHasRevisions(const DocPara* para) {
+    for (const DocRun* r = para->runs; r; r = r->next) {
+        if (r->rev.kind != REV_NONE) return TRUE;
+    }
+    return FALSE;
+}
+
+static BOOL SameVisibleText(const DocPara* a, const DocPara* b) {
+    unsigned alen = 0, blen = 0;
+    WCHAR* at = Doc_ParaText(a, &alen);
+    WCHAR* bt = Doc_ParaText(b, &blen);
+
+    BOOL same = at && bt && alen == blen && wcsncmp(at, bt, alen) == 0;
+    free(at);
+    free(bt);
+    return same;
+}
+
+static void ReattachRevisions(DocModel* captured, const DocModel* source) {
+    int count = Doc_CountParas(source);
+
+    for (int i = 0; i < count; i++) {
+        DocPara* from = Doc_ParaAt((DocModel*)source, i);
+        if (!from || !ParaHasRevisions(from)) continue;
+
+        DocPara* into = Doc_ParaAt(captured, i);
+        if (!into || !SameVisibleText(from, into)) continue;
+
+        DocPara* clone = Doc_CloneParas(from);
+        if (!clone) continue;
+
+        Doc_SetRuns(into, clone->runs);
+        clone->runs = NULL;
+        Doc_FreeParas(clone);
+    }
+}
+
 DocModel* DocView_Capture(HWND h) {
     return DocView_CaptureWith(h, NULL);
 }
@@ -571,6 +621,7 @@ DocModel* DocView_CaptureWith(HWND h, const DocModel* source) {
     }
 
     if (pictures.count > 0 && pictures.next == 0) ReattachImages(doc, source);
+    if (source && Doc_CountRevisions(source) > 0) ReattachRevisions(doc, source);
 
     SendMessageW(h, EM_EXSETSEL, 0, (LPARAM)&saved);
     SendMessageW(h, WM_SETREDRAW, TRUE, 0);

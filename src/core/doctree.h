@@ -100,6 +100,26 @@ typedef struct {
     int    widthEmu, heightEmu;   // how big it is drawn; 914400 EMU to the inch
 } DocImage;
 
+// Tracked changes, out of `w:ins` and `w:del`.
+//
+// A deletion is kept rather than dropped: it is content the document still
+// carries, and throwing it away on read means a save cannot put it back. It is
+// invisible everywhere text is measured, drawn or edited -- RunLength answers
+// zero for it -- so the document reads as it would once the changes were
+// accepted, which is what a reader wants to see, while the file keeps its
+// history.
+//
+// ponytail: one display mode, the "final" one. Showing markup -- insertions
+// underlined, deletions struck through -- is a layout feature, and it belongs
+// with the review pane rather than in the model.
+typedef enum { REV_NONE, REV_INSERTED, REV_DELETED } DocRevision;
+
+typedef struct {
+    DocRevision kind;
+    WCHAR       author[64];
+    WCHAR       date[32];        // ISO 8601, as the file states it
+} RevisionMark;
+
 typedef struct DocRun {
     struct DocRun* next;
     CharProps      props;
@@ -114,6 +134,9 @@ typedef struct DocRun {
     // any other text; this says which note it points at.
     int            noteId;        // 0 = not a reference
     BOOL           noteIsEnd;
+
+    // Whether this run was inserted or deleted with track changes on.
+    RevisionMark   rev;
 } DocRun;
 
 typedef struct DocPara {
@@ -247,6 +270,18 @@ DocStyle* Doc_FindStyle(const DocModel* doc, const WCHAR* id);
 void Doc_ResolveStyle(const DocModel* doc, const WCHAR* id,
                       ParaProps* paraOut, CharProps* runOut);
 
+// ---------------------------------------------------------------------------
+// Tracked changes
+// ---------------------------------------------------------------------------
+
+int  Doc_CountRevisions(const DocModel* doc);
+
+// Accept: the deletions go and the insertions become ordinary text -- which
+// changes nothing on screen, because that is already what is shown.
+// Reject: the insertions go and the deletions come back, which does.
+void Doc_AcceptRevisions(DocModel* doc);
+void Doc_RejectRevisions(DocModel* doc);
+
 // Counts, for the round-trip report.
 int Doc_CountParas(const DocModel* doc);
 int Doc_CountRuns(const DocModel* doc);
@@ -271,6 +306,15 @@ typedef struct {
     DocPara* para;
     unsigned offset;
 } DocPos;
+
+// What one run is worth in the text: the characters it contributes, and
+// whether it contributes nothing because the document carries it without
+// showing it (a tracked deletion). Everything that walks runs by offset --
+// editing, the layout engine -- asks these rather than working it out again,
+// because two answers to "how long is this run" is how a caret ends up in the
+// wrong place.
+BOOL     Doc_RunIsHidden(const DocRun* run);
+unsigned Doc_RunLength(const DocRun* run);
 
 unsigned Doc_ParaLength(const DocPara* para);
 WCHAR*   Doc_ParaText(const DocPara* para, unsigned* lenOut);   // caller frees
@@ -304,6 +348,12 @@ DocModel* Doc_Clone(const DocModel* src);
 // A deep copy of a chain of paragraphs, for the parts of a document that are
 // not blocks: a header, a footer.
 DocPara* Doc_CloneParas(const DocPara* src);
+
+// Replace a paragraph's runs, freeing the ones that were there, and free a
+// chain of paragraphs. Both are for code that builds runs elsewhere and hands
+// them over -- putting back what a view could not hold.
+void Doc_SetRuns(DocPara* para, DocRun* runs);
+void Doc_FreeParas(DocPara* paras);
 
 // Self-check for the editing operations, run by `OpenNote.exe --selftest`.
 BOOL DocEdit_SelfTest(char* failure, size_t failureSize);
