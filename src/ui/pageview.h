@@ -1,15 +1,22 @@
 #ifndef PAGEVIEW_H
 #define PAGEVIEW_H
 
-// A scrollable window showing what the layout engine produced: real pages,
-// with margins and page boundaries, rather than text flowed into a window.
+// The page view: the laid-out document, drawn and edited.
 //
-// Captures the editor's current contents, lays them out and shows them, so it
-// previews what is on screen rather than what was last saved.
+// A child window, not a window of its own. A tab shows either its text control
+// or this, in the same rectangle, and switching between them is what View >
+// Page Layout does -- so the document does not move house to be looked at on
+// its pages, and every tab can be in a different view.
+//
+// It works on a copy of what the control holds: `source` is the model the
+// document was read from, for the things a control cannot give back -- a
+// picture's bytes, a header, the page setup. What is edited here goes back to
+// the control when the view closes or when the document is saved.
 
-// `source` is the model the view was loaded from, when there is one: the
-// control cannot give a picture's bytes back, so they come from there.
-BOOL PageView_Show(HWND hOwner, HWND hRichEdit, const WCHAR* docTitle,
-                   const DocModel* source);
+HWND PageView_Create(HWND hParent, HWND hRichEdit, const DocModel* source);
+
+// Push whatever has been edited back into the text control it came from.
+// Called before saving or printing, and when the view goes away.
+void PageView_Apply(HWND hPageView);
 
 #endif // PAGEVIEW_H

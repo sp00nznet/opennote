@@ -159,7 +159,8 @@ HWND FormatBar_Create(HWND hParent) {
             // must come back up.
             BOOL latches = BUTTONS[i].kind == GLYPH_LETTER ||
                            BUTTONS[i].kind == GLYPH_ALIGN ||
-                           BUTTONS[i].kind == GLYPH_LIST;
+                           BUTTONS[i].kind == GLYPH_LIST ||
+                           BUTTONS[i].kind == GLYPH_PAGE;
             tbb[i].fsStyle = latches ? BTNS_CHECK : BTNS_BUTTON;
             tbb[i].iBitmap = I_IMAGENONE;
         }
@@ -220,7 +221,7 @@ void FormatBar_Layout(int width) {
     InvalidateRect(g_hBar, NULL, TRUE);
 }
 
-void FormatBar_UpdateVisibility(HWND hEditor) {
+void FormatBar_UpdateVisibility(HWND hEditor, BOOL pageLayout) {
     if (!g_hBar) return;
 
     // The bar is the user's choice now, not the document's: New, Open, Save
@@ -239,17 +240,30 @@ void FormatBar_UpdateVisibility(HWND hEditor) {
     for (int i = 0; i < BUTTON_COUNT; i++) {
         if (BUTTONS[i].id == 0) continue;
 
-        BOOL needsRich = BUTTONS[i].kind != GLYPH_NEW &&
-                         BUTTONS[i].kind != GLYPH_OPEN &&
-                         BUTTONS[i].kind != GLYPH_SAVE &&
-                         BUTTONS[i].kind != GLYPH_PRINT;
+        BOOL usable;
+        switch (BUTTONS[i].kind) {
+            case GLYPH_NEW:
+            case GLYPH_OPEN:
+            case GLYPH_SAVE:
+            case GLYPH_PRINT:
+                usable = TRUE;              // these mean the same in any view
+                break;
+            case GLYPH_PAGE:
+                usable = rich;              // ...and this is how you get back
+                break;
+            default:
+                usable = rich && !pageLayout;
+                break;
+        }
 
-        SendMessageW(g_hBar, TB_ENABLEBUTTON, BUTTONS[i].id,
-                     MAKELONG(!needsRich || rich, 0));
+        SendMessageW(g_hBar, TB_ENABLEBUTTON, BUTTONS[i].id, MAKELONG(usable, 0));
     }
 
-    EnableWindow(g_hFontCombo, rich);
-    EnableWindow(g_hSizeCombo, rich);
+    // The page button shows which view the tab is in.
+    SendMessageW(g_hBar, TB_CHECKBUTTON, IDM_VIEW_PAGE_LAYOUT, MAKELONG(pageLayout, 0));
+
+    EnableWindow(g_hFontCombo, rich && !pageLayout);
+    EnableWindow(g_hSizeCombo, rich && !pageLayout);
 }
 
 // ---------------------------------------------------------------------------

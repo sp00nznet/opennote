@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- **Page layout is a view of the tab rather than a window of its own.** It used to open a
+  second top-level window; now View > Page Layout, the toolbar's page button or
+  Ctrl+Shift+L switches the tab you are in between flowing text and laid-out pages, each
+  tab remembers which view it is showing, and switching tabs switches views with them.
+  The text control stays the document's home: the laid-out view works on a copy and hands
+  it back when the view closes or when the document is saved, printed or exported, so
+  neither view has to watch the other. The page count and zoom moved to the status bar,
+  which is where a child window's title goes.
+
 ### Added
 - **A document group on the toolbar** — New, Open, Save and Print, and a button that
   opens the page layout view. The bar used to appear only for a rich text document and

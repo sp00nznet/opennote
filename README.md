@@ -81,7 +81,9 @@ letters and roman numerals, and `1.2.` for a nested level), pictures, columns, p
 breaks, headers and footers on every page, and footnotes at the foot of the page their
 reference landed on.
 
-**The page view edits** (View > Page Layout, or Ctrl+Shift+L). A click names a
+**The page view is a view of the tab**, not a window of its own: View > Page Layout, the
+toolbar's page button, or Ctrl+Shift+L switches the document you are in between flowing
+text and laid-out pages, and every tab remembers which it is showing. **It edits there**. A click names a
 character, the arrows walk the laid-out lines rather than the runs behind them, Home and
 End mean the wrapped line, Page Up and Page Down mean an actual page, and there is a
 ruler with draggable indent markers. Undo is a stack of model snapshots. Character

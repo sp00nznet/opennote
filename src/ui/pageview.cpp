@@ -1,10 +1,14 @@
 // The page view: the laid-out document, drawn and edited.
 //
 // The engine answers "where does everything go" and knows nothing about
-// windows. This is the other half -- a scrollable window that paints those
-// pages with Direct2D, and, since v0.8, the window that edits them: a click
-// names a character, the arrows walk the laid-out lines rather than the model,
-// and every keystroke changes the model and lays it out again.
+// windows. This is the other half -- a scrollable child window that paints
+// those pages with Direct2D, and the window that edits them: a click names a
+// character, the arrows walk the laid-out lines rather than the model, and
+// every keystroke changes the model and lays it out again.
+//
+// It lives inside a tab, in the same rectangle as that tab's text control, so
+// switching to page layout does not move the document into a window of its
+// own -- the tab simply shows its other view.
 //
 // Nothing here knows how to break a line or where a paragraph ends up. It asks
 // the engine, which is the point of the engine being free of any window: the
@@ -1045,19 +1049,19 @@ static void Paint(HWND hwnd, PageViewState* st) {
 // Window
 // ---------------------------------------------------------------------------
 
+// What used to go in the window's title bar. A child window has none, so the
+// page count and zoom go to the status bar, where the line and column already
+// are.
 static void SetTitle(HWND hwnd, PageViewState* st, const WCHAR* docTitle) {
-    // Remembered, so a retitle on zoom does not drop the document's name.
-    static WCHAR remembered[256] = L"Document";
-    if (docTitle && docTitle[0]) wcsncpy_s(remembered, 256, docTitle, _TRUNCATE);
+    (void)hwnd;
+    (void)docTitle;
 
-    WCHAR title[512];
-    swprintf_s(title, 512, L"Page Layout - %s%s - %d page%s at %d%%",
-               remembered,
-               st->dirty ? L" *" : L"",
+    WCHAR status[128];
+    swprintf_s(status, 128, L"Page layout - %d page%s at %d%%",
                Layout_PageCount(st->layout),
                Layout_PageCount(st->layout) == 1 ? L"" : L"s",
                (int)(st->zoom * 100.0f + 0.5f));
-    SetWindowTextW(hwnd, title);
+    StatusBar_SetMessage(status);
 }
 
 // Arrows, Home, End and the page keys. All of them are questions about the
@@ -1323,7 +1327,10 @@ static LRESULT CALLBACK PageViewProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM 
 
                 switch (wParam) {
                     case VK_ESCAPE:
-                        SendMessageW(hwnd, WM_CLOSE, 0, 0);
+                        // Back to the text view. The tab owns this window, so
+                        // it does the closing.
+                        PostMessageW(GetAncestor(hwnd, GA_ROOT), WM_COMMAND,
+                                     MAKEWPARAM(IDM_VIEW_PAGE_LAYOUT, 0), 0);
                         return 0;
 
                     case VK_DELETE:
@@ -1374,7 +1381,7 @@ static LRESULT CALLBACK PageViewProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM 
                             // the rest.
                             ApplyToDocument(hwnd, st);
                             SetTitle(hwnd, st, NULL);
-                            PostMessageW(GetWindow(hwnd, GW_OWNER), WM_COMMAND,
+                            PostMessageW(GetAncestor(hwnd, GA_ROOT), WM_COMMAND,
                                          MAKEWPARAM(IDM_FILE_SAVE, 0), 0);
                             return 0;
                         }
@@ -1387,7 +1394,7 @@ static LRESULT CALLBACK PageViewProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM 
                             // model through the same engine.
                             ApplyToDocument(hwnd, st);
                             SetTitle(hwnd, st, NULL);
-                            PostMessageW(GetWindow(hwnd, GW_OWNER), WM_COMMAND,
+                            PostMessageW(GetAncestor(hwnd, GA_ROOT), WM_COMMAND,
                                          MAKEWPARAM(IDM_FILE_PRINT, 0), 0);
                             return 0;
                         }
@@ -1452,11 +1459,6 @@ static LRESULT CALLBACK PageViewProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM 
             }
             return 0;
 
-        case WM_CLOSE:
-            if (st) ApplyToDocument(hwnd, st);
-            DestroyWindow(hwnd);
-            return 0;
-
         case WM_DESTROY:
             if (st) {
                 KillTimer(hwnd, CARET_TIMER);
@@ -1497,21 +1499,24 @@ static void EnsureClass(void) {
     registered = TRUE;
 }
 
-extern "C" BOOL PageView_Show(HWND hOwner, HWND hRichEdit, const WCHAR* docTitle,
-                              const DocModel* source) {
-    if (!hRichEdit) return FALSE;
+extern "C" HWND PageView_Create(HWND hParent, HWND hRichEdit, const DocModel* source) {
+    if (!hParent || !hRichEdit) return NULL;
 
     DocModel* doc = DocView_CaptureWith(hRichEdit, source);
-    if (!doc) return FALSE;
+    if (!doc) return NULL;
 
     PageViewState* st = (PageViewState*)calloc(1, sizeof(PageViewState));
     if (!st) {
         Doc_Free(doc);
-        return FALSE;
+        return NULL;
     }
 
     st->doc = doc;
     st->hRich = hRichEdit;
+    st->openedWith = Rich_GetRtf(hRichEdit);
+    st->zoom = 1.0f;
+    st->focused = TRUE;
+    st->caretOn = TRUE;
 
     if (SUCCEEDED(DWriteCreateFactory(DWRITE_FACTORY_TYPE_SHARED, __uuidof(IDWriteFactory),
                                       (IUnknown**)&st->dwrite))) {
@@ -1523,50 +1528,55 @@ extern "C" BOOL PageView_Show(HWND hOwner, HWND hRichEdit, const WCHAR* docTitle
             st->rulerFont->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
         }
     }
-    st->openedWith = Rich_GetRtf(hRichEdit);
-    st->zoom = 1.0f;
-    st->focused = TRUE;
-    st->caretOn = TRUE;
 
     st->layout = Layout_Build(doc, L"Calibri", 11.0f);
     if (!st->layout) {
+        if (st->rulerFont) st->rulerFont->Release();
+        if (st->dwrite) st->dwrite->Release();
         free(st->openedWith);
         Doc_Free(doc);
         free(st);
-        return FALSE;
+        return NULL;
     }
 
     if (FAILED(D2D1CreateFactory(D2D1_FACTORY_TYPE_SINGLE_THREADED, &st->d2d))) {
         Layout_Free(st->layout);
+        if (st->rulerFont) st->rulerFont->Release();
+        if (st->dwrite) st->dwrite->Release();
         free(st->openedWith);
         Doc_Free(doc);
         free(st);
-        return FALSE;
+        return NULL;
     }
 
     EnsureClass();
 
     HWND hwnd = CreateWindowExW(
-        0, PAGEVIEW_CLASS, L"Page Layout",
-        WS_OVERLAPPEDWINDOW | WS_VSCROLL,
-        CW_USEDEFAULT, CW_USEDEFAULT, 900, 820,
-        hOwner, NULL, g_app->hInstance, st);
+        0, PAGEVIEW_CLASS, NULL,
+        WS_CHILD | WS_VISIBLE | WS_VSCROLL,
+        0, 0, 100, 100,
+        hParent, NULL, g_app->hInstance, st);
 
     if (!hwnd) {
         DiscardTarget(st);
         st->d2d->Release();
         Layout_Free(st->layout);
+        if (st->rulerFont) st->rulerFont->Release();
+        if (st->dwrite) st->dwrite->Release();
         free(st->openedWith);
         Doc_Free(doc);
         free(st);
-        return FALSE;
+        return NULL;
     }
 
-    SetTitle(hwnd, st, docTitle);
     UpdateScrollRange(hwnd, st);
-
-    ShowWindow(hwnd, SW_SHOW);
-    UpdateWindow(hwnd);
     SetFocus(hwnd);
-    return TRUE;
+    return hwnd;
+}
+
+extern "C" void PageView_Apply(HWND hPageView) {
+    if (!hPageView || !IsWindow(hPageView)) return;
+
+    PageViewState* st = (PageViewState*)GetWindowLongPtrW(hPageView, GWLP_USERDATA);
+    if (st) ApplyToDocument(hPageView, st);
 }

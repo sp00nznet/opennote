@@ -392,6 +392,10 @@ void App_CloseTab(int index) {
 
     Tab* tab = g_app->tabs[index];
 
+    // Anything edited in the laid-out view belongs to the document before it
+    // is asked whether to save.
+    if (tab->hPageView) PageView_Apply(tab->hPageView);
+
     // Check for unsaved changes
     if (tab->document && tab->document->modified) {
         int result = Dialogs_SaveChanges(g_app->hMainWindow, Document_GetTitle(tab->document));
@@ -403,11 +407,13 @@ void App_CloseTab(int index) {
         }
     }
 
-    // Hide editor
+    // Hide both views
     ShowWindow(tab->hEditor, SW_HIDE);
+    if (tab->hPageView) ShowWindow(tab->hPageView, SW_HIDE);
 
     // Cleanup
     if (tab->document) Document_Destroy(tab->document);
+    if (tab->hPageView) DestroyWindow(tab->hPageView);
     if (tab->hEditor) DestroyWindow(tab->hEditor);
     free(tab);
     g_app->tabs[index] = NULL;
@@ -442,19 +448,31 @@ void App_CloseTab(int index) {
 void App_SetActiveTab(int index) {
     if (index < 0 || index >= MAX_TABS || !g_app->tabs[index]) return;
 
-    // Hide previous editor
+    // Hide whichever view the previous tab was showing.
     if (g_app->activeTab >= 0 && g_app->activeTab < MAX_TABS && g_app->tabs[g_app->activeTab]) {
-        ShowWindow(g_app->tabs[g_app->activeTab]->hEditor, SW_HIDE);
+        Tab* previous = g_app->tabs[g_app->activeTab];
+        ShowWindow(previous->hEditor, SW_HIDE);
+        if (previous->hPageView) ShowWindow(previous->hPageView, SW_HIDE);
     }
 
     g_app->activeTab = index;
     TabControl_SetActiveTab(index);
 
-    // Show new editor
+    // Show this tab's, which may be the laid-out one.
     Tab* tab = g_app->tabs[index];
-    if (tab && tab->hEditor) {
+    if (tab && tab->hPageView) {
+        ShowWindow(tab->hPageView, SW_SHOW);
+        SetFocus(tab->hPageView);
+
+        RECT rc;
+        GetClientRect(g_app->hMainWindow, &rc);
+        SendMessageW(g_app->hMainWindow, WM_SIZE, SIZE_RESTORED, MAKELPARAM(rc.right, rc.bottom));
+    } else if (tab && tab->hEditor) {
         ShowWindow(tab->hEditor, SW_SHOW);
         SetFocus(tab->hEditor);
+
+        // The page count belongs to the tab that was showing pages.
+        StatusBar_SetMessage(L"");
 
         // Trigger resize to position editor correctly
         RECT rc;

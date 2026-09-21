@@ -12,7 +12,10 @@ HWND FormatBar_Create(HWND hParent);
 int  FormatBar_Height(void);
 
 // Show or hide according to the active tab, and lay out at the given width.
-void FormatBar_UpdateVisibility(HWND hEditor);
+// `pageLayout` is TRUE when the active tab is showing the laid-out view, in
+// which case the character formatting is not applicable and the page button is
+// the one that is latched.
+void FormatBar_UpdateVisibility(HWND hEditor, BOOL pageLayout);
 void FormatBar_Layout(int width);
 
 // Pull the button and combo states from what is under the caret.

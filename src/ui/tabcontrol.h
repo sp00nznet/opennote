@@ -5,6 +5,12 @@
 struct Tab {
     Document* document;
     HWND hEditor;
+
+    // The laid-out view of the same document, when this tab is showing one.
+    // The tab owns it; the text control stays alive underneath, holding what
+    // was there when the view opened.
+    HWND hPageView;
+
     int index;
 };
 

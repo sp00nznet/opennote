@@ -537,9 +537,11 @@ void MainWindow_OnSize(HWND hwnd, UINT state, int cx, int cy) {
         SetWindowPos(g_hNewTabBtn, HWND_TOP, btnX, 2, btnWidth, tabHeight - 4, 0);
     }
 
-    // Formatting toolbar, when a rich text tab is active
+    // The toolbar reflects what the active tab is showing: a laid-out page has
+    // no character formatting yet, so that half of the bar goes grey there too.
     Tab* tab = App_GetActiveTab();
-    FormatBar_UpdateVisibility(tab ? tab->hEditor : NULL);
+    FormatBar_UpdateVisibility(tab ? tab->hEditor : NULL,
+                               tab && tab->hPageView);
 
     int barHeight = FormatBar_Height();
     if (barHeight > 0) {
@@ -547,10 +549,13 @@ void MainWindow_OnSize(HWND hwnd, UINT state, int cx, int cy) {
         FormatBar_Layout(cx);
     }
 
-    // Position editor
-    if (tab && tab->hEditor) {
+    // Position whichever view this tab is showing, in the same rectangle.
+    if (tab) {
         int top = tabHeight + barHeight;
-        SetWindowPos(tab->hEditor, NULL, 0, top, cx, cy - top - statusHeight, SWP_NOZORDER);
+        HWND view = tab->hPageView ? tab->hPageView : tab->hEditor;
+        if (view) {
+            SetWindowPos(view, NULL, 0, top, cx, cy - top - statusHeight, SWP_NOZORDER);
+        }
     }
 }
 
@@ -862,6 +867,57 @@ static void ExportToPdf(HWND hwnd, HWND hEditor, Document* doc) {
     }
 }
 
+// Switch the active tab between its text control and the laid-out view.
+//
+// The control stays the document's home: the laid-out view works on a copy and
+// hands it back on the way out. That is what makes the two views agree without
+// either of them having to watch the other.
+static void TogglePageLayout(HWND hwnd) {
+    Tab* tab = App_GetActiveTab();
+    if (!tab || !tab->hEditor) return;
+
+    if (tab->hPageView) {
+        PageView_Apply(tab->hPageView);
+        DestroyWindow(tab->hPageView);
+        tab->hPageView = NULL;
+
+        ShowWindow(tab->hEditor, SW_SHOW);
+        SetFocus(tab->hEditor);
+        StatusBar_SetMessage(L"");
+    } else {
+        if (!Editor_IsRich(tab->hEditor)) {
+            MessageBoxW(hwnd,
+                L"Page layout is for rich text documents.\n\n"
+                L"A plain text file has no pages to lay out -- open or save it as "
+                L".rtf or .docx first.",
+                APP_NAME, MB_ICONINFORMATION);
+            return;
+        }
+
+        HWND view = PageView_Create(hwnd, tab->hEditor,
+                                    tab->document ? tab->document->source : NULL);
+        if (!view) {
+            MessageBoxW(hwnd, L"The page layout view could not be prepared.",
+                        APP_NAME, MB_ICONWARNING);
+            return;
+        }
+
+        tab->hPageView = view;
+        ShowWindow(tab->hEditor, SW_HIDE);
+    }
+
+    RECT rc;
+    GetClientRect(hwnd, &rc);
+    MainWindow_OnSize(hwnd, SIZE_RESTORED, rc.right, rc.bottom);
+}
+
+// The laid-out view holds edits that have not reached the control yet, and
+// saving, printing and exporting all read the control.
+static void FlushPageLayout(void) {
+    Tab* tab = App_GetActiveTab();
+    if (tab && tab->hPageView) PageView_Apply(tab->hPageView);
+}
+
 void MainWindow_OnCommand(HWND hwnd, int id, HWND hwndCtl, UINT codeNotify) {
     (void)hwndCtl;
     (void)codeNotify;
@@ -912,6 +968,7 @@ void MainWindow_OnCommand(HWND hwnd, int id, HWND hwndCtl, UINT codeNotify) {
             break;
 
         case IDM_FILE_SAVE:
+            FlushPageLayout();
             if (doc && hEditor) {
                 Document_Save(doc, hEditor);
                 TabControl_UpdateTabTitle(tab->index);
@@ -921,6 +978,7 @@ void MainWindow_OnCommand(HWND hwnd, int id, HWND hwndCtl, UINT codeNotify) {
             break;
 
         case IDM_FILE_SAVEAS:
+            FlushPageLayout();
             if (doc && hEditor) {
                 WCHAR path[MAX_PATH] = {0};
                 if (Dialogs_SaveFile(hwnd, path, MAX_PATH, Document_GetTitle(doc))) {
@@ -963,6 +1021,7 @@ void MainWindow_OnCommand(HWND hwnd, int id, HWND hwndCtl, UINT codeNotify) {
             break;
 
         case IDM_FILE_PRINT:
+            FlushPageLayout();
             // The rich view prints itself: the plain path below renders one
             // page of unformatted text and stops, which would silently drop
             // both the formatting and everything past page one.
@@ -1031,6 +1090,7 @@ void MainWindow_OnCommand(HWND hwnd, int id, HWND hwndCtl, UINT codeNotify) {
             // Only the rich view: exporting a plain text file to PDF is a
             // thing nobody asks for, and the layout engine has nothing to lay
             // out from Scintilla.
+            FlushPageLayout();
             if (hEditor && Editor_IsRich(hEditor)) {
                 ExportToPdf(hwnd, hEditor, doc);
             } else {
@@ -1039,25 +1099,19 @@ void MainWindow_OnCommand(HWND hwnd, int id, HWND hwndCtl, UINT codeNotify) {
             }
             break;
 
-        case IDM_VIEW_PAGE_LAYOUT:
         case IDM_FILE_PRINT_PREVIEW:
-            // One window for both: a preview of the laid-out pages and the
-            // place they can be edited are the same thing once the engine
-            // exists, which is the whole point of it.
-            if (hEditor && Editor_IsRich(hEditor)) {
-                // A rich document previews through the layout engine, which
-                // shows real pages with real margins. The plain text preview
-                // below renders unformatted text into a fixed box and cannot
-                // show either.
-                if (!PageView_Show(hwnd, hEditor,
-                                   doc ? Document_GetTitle(doc) : NULL,
-                                   doc ? doc->source : NULL)) {
-                    MessageBoxW(hwnd, L"The page preview could not be prepared.",
-                                APP_NAME, MB_ICONWARNING);
-                }
-            } else if (hEditor) {
+            // A preview of the laid-out pages and the place they can be edited
+            // are the same thing once the engine exists, so this is the page
+            // layout view -- except for plain text, which the engine has
+            // nothing to lay out and which keeps its own simple preview.
+            if (hEditor && !Editor_IsRich(hEditor)) {
                 Dialogs_PrintPreview(hwnd, hEditor);
+                break;
             }
+            /* fall through */
+
+        case IDM_VIEW_PAGE_LAYOUT:
+            TogglePageLayout(hwnd);
             break;
 
         case IDM_FILE_EXIT:
@@ -1205,7 +1259,10 @@ void MainWindow_OnCommand(HWND hwnd, int id, HWND hwndCtl, UINT codeNotify) {
 
         case IDM_VIEW_TOOLBAR:
             g_app->showFormatBar = !g_app->showFormatBar;
-            FormatBar_UpdateVisibility(hEditor);
+            {
+                Tab* active = App_GetActiveTab();
+                FormatBar_UpdateVisibility(hEditor, active && active->hPageView);
+            }
             {
                 RECT rc;
                 GetClientRect(hwnd, &rc);
