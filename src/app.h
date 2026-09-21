@@ -21,6 +21,7 @@ struct AppState {
     // Settings
     BOOL wordWrap;
     BOOL showStatusBar;
+    BOOL showFormatBar;
     BOOL alwaysOnTop;
     BOOL autoSaveSession;   // Save session on exit
     BOOL autoRestoreSession; // Restore session on startup

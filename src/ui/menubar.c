@@ -115,6 +115,7 @@ HMENU MenuBar_Create(void) {
     AppendMenuW(hViewMenu, MF_SEPARATOR, 0, NULL);
     AppendMenuW(hViewMenu, MF_STRING, IDM_VIEW_PAGE_LAYOUT, L"&Page Layout	Ctrl+Shift+L");
     AppendMenuW(hViewMenu, MF_SEPARATOR, 0, NULL);
+    AppendMenuW(hViewMenu, MF_STRING, IDM_VIEW_TOOLBAR, L"&Toolbar");
     AppendMenuW(hViewMenu, MF_STRING, IDM_VIEW_STATUSBAR, L"&Status Bar");
     AppendMenuW(hViewMenu, MF_SEPARATOR, 0, NULL);
     AppendMenuW(hViewMenu, MF_STRING, IDM_VIEW_NOTES_BROWSER, L"&Notes Browser...");
@@ -238,6 +239,7 @@ void MenuBar_UpdateFormatMenu(HMENU hMenu) {
 
 // Update View menu state
 void MenuBar_UpdateViewMenu(HMENU hMenu) {
+    CheckMenuItem(hMenu, IDM_VIEW_TOOLBAR, MF_BYCOMMAND | (g_app->showFormatBar ? MF_CHECKED : MF_UNCHECKED));
     CheckMenuItem(hMenu, IDM_VIEW_STATUSBAR, MF_BYCOMMAND | (g_app->showStatusBar ? MF_CHECKED : MF_UNCHECKED));
     CheckMenuItem(hMenu, IDM_VIEW_ALWAYS_ON_TOP, MF_BYCOMMAND | (g_app->alwaysOnTop ? MF_CHECKED : MF_UNCHECKED));
 

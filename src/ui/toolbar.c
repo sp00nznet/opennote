@@ -1,10 +1,14 @@
-// The formatting toolbar.
+// The toolbar: documents on the left, formatting on the right.
 //
 // ponytail: the buttons are custom-drawn rather than loaded from a bitmap
-// strip. A B/I/U toolbar needs about a dozen glyphs, and drawing a styled
-// letter or three lines in a rectangle is less code than authoring, shipping
-// and DPI-scaling an icon resource -- and it follows the system text colour
-// into dark mode for free.
+// strip. A toolbar this size needs about twenty glyphs, and drawing a styled
+// letter, a floppy disk or three lines in a rectangle is less code than
+// authoring, shipping and DPI-scaling an icon resource -- and it follows the
+// system text colour into dark mode for free, which a bitmap does not.
+//
+// The same reasoning as `tools/make_icon.py`: the shapes are geometry, so they
+// are sharp at any size and carry nothing platform-specific but the drawing
+// calls themselves.
 
 #include "supernote.h"
 #include "res/resource.h"
@@ -14,6 +18,10 @@
 #define COMBO_FONT_W   170
 #define COMBO_SIZE_W   60
 #define BTN_SIZE       26
+
+// The combos live in a separator-shaped hole in the middle of the button run.
+#define COMBO_GAP_INDEX 6
+#define COMBO_GAP_W     (COMBO_FONT_W + 4 + COMBO_SIZE_W + 8)
 
 static HWND g_hBar       = NULL;
 static HWND g_hFontCombo = NULL;
@@ -37,7 +45,12 @@ typedef enum {
     GLYPH_ALIGN,      // horizontal rules, ragged on one side
     GLYPH_LIST,       // marker plus rules
     GLYPH_INDENT,     // arrow plus rules
-    GLYPH_COLOR       // an "A" over a colour swatch
+    GLYPH_COLOR,      // an "A" over a colour swatch
+    GLYPH_NEW,        // a blank page
+    GLYPH_OPEN,       // a folder
+    GLYPH_SAVE,       // a floppy disk, still what "save" looks like
+    GLYPH_PRINT,      // a printer
+    GLYPH_PAGE        // a page with lines: the laid-out view
 } GlyphKind;
 
 typedef struct {
@@ -49,6 +62,13 @@ typedef struct {
 } BarButton;
 
 static const BarButton BUTTONS[] = {
+    { IDM_FILE_NEW,             GLYPH_NEW,    0, 0, L"New (Ctrl+N)" },
+    { IDM_FILE_OPEN,            GLYPH_OPEN,   0, 0, L"Open (Ctrl+O)" },
+    { IDM_FILE_SAVE,            GLYPH_SAVE,   0, 0, L"Save (Ctrl+S)" },
+    { IDM_FILE_PRINT,           GLYPH_PRINT,  0, 0, L"Print (Ctrl+P)" },
+    { 0, 0, 0, 0, NULL },
+    { IDM_VIEW_PAGE_LAYOUT,     GLYPH_PAGE,   0, 0, L"Page layout (Ctrl+Shift+L)" },
+    { 0, 0, 0, 0, NULL },       // the wide one: the combos sit in this gap
     { IDM_FORMAT_BOLD,          GLYPH_LETTER, L'B', 0, L"Bold (Ctrl+B)" },
     { IDM_FORMAT_ITALIC,        GLYPH_LETTER, L'I', 0, L"Italic (Ctrl+I)" },
     { IDM_FORMAT_UNDERLINE,     GLYPH_LETTER, L'U', 0, L"Underline (Ctrl+U)" },
@@ -126,19 +146,22 @@ HWND FormatBar_Create(HWND hParent) {
     for (int i = 0; i < BUTTON_COUNT; i++) {
         if (BUTTONS[i].id == 0) {
             tbb[i].fsStyle = BTNS_SEP;
-            tbb[i].iBitmap = 6;
+            // The second separator is the space the font and size combos are
+            // placed over: a separator is the only toolbar item whose width
+            // can simply be stated.
+            tbb[i].iBitmap = (i == COMBO_GAP_INDEX) ? COMBO_GAP_W : 6;
         } else {
             tbb[i].idCommand = BUTTONS[i].id;
             tbb[i].fsState = TBSTATE_ENABLED;
-            tbb[i].fsStyle = BTNS_CHECK;
-            tbb[i].iBitmap = I_IMAGENONE;
-        }
-    }
 
-    // Indent is an action, not a state, so it must not latch on when clicked.
-    for (int i = 0; i < BUTTON_COUNT; i++) {
-        if (BUTTONS[i].kind == GLYPH_INDENT || BUTTONS[i].kind == GLYPH_COLOR) {
-            tbb[i].fsStyle = BTNS_BUTTON;
+            // Only the buttons that show a state latch. Everything else --
+            // saving, printing, indenting, opening a view -- is an action and
+            // must come back up.
+            BOOL latches = BUTTONS[i].kind == GLYPH_LETTER ||
+                           BUTTONS[i].kind == GLYPH_ALIGN ||
+                           BUTTONS[i].kind == GLYPH_LIST;
+            tbb[i].fsStyle = latches ? BTNS_CHECK : BTNS_BUTTON;
+            tbb[i].iBitmap = I_IMAGENONE;
         }
     }
 
@@ -183,12 +206,15 @@ void FormatBar_Layout(int width) {
     (void)width;
 
     int y = (BAR_HEIGHT - 22) / 2;
-    SetWindowPos(g_hFontCombo, NULL, 4, y, COMBO_FONT_W, 300, SWP_NOZORDER);
-    SetWindowPos(g_hSizeCombo, NULL, 4 + COMBO_FONT_W + 4, y, COMBO_SIZE_W, 300, SWP_NOZORDER);
 
-    // Push the button run clear of the combos.
-    int indent = 4 + COMBO_FONT_W + 4 + COMBO_SIZE_W + 8;
-    SendMessageW(g_hBar, TB_SETINDENT, indent, 0);
+    // Put the combos wherever the gap ended up, rather than assuming: the
+    // buttons before it are a different width on a different DPI.
+    RECT gap = {0};
+    SendMessageW(g_hBar, TB_GETITEMRECT, COMBO_GAP_INDEX, (LPARAM)&gap);
+
+    int x = gap.left + 4;
+    SetWindowPos(g_hFontCombo, NULL, x, y, COMBO_FONT_W, 300, SWP_NOZORDER);
+    SetWindowPos(g_hSizeCombo, NULL, x + COMBO_FONT_W + 4, y, COMBO_SIZE_W, 300, SWP_NOZORDER);
 
     // Custom-drawn buttons do not repaint themselves after the indent changes.
     InvalidateRect(g_hBar, NULL, TRUE);
@@ -197,11 +223,33 @@ void FormatBar_Layout(int width) {
 void FormatBar_UpdateVisibility(HWND hEditor) {
     if (!g_hBar) return;
 
-    BOOL want = Editor_IsRich(hEditor);
-    if (want == g_visible) return;
+    // The bar is the user's choice now, not the document's: New, Open, Save
+    // and Print mean the same thing whatever is being edited. What the
+    // document decides is which buttons are usable -- a plain text file has no
+    // bold and no pages, so those go grey rather than disappearing and moving
+    // everything else along the bar.
+    BOOL want = g_app->showFormatBar;
+    if (want != g_visible) {
+        g_visible = want;
+        ShowWindow(g_hBar, want ? SW_SHOW : SW_HIDE);
+    }
 
-    g_visible = want;
-    ShowWindow(g_hBar, want ? SW_SHOW : SW_HIDE);
+    BOOL rich = Editor_IsRich(hEditor);
+
+    for (int i = 0; i < BUTTON_COUNT; i++) {
+        if (BUTTONS[i].id == 0) continue;
+
+        BOOL needsRich = BUTTONS[i].kind != GLYPH_NEW &&
+                         BUTTONS[i].kind != GLYPH_OPEN &&
+                         BUTTONS[i].kind != GLYPH_SAVE &&
+                         BUTTONS[i].kind != GLYPH_PRINT;
+
+        SendMessageW(g_hBar, TB_ENABLEBUTTON, BUTTONS[i].id,
+                     MAKELONG(!needsRich || rich, 0));
+    }
+
+    EnableWindow(g_hFontCombo, rich);
+    EnableWindow(g_hSizeCombo, rich);
 }
 
 // ---------------------------------------------------------------------------
@@ -390,6 +438,120 @@ static void DrawIndentGlyph(HDC hdc, const RECT* rc, COLORREF color, BOOL increa
     DeleteObject(hb);
 }
 
+// A document: a page with its top right corner turned down, the same mark the
+// application icon uses, so the button and the icon are recognisably the same
+// program.
+static void DrawPageGlyph(HDC hdc, const RECT* rc, COLORREF fg, BOOL withText) {
+    int w = rc->right - rc->left;
+    int h = rc->bottom - rc->top;
+    int fold = w / 3;
+
+    HPEN pen = CreatePen(PS_SOLID, 1, fg);
+    HPEN oldPen = (HPEN)SelectObject(hdc, pen);
+    HBRUSH oldBrush = (HBRUSH)SelectObject(hdc, GetStockObject(NULL_BRUSH));
+
+    POINT page[5] = {
+        { rc->left,             rc->top },
+        { rc->right - fold,     rc->top },
+        { rc->right,            rc->top + fold },
+        { rc->right,            rc->bottom },
+        { rc->left,             rc->bottom },
+    };
+    Polygon(hdc, page, 5);
+
+    // The fold itself.
+    MoveToEx(hdc, rc->right - fold, rc->top, NULL);
+    LineTo(hdc, rc->right - fold, rc->top + fold);
+    LineTo(hdc, rc->right + 1, rc->top + fold);
+
+    if (withText) {
+        for (int i = 0; i < 3; i++) {
+            int y = rc->top + fold + 3 + i * ((h - fold - 4) / 3);
+            if (y >= rc->bottom - 1) break;
+            MoveToEx(hdc, rc->left + 2, y, NULL);
+            LineTo(hdc, rc->right - (i == 2 ? 5 : 2), y);
+        }
+    }
+
+    SelectObject(hdc, oldBrush);
+    SelectObject(hdc, oldPen);
+    DeleteObject(pen);
+}
+
+// A folder, drawn as a body with a tab along the top left.
+static void DrawFolderGlyph(HDC hdc, const RECT* rc, COLORREF fg) {
+    int w = rc->right - rc->left;
+    int h = rc->bottom - rc->top;
+
+    HPEN pen = CreatePen(PS_SOLID, 1, fg);
+    HPEN oldPen = (HPEN)SelectObject(hdc, pen);
+    HBRUSH oldBrush = (HBRUSH)SelectObject(hdc, GetStockObject(NULL_BRUSH));
+
+    POINT folder[6] = {
+        { rc->left,          rc->bottom },
+        { rc->left,          rc->top + h / 4 },
+        { rc->left + w / 2,  rc->top + h / 4 },
+        { rc->left + w / 2 + 2, rc->top + h / 4 - 3 },
+        { rc->right,         rc->top + h / 4 - 3 },
+        { rc->right,         rc->bottom },
+    };
+    Polygon(hdc, folder, 6);
+
+    SelectObject(hdc, oldBrush);
+    SelectObject(hdc, oldPen);
+    DeleteObject(pen);
+}
+
+// A floppy disk. Nobody has seen one for twenty years and everybody still
+// reads it as "save", which is the only thing a toolbar glyph has to do.
+static void DrawSaveGlyph(HDC hdc, const RECT* rc, COLORREF fg) {
+    int w = rc->right - rc->left;
+    int h = rc->bottom - rc->top;
+
+    HPEN pen = CreatePen(PS_SOLID, 1, fg);
+    HPEN oldPen = (HPEN)SelectObject(hdc, pen);
+    HBRUSH oldBrush = (HBRUSH)SelectObject(hdc, GetStockObject(NULL_BRUSH));
+
+    // The body, with the corner clipped the way a disk's is.
+    POINT body[5] = {
+        { rc->left,            rc->top },
+        { rc->right - 3,       rc->top },
+        { rc->right,           rc->top + 3 },
+        { rc->right,           rc->bottom },
+        { rc->left,            rc->bottom },
+    };
+    Polygon(hdc, body, 5);
+
+    // The shutter at the top, and the label at the bottom.
+    RECT shutter = { rc->left + w / 4, rc->top, rc->right - w / 4, rc->top + h / 3 };
+    Rectangle(hdc, shutter.left, shutter.top, shutter.right, shutter.bottom);
+
+    RECT label = { rc->left + 3, rc->bottom - h / 3, rc->right - 3, rc->bottom };
+    Rectangle(hdc, label.left, label.top, label.right, label.bottom);
+
+    SelectObject(hdc, oldBrush);
+    SelectObject(hdc, oldPen);
+    DeleteObject(pen);
+}
+
+// A printer: paper going in at the top, the body, paper coming out.
+static void DrawPrintGlyph(HDC hdc, const RECT* rc, COLORREF fg) {
+    int w = rc->right - rc->left;
+    int h = rc->bottom - rc->top;
+
+    HPEN pen = CreatePen(PS_SOLID, 1, fg);
+    HPEN oldPen = (HPEN)SelectObject(hdc, pen);
+    HBRUSH oldBrush = (HBRUSH)SelectObject(hdc, GetStockObject(NULL_BRUSH));
+
+    Rectangle(hdc, rc->left + w / 6, rc->top, rc->right - w / 6, rc->top + h / 3);
+    Rectangle(hdc, rc->left, rc->top + h / 3, rc->right, rc->bottom - h / 4);
+    Rectangle(hdc, rc->left + w / 6, rc->bottom - h / 3, rc->right - w / 6, rc->bottom);
+
+    SelectObject(hdc, oldBrush);
+    SelectObject(hdc, oldPen);
+    DeleteObject(pen);
+}
+
 LRESULT FormatBar_OnCustomDraw(LPNMTBCUSTOMDRAW nm) {
     if (nm->nmcd.dwDrawStage == CDDS_PREPAINT) return CDRF_NOTIFYITEMDRAW;
     if (nm->nmcd.dwDrawStage != CDDS_ITEMPREPAINT) return CDRF_DODEFAULT;
@@ -400,8 +562,14 @@ LRESULT FormatBar_OnCustomDraw(LPNMTBCUSTOMDRAW nm) {
     HDC hdc = nm->nmcd.hdc;
     RECT rc = nm->nmcd.rc;
 
-    BOOL checked = (nm->nmcd.uItemState & CDIS_CHECKED) != 0;
-    BOOL hot     = (nm->nmcd.uItemState & CDIS_HOT) != 0;
+    // Ask the toolbar whether the button is usable rather than reading
+    // CDIS_DISABLED: a flat toolbar does not set that flag, because it expects
+    // to grey the button's bitmap itself -- and these buttons have no bitmap.
+    BOOL disabled = !SendMessageW(nm->nmcd.hdr.hwndFrom, TB_ISBUTTONENABLED,
+                                  (WPARAM)btn->id, 0);
+
+    BOOL checked = !disabled && (nm->nmcd.uItemState & CDIS_CHECKED) != 0;
+    BOOL hot     = !disabled && (nm->nmcd.uItemState & CDIS_HOT) != 0;
 
     // Background first, since the default would paint over the glyph.
     if (checked || hot) {
@@ -422,7 +590,9 @@ LRESULT FormatBar_OnCustomDraw(LPNMTBCUSTOMDRAW nm) {
         DeleteObject(border);
     }
 
-    COLORREF fg = GetSysColor(COLOR_BTNTEXT);
+    // A button that cannot be pressed has to look like it: the formatting half
+    // of the bar is disabled on a plain text document.
+    COLORREF fg = GetSysColor(disabled ? COLOR_GRAYTEXT : COLOR_BTNTEXT);
 
     // Inset so glyphs do not touch the button border.
     RECT inner = rc;
@@ -473,7 +643,7 @@ LRESULT FormatBar_OnCustomDraw(LPNMTBCUSTOMDRAW nm) {
 
             // The swatch shows the colour the button would apply.
             RECT swatch = { rc.left + 5, rc.bottom - 8, rc.right - 5, rc.bottom - 4 };
-            HBRUSH hb = CreateSolidBrush(RGB(200, 30, 30));
+            HBRUSH hb = CreateSolidBrush(disabled ? fg : RGB(200, 30, 30));
             FillRect(hdc, &swatch, hb);
             DeleteObject(hb);
             break;
@@ -489,6 +659,26 @@ LRESULT FormatBar_OnCustomDraw(LPNMTBCUSTOMDRAW nm) {
 
         case GLYPH_INDENT:
             DrawIndentGlyph(hdc, &inner, fg, btn->param == 1);
+            break;
+
+        case GLYPH_NEW:
+            DrawPageGlyph(hdc, &inner, fg, FALSE);
+            break;
+
+        case GLYPH_PAGE:
+            DrawPageGlyph(hdc, &inner, fg, TRUE);
+            break;
+
+        case GLYPH_OPEN:
+            DrawFolderGlyph(hdc, &inner, fg);
+            break;
+
+        case GLYPH_SAVE:
+            DrawSaveGlyph(hdc, &inner, fg);
+            break;
+
+        case GLYPH_PRINT:
+            DrawPrintGlyph(hdc, &inner, fg);
             break;
     }
 

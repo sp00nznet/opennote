@@ -1203,6 +1203,16 @@ void MainWindow_OnCommand(HWND hwnd, int id, HWND hwndCtl, UINT codeNotify) {
             if (hEditor) Editor_SetZoom(hEditor, g_app->zoomLevel);
             break;
 
+        case IDM_VIEW_TOOLBAR:
+            g_app->showFormatBar = !g_app->showFormatBar;
+            FormatBar_UpdateVisibility(hEditor);
+            {
+                RECT rc;
+                GetClientRect(hwnd, &rc);
+                MainWindow_OnSize(hwnd, SIZE_RESTORED, rc.right, rc.bottom);
+            }
+            break;
+
         case IDM_VIEW_STATUSBAR:
             g_app->showStatusBar = !g_app->showStatusBar;
             StatusBar_Show(g_app->showStatusBar);

@@ -14,6 +14,7 @@ BOOL App_Initialize(HINSTANCE hInstance) {
     // Default settings
     g_app->wordWrap = FALSE;
     g_app->showStatusBar = TRUE;
+    g_app->showFormatBar = TRUE;
     g_app->alwaysOnTop = FALSE;
     g_app->autoSaveSession = FALSE;
     g_app->autoRestoreSession = FALSE;
@@ -206,6 +207,8 @@ void App_LoadSettings(void) {
                 g_app->wordWrap = atoi(value);
             } else if (strcmp(key, "show_statusbar") == 0) {
                 g_app->showStatusBar = atoi(value);
+            } else if (strcmp(key, "show_formatbar") == 0) {
+                g_app->showFormatBar = atoi(value);
             } else if (strcmp(key, "always_on_top") == 0) {
                 g_app->alwaysOnTop = atoi(value);
             } else if (strcmp(key, "auto_save_on_exit") == 0) {
@@ -258,6 +261,9 @@ void App_SaveSettings(void) {
     Database_Execute(sql);
 
     snprintf(sql, sizeof(sql), "INSERT OR REPLACE INTO settings (key, value) VALUES ('show_statusbar', '%d')", g_app->showStatusBar);
+    Database_Execute(sql);
+
+    snprintf(sql, sizeof(sql), "INSERT OR REPLACE INTO settings (key, value) VALUES ('show_formatbar', '%d')", g_app->showFormatBar);
     Database_Execute(sql);
 
     snprintf(sql, sizeof(sql), "INSERT OR REPLACE INTO settings (key, value) VALUES ('always_on_top', '%d')", g_app->alwaysOnTop);

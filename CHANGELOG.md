@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **A document group on the toolbar** — New, Open, Save and Print, and a button that
+  opens the page layout view. The bar used to appear only for a rich text document and
+  hold nothing but formatting; those four mean the same thing whatever is being edited,
+  so the bar now stays and the formatting half greys out on a plain text file rather than
+  vanishing and shuffling everything along.
+- **View → Toolbar**, which hides it entirely and is remembered between runs, the way the
+  status bar already was.
+
 ### Changed
 - **A new icon.** The old one was a leather notebook and a pen, painted at 256 pixels;
   at the size an icon is actually seen -- 16 pixels, in the title bar and the taskbar --
