@@ -32,6 +32,14 @@
 #define REL_STYLES     L"http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles"
 #define REL_NUMBERING     L"http://schemas.openxmlformats.org/officeDocument/2006/relationships/numbering"
 #define REL_IMAGE         L"http://schemas.openxmlformats.org/officeDocument/2006/relationships/image"
+#define REL_FOOTNOTES     L"http://schemas.openxmlformats.org/officeDocument/2006/relationships/footnotes"
+#define REL_ENDNOTES      L"http://schemas.openxmlformats.org/officeDocument/2006/relationships/endnotes"
+
+#define CT_FOOTNOTES \
+    L"application/vnd.openxmlformats-officedocument.wordprocessingml.footnotes+xml"
+#define CT_ENDNOTES \
+    L"application/vnd.openxmlformats-officedocument.wordprocessingml.endnotes+xml"
+
 #define REL_HEADER        L"http://schemas.openxmlformats.org/officeDocument/2006/relationships/header"
 #define REL_FOOTER        L"http://schemas.openxmlformats.org/officeDocument/2006/relationships/footer"
 
@@ -775,6 +783,10 @@ typedef struct {
     WCHAR headerRel[64];
     WCHAR footerRel[64];
 
+    // The marks are numbered by the order the references appear in.
+    int   footnoteMarks;
+    int   endnoteMarks;
+
     // A picture, which arrives in pieces: an extent, then a relationship id
     // several elements later.
     BOOL  inDrawing;
@@ -788,6 +800,9 @@ typedef struct {
 static DocPara* NewParagraph(Build* b) {
     return b->cell ? Doc_AddCellPara(b->cell) : Doc_AddPara(b->doc);
 }
+
+static void ReadNotes(IStream* stream, DocModel* doc, BOOL endnote,
+                      const NumTable* numbering, DocxPkg* pkg);
 
 static BOOL BuildModel(IStream* stream, DocModel* doc, const NumTable* numbering,
                        DocxPkg* pkg) {
@@ -910,6 +925,35 @@ static BOOL BuildModel(IStream* stream, DocModel* doc, const NumTable* numbering
                 }
             } else if (b.inRunProps && ReadRunProp(reader, local, len, &b.run)) {
                 // b, i, u, strike, sz, color, vertAlign, rFonts.
+            }
+
+            // --- footnotes and endnotes ---
+            //
+            // A reference is an empty run in the document pointing at a note
+            // that lives in a part of its own. The mark itself -- the little
+            // number -- is not in the file at all: Word works it out from the
+            // order the references appear in, and so does this.
+            else if (b.para && (NameIs(local, len, L"footnoteReference") ||
+                                NameIs(local, len, L"endnoteReference"))) {
+                BOOL endnote = NameIs(local, len, L"endnoteReference");
+                int id = AttrInt(reader, L"id", -1);
+
+                // Word's own separator notes are ids 0 and -1 and are not
+                // references to anything anybody wrote.
+                if (id > 0) {
+                    WCHAR mark[16];
+                    int number = endnote ? ++b.endnoteMarks : ++b.footnoteMarks;
+                    swprintf_s(mark, 16, L"%d", number);
+
+                    CharProps props = b.run;
+                    props.superscript = TRUE;
+
+                    DocRun* r = Doc_AddRun(b.para, mark, -1, &props);
+                    if (r) {
+                        r->noteId = id;
+                        r->noteIsEnd = endnote;
+                    }
+                }
             }
 
             // --- the page ---
@@ -1130,6 +1174,23 @@ static BOOL BuildModel(IStream* stream, DocModel* doc, const NumTable* numbering
 
     IXmlReader_Release(reader);
 
+    // The notes, which are one part holding all of them: a `w:footnote` per
+    // note, each full of ordinary paragraphs.
+    {
+        struct { const WCHAR* rel; BOOL endnote; } noteParts[] = {
+            { REL_FOOTNOTES, FALSE },
+            { REL_ENDNOTES,  TRUE  },
+        };
+
+        for (int i = 0; i < 2; i++) {
+            IStream* part = RelatedStream(pkg, noteParts[i].rel);
+            if (!part) continue;
+
+            ReadNotes(part, doc, noteParts[i].endnote, numbering, pkg);
+            IStream_Release(part);
+        }
+    }
+
     // The header and the footer are parts of their own, holding paragraphs
     // like any others -- so they are read the same way, into a model of their
     // own, and what comes out is taken over.
@@ -1173,6 +1234,120 @@ static BOOL BuildModel(IStream* stream, DocModel* doc, const NumTable* numbering
     }
 
     return TRUE;
+}
+
+// footnotes.xml holds every note in one part, each wrapped in `w:footnote`.
+// The paragraphs inside are ordinary ones, so the document parser reads them:
+// the part is split into per-note pieces and each is handed to it.
+//
+// ponytail: the split is textual rather than a second parser. The alternative
+// is teaching BuildModel about note boundaries, which would put a document
+// structure nothing else uses into the middle of it.
+static void ReadNotes(IStream* stream, DocModel* doc, BOOL endnote,
+                      const NumTable* numbering, DocxPkg* pkg) {
+    IXmlReader* reader = NULL;
+    if (FAILED(CreateXmlReader(&IID_IXmlReader, (void**)&reader, NULL))) return;
+    if (FAILED(IXmlReader_SetInput(reader, (IUnknown*)stream))) {
+        IXmlReader_Release(reader);
+        return;
+    }
+    IXmlReader_SetProperty(reader, XmlReaderProperty_MaxElementDepth, 0);
+
+    const WCHAR* wrapper = endnote ? L"endnote" : L"footnote";
+
+    DocNote* note = NULL;
+    DocPara* para = NULL;
+    CharProps run = {0};
+    BOOL inRunProps = FALSE;
+    BOOL inParaProps = FALSE;
+    BOOL inText = FALSE;
+    int  skipDepth = 0;
+
+    XmlNodeType nt;
+    while (S_OK == IXmlReader_Read(reader, &nt)) {
+        const WCHAR* local = NULL;
+        UINT len = 0;
+
+        if (nt == XmlNodeType_Element || nt == XmlNodeType_EndElement) {
+            if (FAILED(IXmlReader_GetLocalName(reader, &local, &len))) continue;
+        }
+
+        if (nt == XmlNodeType_Element) {
+            BOOL empty = IXmlReader_IsEmptyElement(reader);
+
+            if (NameIs(local, len, L"del")) {
+                if (!empty) skipDepth++;
+                continue;
+            }
+            if (skipDepth > 0) continue;
+
+            if (NameIs(local, len, wrapper)) {
+                // Ids 0 and -1 are the separators Word keeps in every
+                // document, not notes anybody wrote.
+                int id = AttrInt(reader, L"id", -1);
+                note = (id > 0) ? Doc_AddNote(doc, id, endnote) : NULL;
+                para = NULL;
+            } else if (!note) {
+                continue;
+            } else if (NameIs(local, len, L"p")) {
+                para = (DocPara*)calloc(1, sizeof(DocPara));
+                if (para) {
+                    para->props = doc->defaultPara;
+
+                    if (!note->paras) {
+                        note->paras = para;
+                    } else {
+                        DocPara* tail = note->paras;
+                        while (tail->next) tail = tail->next;
+                        tail->next = para;
+                    }
+                }
+                run = doc->defaultRun;
+            } else if (NameIs(local, len, L"pPr")) {
+                inParaProps = TRUE;
+            } else if (NameIs(local, len, L"rPr")) {
+                inRunProps = TRUE;
+            } else if (NameIs(local, len, L"r")) {
+                run = doc->defaultRun;
+            } else if (inParaProps && para) {
+                ReadParaProp(reader, local, len, &para->props);
+            } else if (inRunProps) {
+                ReadRunProp(reader, local, len, &run);
+            } else if (NameIs(local, len, L"t")) {
+                inText = TRUE;
+            } else if (NameIs(local, len, L"tab") && para) {
+                DocRun* r = Doc_AddRun(para, L"", 0, &run);
+                if (r) r->tab = TRUE;
+            }
+
+            (void)numbering;
+            (void)pkg;
+
+        } else if (nt == XmlNodeType_Text || nt == XmlNodeType_Whitespace) {
+            if (skipDepth > 0 || !inText || !para) continue;
+
+            const WCHAR* val = NULL;
+            UINT vlen = 0;
+            if (SUCCEEDED(IXmlReader_GetValue(reader, &val, &vlen)) && vlen) {
+                Doc_AddRun(para, val, (int)vlen, &run);
+            }
+
+        } else if (nt == XmlNodeType_EndElement) {
+            if (NameIs(local, len, L"del")) {
+                if (skipDepth > 0) skipDepth--;
+                continue;
+            }
+            if (skipDepth > 0) continue;
+
+            if (NameIs(local, len, L"t"))            inText = FALSE;
+            else if (NameIs(local, len, L"pPr"))     inParaProps = FALSE;
+            else if (NameIs(local, len, L"rPr"))     inRunProps = FALSE;
+            else if (NameIs(local, len, L"p"))       para = NULL;
+            else if (NameIs(local, len, wrapper))    note = NULL;
+        }
+    }
+
+    IXmlReader_Release(reader);
 }
 
 DocModel* Docx_ReadToModel(const WCHAR* path) {
@@ -1375,7 +1550,13 @@ static void EmitPara(StrBuf* x, const DocPara* para, ImagePlan* plan) {
         SB_Add(x, "<w:r>");
         EmitRunProps(x, &r->props);
 
-        if (r->image) {
+        if (r->noteId > 0) {
+            // The mark itself is not written: Word numbers the notes from the
+            // order the references appear in, which is where this one's text
+            // came from in the first place.
+            SB_AddF(x, "<w:%sReference w:id=\"%d\"/>",
+                    r->noteIsEnd ? "endnote" : "footnote", r->noteId);
+        } else if (r->image) {
             int index = PlanImage(plan, r->image);
             if (index >= 0) EmitDrawing(x, r->image, index);
         } else if (r->pageBreak) {
@@ -1659,6 +1840,37 @@ static BOOL BuildMarginXml(const DocPara* paras, BOOL header, StrBuf* x, ImagePl
     return !x->failed;
 }
 
+// footnotes.xml or endnotes.xml: every note of that kind in one part, each in
+// its own wrapper. The separator notes Word expects at ids 0 and -1 are
+// written too, because a document without them opens with a complaint.
+static BOOL BuildNotesXml(const DocModel* doc, BOOL endnote, StrBuf* x, ImagePlan* plan) {
+    const char* root = endnote ? "endnotes" : "footnotes";
+    const char* item = endnote ? "endnote" : "footnote";
+
+    SB_AddF(x, "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>\r\n"
+               "<w:%s xmlns:w=\"" WML_NS "\" xmlns:r=\"" REL_NS "\""
+               " xmlns:wp=\"" WP_NS "\">",
+            root);
+
+    SB_AddF(x, "<w:%s w:type=\"separator\" w:id=\"-1\"><w:p><w:r><w:separator/></w:r>"
+               "</w:p></w:%s>"
+               "<w:%s w:type=\"continuationSeparator\" w:id=\"0\"><w:p><w:r>"
+               "<w:continuationSeparator/></w:r></w:p></w:%s>",
+            item, item, item, item);
+
+    for (const DocNote* n = doc->notes; n; n = n->next) {
+        if (n->endnote != endnote) continue;
+
+        SB_AddF(x, "<w:%s w:id=\"%d\">", item, n->id);
+        if (!n->paras) SB_Add(x, "<w:p/>");
+        for (const DocPara* p = n->paras; p; p = p->next) EmitPara(x, p, plan);
+        SB_AddF(x, "</w:%s>", item);
+    }
+
+    SB_AddF(x, "</w:%s>", root);
+    return !x->failed;
+}
+
 static BOOL BuildDocumentXml(const DocModel* doc, StrBuf* x, ImagePlan* plan) {
     // The drawing namespaces are declared on the root whether or not the
     // document holds a picture; a namespace nothing uses costs a line.
@@ -1907,6 +2119,43 @@ BOOL Docx_WriteModel(const DocModel* doc, const WCHAR* path) {
                 if (!partOk) {
                     IOpcRelationshipSet_Release(docRels);
                     SetError(L"The header or footer part could not be written.");
+                    goto done;
+                }
+            }
+        }
+
+        // The notes, one part per kind, and only when the document has any.
+        {
+            BOOL haveFootnotes = FALSE, haveEndnotes = FALSE;
+            for (const DocNote* n = doc->notes; n; n = n->next) {
+                if (n->endnote) haveEndnotes = TRUE;
+                else            haveFootnotes = TRUE;
+            }
+
+            struct {
+                BOOL         wanted;
+                BOOL         endnote;
+                const WCHAR* uri;
+                const WCHAR* type;
+                const WCHAR* relType;
+            } noteParts[] = {
+                { haveFootnotes, FALSE, L"/word/footnotes.xml", CT_FOOTNOTES, REL_FOOTNOTES },
+                { haveEndnotes,  TRUE,  L"/word/endnotes.xml",  CT_ENDNOTES,  REL_ENDNOTES  },
+            };
+
+            for (int i = 0; i < 2; i++) {
+                if (!noteParts[i].wanted) continue;
+
+                StrBuf part = {0};
+                BOOL partOk = BuildNotesXml(doc, noteParts[i].endnote, &part, &plan) &&
+                              AddRelatedPart(factory, parts, docRels, noteParts[i].uri,
+                                             noteParts[i].type, noteParts[i].relType,
+                                             part.buf, part.len);
+                SB_Free(&part);
+
+                if (!partOk) {
+                    IOpcRelationshipSet_Release(docRels);
+                    SetError(L"The notes part could not be written.");
                     goto done;
                 }
             }

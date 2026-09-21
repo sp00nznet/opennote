@@ -50,9 +50,12 @@ struct LaidText {
     int                colorCount;
 };
 
-// A table cell's box on a page, for drawing its borders.
+// A table cell's box on a page, for drawing its borders -- or, with no height
+// at all, the rule above a page's footnotes, which is the same horizontal line
+// every renderer already knows how to draw.
 struct LaidCell {
     float x, y, width, height;
+    BOOL  isRule;
 };
 
 // A picture's box on a page. The engine decodes nothing: it works out where

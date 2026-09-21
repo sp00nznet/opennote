@@ -19,6 +19,9 @@
 // Padding between a cell's edge and its text.
 static const float CELL_PAD_DIP = 4.0f;
 
+// The gap above a page's footnotes, which the separating rule sits in.
+static const float NOTE_RULE_GAP = 10.0f;
+
 // A paragraph flattened into one string plus the formatting spans over it.
 struct FlatText {
     WCHAR*    text;
@@ -470,6 +473,15 @@ struct Flow {
     int   column;                 // 0-based, left to right
     float columnLeft;             // where this column starts, DIPs
     float columnGap;
+
+    // Footnotes owed by this page: referred to somewhere above, and printed
+    // at the bottom of it. The space they need comes out of the page before
+    // the rest of the text is allowed to use it.
+    const DocModel*  doc;
+    const DocNote*   pending[32];
+    int              pendingCount;
+    float            pendingHeight;
+    float            pageBottom;   // where the text could reach with no notes
 };
 
 // Where a column begins across the page.
@@ -477,11 +489,21 @@ static float ColumnLeft(const Flow* f, int column) {
     return f->result->marginLeft + column * (f->contentWidth + f->columnGap);
 }
 
+static void PlaceFootnotes(Flow* f);
+static void PlacePara(Flow* f, const DocPara* para, float x, float width, BOOL isCellText);
+
 static void NewPage(Flow* f) {
+    // Whatever this page owes is printed before it is left behind.
+    PlaceFootnotes(f);
+
     f->page = AddPage(f->result);
     f->y = f->result->marginTop;
     f->column = 0;
     f->columnLeft = ColumnLeft(f, 0);
+
+    f->pendingCount = 0;
+    f->pendingHeight = 0.0f;
+    f->bottom = f->pageBottom;
 }
 
 // The next place text can go: the column beside this one, or the top of a new
@@ -585,6 +607,139 @@ static float PlaceImages(Flow* f, const DocPara* para, const LaidText* piece) {
     return overflow;
 }
 
+// How tall a note's paragraphs come out at the column's width. Measured with
+// throwaway layouts: the note is laid out for real once the page is finished
+// and its place is known.
+static float MeasureNote(Flow* f, const DocNote* note) {
+    float total = 0.0f;
+
+    for (const DocPara* p = note->paras; p; p = p->next) {
+        FlatText flat;
+        if (!FlattenPara(p, &flat)) continue;
+
+        IDWriteTextLayout* layout = MakeLayout(&f->ctx, flat.text, flat.len,
+                                               flat.spans, flat.spanCount,
+                                               f->contentWidth, &p->props);
+        if (layout) {
+            total += LayoutHeight(layout);
+            layout->Release();
+        }
+        FlatFree(&flat);
+    }
+
+    return total;
+}
+
+// A note referred to from this page, if it is not already owed. Returns how
+// much room the page has just lost.
+static float OweNote(Flow* f, const DocNote* note) {
+    for (int i = 0; i < f->pendingCount; i++) {
+        if (f->pending[i] == note) return 0.0f;
+    }
+    if (f->pendingCount >= 32) return 0.0f;
+
+    float height = MeasureNote(f, note);
+    if (f->pendingCount == 0) height += NOTE_RULE_GAP;   // room for the line above them
+
+    f->pending[f->pendingCount++] = note;
+    f->pendingHeight += height;
+    f->bottom = f->pageBottom - f->pendingHeight;
+
+    return height;
+}
+
+// The notes this page owes, laid out at the foot of it, under a short rule --
+// which is drawn as a cell box a hair high, because that is the one horizontal
+// line the renderers already know how to draw.
+static void PlaceFootnotes(Flow* f) {
+    if (!f->page || f->pendingCount == 0) return;
+
+    LaidPage* page = f->page;
+    float saveY = f->y;
+    float saveBottom = f->bottom;
+    int   saveColumn = f->column;
+    float saveLeft = f->columnLeft;
+
+    f->y = f->pageBottom - f->pendingHeight + NOTE_RULE_GAP;
+    f->bottom = f->result->pageHeight;      // the notes are the last thing on the page
+    f->columnLeft = f->result->marginLeft;
+
+    LaidCell* rule = AddCell(page);
+    if (rule) {
+        rule->x = f->result->marginLeft;
+        rule->y = f->y - NOTE_RULE_GAP * 0.5f;
+        rule->width = f->contentWidth * 0.4f;
+        rule->height = 0.0f;
+        rule->isRule = TRUE;
+    }
+
+    int before = page->textCount;
+
+    for (int i = 0; i < f->pendingCount; i++) {
+        for (const DocPara* p = f->pending[i]->paras; p; p = p->next) {
+            PlacePara(f, p, f->result->marginLeft, f->contentWidth, TRUE);
+        }
+    }
+
+    // Notes are furniture like a footer: they sit below the text area on
+    // purpose, and a click in one does not name a place in the document.
+    for (int i = before; i < page->textCount; i++) {
+        page->texts[i].isMargin = TRUE;
+    }
+
+    f->pendingCount = 0;
+    f->pendingHeight = 0.0f;
+
+    f->y = saveY;
+    f->bottom = saveBottom;
+    f->column = saveColumn;
+    f->columnLeft = saveLeft;
+}
+
+// The notes a piece of a paragraph refers to, added to what the page owes.
+// Answers TRUE when the room taken means the piece no longer fits, which is
+// the one case a paragraph has to be laid out again somewhere else.
+static BOOL OweNotesFor(Flow* f, const DocPara* para, const LaidText* piece) {
+    if (!f->doc || !f->doc->notes || !piece) return FALSE;
+
+    unsigned at = 0;
+    BOOL owed = FALSE;
+
+    for (const DocRun* r = para->runs; r; r = r->next) {
+        unsigned length = 1;
+        if (!r->image && !r->tab && !r->lineBreak && !r->pageBreak) {
+            length = r->text ? (unsigned)wcslen(r->text) : 0;
+        }
+        if (!length) continue;
+
+        unsigned start = at;
+        at += length;
+
+        if (r->noteId <= 0 || r->noteIsEnd) continue;
+        if (start < piece->textStart || start >= piece->textStart + piece->textLen) continue;
+
+        const DocNote* note = Doc_FindNote(f->doc, r->noteId, FALSE);
+        if (!note) continue;
+
+        if (OweNote(f, note) > 0.0f) owed = TRUE;
+    }
+
+    if (!owed) return FALSE;
+    return piece->y + piece->height > f->bottom;
+}
+
+// Take back the pieces a paragraph just put on the page, so it can be laid out
+// again on the next one. Used when a footnote's reference turns out to leave
+// no room for the paragraph that refers to it.
+static void Unplace(Flow* f, int textsBefore, int imagesBefore) {
+    for (int i = textsBefore; i < f->page->textCount; i++) {
+        if (f->page->texts[i].layout) f->page->texts[i].layout->Release();
+        free(f->page->texts[i].colors);
+    }
+    f->page->textCount = textsBefore;
+    f->page->imageCount = imagesBefore;
+}
+
 // Place a paragraph, splitting it across pages at line boundaries when it does
 // not fit. A paragraph taller than a whole page is split as many times as it
 // takes rather than being dropped or allowed to overflow.
@@ -677,8 +832,20 @@ static void PlacePara(Flow* f, const DocPara* para, float x, float width,
         float height = LayoutHeight(layout);
 
         if (height <= SpaceLeft(f) || remaining == 0) {
+            int textsBefore = f->page->textCount;
+            int imagesBefore = f->page->imageCount;
+
             LaidText* piece = Place(f, layout, x, width, para, isCellText,
                                     tail, tailCount, from, remaining);
+
+            if (!isCellText && OweNotesFor(f, para, piece) &&
+                f->y > f->result->marginTop) {
+                // Its own footnote took the room it was going to sit in.
+                Unplace(f, textsBefore, imagesBefore);
+                NextColumn(f);
+                continue;
+            }
+
             f->y += height + PlaceImages(f, para, piece);
             break;
         }
@@ -738,6 +905,7 @@ static void PlacePara(Flow* f, const DocPara* para, float x, float width,
             LaidText* piece = Place(f, head, x, width, para, isCellText,
                                     tail, tailCount, from, take);
             PlaceImages(f, para, piece);
+            OweNotesFor(f, para, piece);
         }
 
         from += take;
@@ -959,7 +1127,9 @@ extern "C" LayoutResult* Layout_Build(const DocModel* doc, const WCHAR* defaultF
     Flow f = {};
     f.result = r;
     f.ctx = ctx;
-    f.bottom = r->pageHeight - r->marginBottom;
+    f.doc = doc;
+    f.pageBottom = r->pageHeight - r->marginBottom;
+    f.bottom = f.pageBottom;
 
     f.columns = doc->section.columns > 0 ? doc->section.columns : 1;
     if (f.columns > 8) f.columns = 8;
@@ -980,6 +1150,18 @@ extern "C" LayoutResult* Layout_Build(const DocModel* doc, const WCHAR* defaultF
             PlaceTable(&f, b);
         }
     }
+
+    // Endnotes go where their name says: after everything else, in the order
+    // they were referred to.
+    for (const DocNote* note = doc->notes; note; note = note->next) {
+        if (!note->endnote) continue;
+        for (const DocPara* p = note->paras; p; p = p->next) {
+            PlacePara(&f, p, f.columnLeft, f.contentWidth, FALSE);
+        }
+    }
+
+    // The last page's footnotes, which nothing else will trigger.
+    PlaceFootnotes(&f);
 
     // Every page is known now, so the margins can be filled in.
     PlaceMargins(&f, doc);
@@ -1024,7 +1206,14 @@ extern "C" int Layout_PageTextCount(const LayoutResult* r, int i) {
 
 extern "C" int Layout_PageCellCount(const LayoutResult* r, int i) {
     if (!r || i < 0 || i >= r->pageCount) return 0;
-    return r->pages[i].cellCount;
+
+    // Table cells only: the rule above a page's footnotes is drawn as one of
+    // these and is not a cell anybody put in a document.
+    int cells = 0;
+    for (int j = 0; j < r->pages[i].cellCount; j++) {
+        if (!r->pages[i].cells[j].isRule) cells++;
+    }
+    return cells;
 }
 
 extern "C" int Layout_PageImageCount(const LayoutResult* r, int i) {
@@ -1790,6 +1979,80 @@ extern "C" BOOL Layout_SelfTest(char* failure, size_t failureSize) {
         r = Layout_Build(doc, L"Calibri", 11.0f);
         if (!r) FAIL("Layout_Build failed on a document with page breaks");
         if (Layout_PageCount(r) != 3) FAIL("page breaks did not produce three pages");
+
+        Layout_Free(r); r = NULL;
+        Doc_Free(doc); doc = NULL;
+    }
+
+    // --- a footnote sits at the foot of its own page ----------------------
+    {
+        doc = Doc_New();
+        if (!doc) FAIL("could not allocate a model");
+
+        DocNote* note = Doc_AddNote(doc, 1, FALSE);
+        if (!note) FAIL("could not add a note");
+        {
+            DocPara* np = (DocPara*)calloc(1, sizeof(DocPara));
+            if (!np) FAIL("could not build the note");
+            note->paras = np;
+            Doc_AddRun(np, L"The note, at the bottom of the page.", -1, &plain);
+        }
+
+        // The reference is well down the second page, so a footnote that
+        // simply followed its reference would be nowhere near the foot.
+        for (int i = 0; i < 60; i++) {
+            AddTextPara(doc, L"Filler paragraph, pushing the reference down the "
+                             L"document and onto a later page.", &plain);
+        }
+        {
+            DocPara* p = Doc_AddPara(doc);
+            if (!p) FAIL("could not build the reference");
+            Doc_AddRun(p, L"A claim", -1, &plain);
+
+            CharProps mark = plain;
+            mark.superscript = TRUE;
+            DocRun* ref = Doc_AddRun(p, L"1", -1, &mark);
+            if (!ref) FAIL("could not add a reference");
+            ref->noteId = 1;
+        }
+
+        r = Layout_Build(doc, L"Calibri", 11.0f);
+        if (!r) FAIL("Layout_Build failed on a document with a footnote");
+
+        // Find the page the reference landed on, and the note's own text.
+        int referencePage = -1, notePage = -1;
+        float noteY = 0.0f, referenceBottom = 0.0f;
+
+        for (int pg = 0; pg < r->pageCount; pg++) {
+            for (int i = 0; i < r->pages[pg].textCount; i++) {
+                const LaidText* t = &r->pages[pg].texts[i];
+                if (!t->para) continue;
+
+                for (const DocRun* run = t->para->runs; run; run = run->next) {
+                    if (run->noteId == 1 && !t->isMargin) {
+                        referencePage = pg;
+                        referenceBottom = t->y + t->height;
+                    }
+                }
+                if (t->isMargin && t->para == note->paras) {
+                    notePage = pg;
+                    noteY = t->y;
+                }
+            }
+        }
+
+        if (referencePage < 0) FAIL("the reference was not laid out");
+        if (notePage < 0) FAIL("the note itself was not laid out");
+        if (notePage != referencePage) FAIL("a footnote was not on its reference's page");
+        if (noteY < referenceBottom) FAIL("a footnote was placed above its reference");
+
+        float bottomMargin = r->pageHeight - r->marginBottom;
+        if (noteY > bottomMargin) FAIL("a footnote was placed below the page's text area");
+
+        // The text of that page had to give up the room the note took.
+        if (Layout_PageContentBottom(r, notePage) > noteY) {
+            FAIL("the page's text ran into its own footnote");
+        }
 
         Layout_Free(r); r = NULL;
         Doc_Free(doc); doc = NULL;

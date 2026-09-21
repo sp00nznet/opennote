@@ -108,6 +108,12 @@ typedef struct DocRun {
     BOOL           tab;
     BOOL           pageBreak;     // `w:br w:type="page"`
     DocImage*      image;         // owned; a run is a picture or it is text
+
+    // A footnote or endnote reference. The run's text is the mark itself --
+    // the number the reader worked out -- so it measures, wraps and draws like
+    // any other text; this says which note it points at.
+    int            noteId;        // 0 = not a reference
+    BOOL           noteIsEnd;
 } DocRun;
 
 typedef struct DocPara {
@@ -150,6 +156,14 @@ typedef struct {
     int columnSpace;
 } SectionProps;
 
+// A footnote or an endnote: paragraphs, and the id the references use.
+typedef struct DocNote {
+    struct DocNote* next;
+    int             id;
+    BOOL            endnote;
+    DocPara*        paras;
+} DocNote;
+
 // A named style out of styles.xml. Paragraphs carry their resolved properties,
 // so nothing here is needed to lay a document out -- it is kept so that a
 // document written back out says "Heading 1" where it said "Heading 1", rather
@@ -179,6 +193,10 @@ typedef struct DocModel {
     DocPara*     footer;
     int          headerFromTop;     // twips from the paper edge
     int          footerFromBottom;
+
+    // Footnotes and endnotes, by id. A footnote is laid out at the bottom of
+    // whichever page its reference landed on; an endnote at the end.
+    DocNote*     notes;
 } DocModel;
 
 // ---------------------------------------------------------------------------
@@ -212,6 +230,9 @@ DocRun*   Doc_AddImageRun(DocPara* para, const BYTE* bytes, size_t len,
 #define DOC_IMAGE_CHAR 0xFFFC
 
 // styles.xml, when the document had one.
+DocNote*  Doc_AddNote(DocModel* doc, int id, BOOL endnote);
+DocNote*  Doc_FindNote(const DocModel* doc, int id, BOOL endnote);
+
 DocStyle* Doc_AddStyle(DocModel* doc, const WCHAR* id);
 DocStyle* Doc_FindStyle(const DocModel* doc, const WCHAR* id);
 

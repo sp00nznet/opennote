@@ -35,6 +35,8 @@ DOC_RELS = """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 
 HEADER_CT = "application/vnd.openxmlformats-officedocument.wordprocessingml.header+xml"
 FOOTER_CT = "application/vnd.openxmlformats-officedocument.wordprocessingml.footer+xml"
+FOOTNOTES_CT = "application/vnd.openxmlformats-officedocument.wordprocessingml.footnotes+xml"
+ENDNOTES_CT = "application/vnd.openxmlformats-officedocument.wordprocessingml.endnotes+xml"
 IMAGE_CT = "image/png"
 STYLES_CT = "application/vnd.openxmlformats-officedocument.wordprocessingml.styles+xml"
 NUMBERING_CT = "application/vnd.openxmlformats-officedocument.wordprocessingml.numbering+xml"
@@ -95,6 +97,10 @@ def write(outdir, name, body, expect, target="word/document.xml", parts=None, se
                     rid = "rIdHdr"
                 elif rel == "footer":
                     rid = "rIdFtr"
+                elif rel == "footnotes":
+                    rid = "rIdFn"
+                elif rel == "endnotes":
+                    rid = "rIdEn"
                 else:
                     rid = "rIdX%d" % i
                 rels += '  <Relationship Id="%s" Type="%s%s" Target="%s"/>\n' % (
@@ -494,6 +500,58 @@ def fixture_margins(outdir):
     return write(outdir, "margins", body, expect, parts=parts, sect=sect)
 
 
+# --------------------------------------------------------------------------
+# notes: a footnote belongs to the page its reference is on
+# --------------------------------------------------------------------------
+def fixture_notes(outdir):
+    def notes_part(root, item, entries):
+        body = (
+            '<w:%s w:type="separator" w:id="-1"><w:p><w:r><w:separator/></w:r></w:p></w:%s>'
+            '<w:%s w:type="continuationSeparator" w:id="0"><w:p><w:r>'
+            '<w:continuationSeparator/></w:r></w:p></w:%s>' % (item, item, item, item)
+        )
+        for note_id, text in entries:
+            body += ('<w:%s w:id="%d"><w:p><w:r><w:t xml:space="preserve">%s</w:t>'
+                     '</w:r></w:p></w:%s>' % (item, note_id, text, item))
+        return ('<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n'
+                '<w:%s xmlns:w="%s" xmlns:r="%s">%s</w:%s>' % (root, W, R, body, root))
+
+    def ref(kind, note_id):
+        return ('<w:r><w:rPr><w:vertAlign w:val="superscript"/></w:rPr>'
+                '<w:%sReference w:id="%d"/></w:r>' % (kind, note_id))
+
+    body = [
+        "<w:p>" + r("A claim that needs support.") + ref("footnote", 1) + "</w:p>",
+        "<w:p>" + r("Another one.") + ref("footnote", 2) + "</w:p>",
+    ]
+    for i in range(50):
+        body.append(p([r("Filler paragraph %d, pushing the second reference onto "
+                         "a later page." % i)]))
+    body.append("<w:p>" + r("A third, further down.") + ref("footnote", 3) + "</w:p>")
+    body.append("<w:p>" + r("And a note at the end.") + ref("endnote", 4) + "</w:p>")
+
+    expect = [
+        "# the marks are numbered from the order the references appear in",
+        "contains:A claim that needs support.",
+        "contains:\\super 1",
+        "contains:\\super 2",
+        "# the notes themselves are not in the body text",
+        "absent:The first note, at the foot of its page.",
+    ]
+
+    parts = [
+        ("word/footnotes.xml", FOOTNOTES_CT, "footnotes",
+         notes_part("footnotes", "footnote", [
+             (1, "The first note, at the foot of its page."),
+             (2, "The second note, on the same page."),
+             (3, "The third note, further on."),
+         ])),
+        ("word/endnotes.xml", ENDNOTES_CT, "endnotes",
+         notes_part("endnotes", "endnote", [(4, "An endnote, at the end of it all.")])),
+    ]
+    return write(outdir, "notes", body, expect, parts=parts)
+
+
 def main():
     outdir = sys.argv[1] if len(sys.argv) > 1 else "build/corpus"
     os.makedirs(outdir, exist_ok=True)
@@ -508,6 +566,7 @@ def main():
         fixture_images(outdir),
         fixture_pages(outdir),
         fixture_margins(outdir),
+        fixture_notes(outdir),
     ]
     for path in made:
         print(f"  {os.path.basename(path)}  {os.path.getsize(path)} bytes")

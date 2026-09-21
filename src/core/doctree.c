@@ -84,6 +84,14 @@ void Doc_Free(DocModel* doc) {
     FreeParas(doc->header);
     FreeParas(doc->footer);
 
+    DocNote* note = doc->notes;
+    while (note) {
+        DocNote* next = note->next;
+        FreeParas(note->paras);
+        free(note);
+        note = next;
+    }
+
     DocStyle* style = doc->styles;
     while (style) {
         DocStyle* next = style->next;
@@ -187,6 +195,29 @@ DocRun* Doc_AddRun(DocPara* para, const WCHAR* text, int len, const CharProps* p
 // silence. Word documents do that rarely; a per-property "was it stated" bit
 // on every property is the fix when one turns up that matters.
 // ---------------------------------------------------------------------------
+
+DocNote* Doc_AddNote(DocModel* doc, int id, BOOL endnote) {
+    if (!doc) return NULL;
+
+    DocNote* existing = Doc_FindNote(doc, id, endnote);
+    if (existing) return existing;
+
+    DocNote* note = (DocNote*)calloc(1, sizeof(DocNote));
+    if (!note) return NULL;
+
+    note->id = id;
+    note->endnote = endnote;
+    APPEND(doc->notes, note, DocNote);
+    return note;
+}
+
+DocNote* Doc_FindNote(const DocModel* doc, int id, BOOL endnote) {
+    if (!doc) return NULL;
+    for (DocNote* n = doc->notes; n; n = n->next) {
+        if (n->id == id && n->endnote == endnote) return n;
+    }
+    return NULL;
+}
 
 DocStyle* Doc_AddStyle(DocModel* doc, const WCHAR* id) {
     if (!doc || !id || !id[0]) return NULL;
@@ -616,6 +647,25 @@ void Doc_Compare(const DocModel* a, const DocModel* b, DocDiff* d) {
 
         CMP(ha == hb, "header paragraphs %d -> %d", ha, hb);
         CMP(fa == fb, "footer paragraphs %d -> %d", fa, fb);
+
+        int na = 0, nb = 0;
+        for (const DocNote* n = a->notes; n; n = n->next) na++;
+        for (const DocNote* n = b->notes; n; n = n->next) nb++;
+        CMP(na == nb, "notes %d -> %d", na, nb);
+
+        for (const DocNote* n = a->notes; n; n = n->next) {
+            const DocNote* m = Doc_FindNote(b, n->id, n->endnote);
+            d->compared++;
+            if (!m) {
+                DiffNote(d, "note %d was lost", n->id);
+                continue;
+            }
+            const DocPara* pa2 = n->paras;
+            const DocPara* pb2 = m->paras;
+            for (int i = 0; pa2 && pb2; pa2 = pa2->next, pb2 = pb2->next, i++) {
+                CompareParas(pa2, pb2, -200 - i, d);
+            }
+        }
 
         const DocPara* pa = a->header;
         const DocPara* pb = b->header;
@@ -1244,6 +1294,8 @@ static BOOL CloneParas(const DocPara* src, DocPara** dest) {
             rc->tab = r->tab;
             rc->lineBreak = r->lineBreak;
             rc->pageBreak = r->pageBreak;
+            rc->noteId = r->noteId;
+            rc->noteIsEnd = r->noteIsEnd;
 
             if (r->image) {
                 rc->image = (DocImage*)calloc(1, sizeof(DocImage));
@@ -1292,6 +1344,14 @@ DocModel* Doc_Clone(const DocModel* src) {
         !CloneParas(src->footer, &copy->footer)) {
         Doc_Free(copy);
         return NULL;
+    }
+
+    for (const DocNote* n = src->notes; n; n = n->next) {
+        DocNote* nc = Doc_AddNote(copy, n->id, n->endnote);
+        if (!nc || !CloneParas(n->paras, &nc->paras)) {
+            Doc_Free(copy);
+            return NULL;
+        }
     }
 
     for (const DocStyle* st = src->styles; st; st = st->next) {

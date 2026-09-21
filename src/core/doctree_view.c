@@ -467,6 +467,13 @@ DocModel* DocView_CaptureWith(HWND h, const DocModel* source) {
         doc->footerFromBottom = source->footerFromBottom;
         doc->header = Doc_CloneParas(source->header);
         doc->footer = Doc_CloneParas(source->footer);
+
+        // Footnotes likewise: the control shows the little number and knows
+        // nothing about what it refers to.
+        for (const DocNote* n = source->notes; n; n = n->next) {
+            DocNote* copy = Doc_AddNote(doc, n->id, n->endnote);
+            if (copy) copy->paras = Doc_CloneParas(n->paras);
+        }
     }
 
     ImageSource pictures;
