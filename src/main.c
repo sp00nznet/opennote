@@ -4,6 +4,7 @@
 #include "sync/oauth.h"
 #include "ui/editor_rich.h"
 #include "pdf/pdfread.h"
+#include "pdf/pdfform.h"
 
 // Twips per DIP. Mirrors the engine's constant, which lives in a C++-only
 // header because DirectWrite has no C binding.
@@ -39,6 +40,7 @@ static int RunSelfTest(void) {
         { "docx",   Docx_SelfTest   },
         { "layout", Layout_SelfTest },
         { "pdf",    Pdf_SelfTest    },
+        { "pdfform",PdfForm_SelfTest},
     };
 
     int failed = 0;
@@ -221,6 +223,90 @@ static int RunPdfInfo(int argc, WCHAR** argv) {
 
     Pdf_Close(pdf);
     return rc;
+}
+
+// The form in a PDF, on the command line: what its fields are called, and
+// filling them in. The window comes later; this is where the reading and the
+// writing can be checked without one.
+static int RunPdfFields(int argc, WCHAR** argv) {
+    if (argc < 3) {
+        printf("usage: OpenNote.exe --pdf-fields <file.pdf>\n");
+        return 2;
+    }
+
+    const WCHAR* why = NULL;
+    PdfForm* form = PdfForm_Open(argv[2], &why);
+    if (!form) {
+        wprintf(L"FAILED: %s\n", why ? why : L"the form could not be read");
+        return 1;
+    }
+
+    int count = PdfForm_FieldCount(form);
+    wprintf(L"%s: %d field%s\n", argv[2], count, count == 1 ? L"" : L"s");
+
+    for (int i = 0; i < count; i++) {
+        wprintf(L"  %d  %-28s %-6s %s\n", i,
+                PdfForm_FieldName(form, i),
+                PdfForm_FieldIsText(form, i) ? L"text" : L"other",
+                PdfForm_FieldValue(form, i));
+    }
+
+    PdfForm_Close(form);
+    return 0;
+}
+
+static int RunPdfFill(int argc, WCHAR** argv) {
+    if (argc < 5) {
+        printf("usage: OpenNote.exe --pdf-fill <in.pdf> <out.pdf> <field=value> ...\n");
+        return 2;
+    }
+
+    const WCHAR* why = NULL;
+    PdfForm* form = PdfForm_Open(argv[2], &why);
+    if (!form) {
+        wprintf(L"FAILED: %s\n", why ? why : L"the form could not be read");
+        return 1;
+    }
+
+    int filled = 0;
+
+    for (int i = 4; i < argc; i++) {
+        WCHAR pair[1024];
+        wcsncpy_s(pair, 1024, argv[i], _TRUNCATE);
+
+        WCHAR* equals = wcschr(pair, L'=');
+        if (!equals) {
+            wprintf(L"FAILED: %s is not <field>=<value>\n", argv[i]);
+            PdfForm_Close(form);
+            return 2;
+        }
+        *equals = L'\0';
+
+        BOOL found = FALSE;
+        for (int f = 0; f < PdfForm_FieldCount(form); f++) {
+            if (_wcsicmp(PdfForm_FieldName(form, f), pair) != 0) continue;
+            if (!PdfForm_SetFieldValue(form, f, equals + 1)) break;
+
+            wprintf(L"  %s = %s\n", pair, equals + 1);
+            filled++;
+            found = TRUE;
+            break;
+        }
+
+        if (!found) wprintf(L"  (no text field called \"%s\")\n", pair);
+    }
+
+    BOOL ok = filled > 0 && PdfForm_Save(form, argv[3]);
+    PdfForm_Close(form);
+
+    if (!ok) {
+        wprintf(L"FAILED: nothing was written to %s\n", argv[3]);
+        return 1;
+    }
+
+    wprintf(L"%s -> %s, %d field%s filled\n", argv[2], argv[3], filled,
+            filled == 1 ? L"" : L"s");
+    return 0;
 }
 
 // Does `b` contain the same characters as `a`, ignoring whitespace and the
@@ -578,7 +664,9 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPWSTR lpCmdLi
                       wcsstr(lpCmdLine, L"--docx-check") ||
                       wcsstr(lpCmdLine, L"--layout-report") ||
                       wcsstr(lpCmdLine, L"--export-pdf") ||
-                      wcsstr(lpCmdLine, L"--pdf-info"))) {
+                      wcsstr(lpCmdLine, L"--pdf-info") ||
+                      wcsstr(lpCmdLine, L"--pdf-fields") ||
+                      wcsstr(lpCmdLine, L"--pdf-fill"))) {
         BOOL attached = FALSE;
         FILE* out = NULL;
         if (GetStdHandle(STD_OUTPUT_HANDLE) == NULL) {
@@ -594,6 +682,8 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPWSTR lpCmdLi
             else if (wcsstr(lpCmdLine, L"--layout-report")) rc = RunLayoutReport(argc, argv);
             else if (wcsstr(lpCmdLine, L"--export-pdf"))    rc = RunExportPdf(argc, argv);
             else if (wcsstr(lpCmdLine, L"--pdf-info"))      rc = RunPdfInfo(argc, argv);
+            else if (wcsstr(lpCmdLine, L"--pdf-fields"))    rc = RunPdfFields(argc, argv);
+            else if (wcsstr(lpCmdLine, L"--pdf-fill"))      rc = RunPdfFill(argc, argv);
             else                                            rc = RunDocxToRtf(argc, argv);
             LocalFree(argv);
         }

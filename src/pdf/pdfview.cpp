@@ -474,6 +474,19 @@ extern "C" HWND PdfView_Create(HWND hParent, const WCHAR* path) {
     return hwnd;
 }
 
+extern "C" BOOL PdfView_Path(HWND hPdfView, WCHAR* out, size_t outChars) {
+    if (!out || outChars == 0) return FALSE;
+    out[0] = L'\0';
+
+    if (!hPdfView || !IsWindow(hPdfView)) return FALSE;
+
+    PdfViewState* st = (PdfViewState*)GetWindowLongPtrW(hPdfView, GWLP_USERDATA);
+    if (!st || !st->path[0]) return FALSE;
+
+    wcsncpy_s(out, outChars, st->path, _TRUNCATE);
+    return TRUE;
+}
+
 extern "C" void PdfView_Describe(HWND hPdfView, WCHAR* out, size_t outChars) {
     if (!out || outChars == 0) return;
     out[0] = L'\0';

@@ -1,4 +1,5 @@
 #include "supernote.h"
+#include "pdf/pdfform.h"
 #include "res/resource.h"
 
 // About dialog
@@ -1406,6 +1407,168 @@ BOOL Dialogs_Comments(HWND hParent, DocModel* doc) {
     DialogBoxParamW(g_app->hInstance, MAKEINTRESOURCEW(IDD_COMMENTS),
                     hParent, CommentsProc, (LPARAM)&data);
     return data.changed;
+}
+
+// ---------------------------------------------------------------------------
+// Filling in a PDF form
+//
+// The fields as the file states them, each with what is in it. Filling one in
+// changes nothing on disk: the file is written when Save As is pressed, and
+// it is written as an incremental update, so what was there stays there.
+// ---------------------------------------------------------------------------
+
+typedef struct {
+    PdfForm* form;
+    WCHAR    savedTo[MAX_PATH];
+} PdfFormData;
+
+static void PdfFormFill(HWND hwnd, PdfFormData* data) {
+    HWND list = GetDlgItem(hwnd, IDC_PDF_FORM_LIST);
+    ListView_DeleteAllItems(list);
+
+    int count = PdfForm_FieldCount(data->form);
+    for (int i = 0; i < count; i++) {
+        LVITEMW item = {0};
+        item.mask = LVIF_TEXT | LVIF_PARAM;
+        item.iItem = i;
+        item.lParam = i;
+        item.pszText = (WCHAR*)PdfForm_FieldName(data->form, i);
+
+        int at = ListView_InsertItem(list, &item);
+        if (at < 0) continue;
+
+        ListView_SetItemText(list, at, 1, (WCHAR*)PdfForm_FieldValue(data->form, i));
+        ListView_SetItemText(list, at, 2,
+                             PdfForm_FieldIsText(data->form, i) ? L"text" : L"other");
+    }
+}
+
+static void PdfFormEditSelected(HWND hwnd, PdfFormData* data) {
+    HWND list = GetDlgItem(hwnd, IDC_PDF_FORM_LIST);
+    int selected = ListView_GetNextItem(list, -1, LVNI_SELECTED);
+    if (selected < 0) return;
+
+    if (!PdfForm_FieldIsText(data->form, selected)) {
+        MessageBoxW(hwnd,
+            L"Only text fields can be filled in here.\n\n"
+            L"Tick boxes and choice lists are read but not written yet.",
+            APP_NAME, MB_ICONINFORMATION);
+        return;
+    }
+
+    WCHAR prompt[256];
+    swprintf_s(prompt, 256, L"%s:", PdfForm_FieldName(data->form, selected));
+
+    WCHAR value[1024];
+    wcsncpy_s(value, 1024, PdfForm_FieldValue(data->form, selected), _TRUNCATE);
+
+    if (!Dialogs_InputBox(hwnd, L"Fill in", prompt, value, 1024)) return;
+
+    PdfForm_SetFieldValue(data->form, selected, value);
+    PdfFormFill(hwnd, data);
+}
+
+static void PdfFormSave(HWND hwnd, PdfFormData* data) {
+    WCHAR path[MAX_PATH] = {0};
+    if (!Dialogs_SaveFile(hwnd, path, MAX_PATH, L"filled.pdf")) return;
+
+    // A name with no extension gets the one it is going to be.
+    if (!wcsrchr(path, L'.')) wcscat_s(path, MAX_PATH, L".pdf");
+
+    if (!PdfForm_Save(data->form, path)) {
+        MessageBoxW(hwnd, L"The filled form could not be written.",
+                    APP_NAME, MB_ICONWARNING);
+        return;
+    }
+
+    wcsncpy_s(data->savedTo, MAX_PATH, path, _TRUNCATE);
+    EndDialog(hwnd, IDOK);
+}
+
+static INT_PTR CALLBACK PdfFormProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
+    PdfFormData* data = (PdfFormData*)GetWindowLongPtrW(hwnd, GWLP_USERDATA);
+
+    switch (msg) {
+        case WM_INITDIALOG: {
+            data = (PdfFormData*)lParam;
+            SetWindowLongPtrW(hwnd, GWLP_USERDATA, (LONG_PTR)data);
+
+            HWND list = GetDlgItem(hwnd, IDC_PDF_FORM_LIST);
+            ListView_SetExtendedListViewStyle(list, LVS_EX_FULLROWSELECT);
+
+            LVCOLUMNW column = {0};
+            column.mask = LVCF_TEXT | LVCF_WIDTH;
+
+            column.cx = 150;
+            column.pszText = (WCHAR*)L"Field";
+            ListView_InsertColumn(list, 0, &column);
+
+            column.cx = 280;
+            column.pszText = (WCHAR*)L"Value";
+            ListView_InsertColumn(list, 1, &column);
+
+            column.cx = 60;
+            column.pszText = (WCHAR*)L"Kind";
+            ListView_InsertColumn(list, 2, &column);
+
+            PdfFormFill(hwnd, data);
+            return TRUE;
+        }
+
+        case WM_NOTIFY:
+            if (((LPNMHDR)lParam)->idFrom == IDC_PDF_FORM_LIST &&
+                ((LPNMHDR)lParam)->code == NM_DBLCLK) {
+                PdfFormEditSelected(hwnd, data);
+                return TRUE;
+            }
+            break;
+
+        case WM_COMMAND:
+            switch (LOWORD(wParam)) {
+                case IDC_PDF_FORM_EDIT:
+                    PdfFormEditSelected(hwnd, data);
+                    return TRUE;
+
+                case IDC_PDF_FORM_SAVE:
+                    PdfFormSave(hwnd, data);
+                    return TRUE;
+
+                case IDCANCEL:
+                    EndDialog(hwnd, IDCANCEL);
+                    return TRUE;
+            }
+            break;
+
+        case WM_CLOSE:
+            EndDialog(hwnd, IDCANCEL);
+            return TRUE;
+    }
+
+    return FALSE;
+}
+
+BOOL Dialogs_PdfForm(HWND hParent, const WCHAR* pdfPath, WCHAR* savedTo, size_t savedChars) {
+    if (savedTo && savedChars) savedTo[0] = L'\0';
+
+    const WCHAR* why = NULL;
+    PdfForm* form = PdfForm_Open(pdfPath, &why);
+    if (!form) {
+        MessageBoxW(hParent, why ? why : L"This PDF's form could not be read.",
+                    APP_NAME, MB_ICONINFORMATION);
+        return FALSE;
+    }
+
+    PdfFormData data = {0};
+    data.form = form;
+
+    INT_PTR result = DialogBoxParamW(g_app->hInstance, MAKEINTRESOURCEW(IDD_PDF_FORM),
+                                     hParent, PdfFormProc, (LPARAM)&data);
+    PdfForm_Close(form);
+
+    if (result != IDOK) return FALSE;
+
+    if (savedTo && savedChars) wcsncpy_s(savedTo, savedChars, data.savedTo, _TRUNCATE);
+    return TRUE;
 }
 
 BOOL Dialogs_InputBox(HWND hParent, const WCHAR* title, const WCHAR* prompt, WCHAR* buffer, int bufferSize) {

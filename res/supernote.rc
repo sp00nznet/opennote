@@ -99,6 +99,21 @@ BEGIN
     DEFPUSHBUTTON   "OK", IDOK, 100, 110, 50, 14
 END
 
+// Filling in a PDF form
+IDD_PDF_FORM DIALOGEX 0, 0, 340, 220
+STYLE DS_SETFONT | DS_FIXEDSYS | WS_POPUP | WS_CAPTION | WS_SYSMENU | WS_THICKFRAME
+CAPTION "Fill Form"
+FONT 8, "MS Shell Dlg"
+BEGIN
+    LTEXT           "Double-click a field to fill it in.", IDC_STATIC, 12, 10, 200, 10
+    CONTROL         "", IDC_PDF_FORM_LIST, WC_LISTVIEW,
+                    LVS_REPORT | LVS_SINGLESEL | LVS_SHOWSELALWAYS | WS_BORDER | WS_TABSTOP,
+                    12, 24, 316, 160
+    PUSHBUTTON      "&Fill in...", IDC_PDF_FORM_EDIT, 12, 192, 60, 14
+    DEFPUSHBUTTON   "&Save As...", IDC_PDF_FORM_SAVE, 200, 192, 62, 14
+    PUSHBUTTON      "Close", IDCANCEL, 268, 192, 60, 14
+END
+
 // Comments: what people said about the document, which is not in it
 IDD_COMMENTS DIALOGEX 0, 0, 300, 180
 STYLE DS_SETFONT | DS_FIXEDSYS | WS_POPUP | WS_CAPTION | WS_SYSMENU | WS_THICKFRAME

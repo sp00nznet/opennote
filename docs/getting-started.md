@@ -91,8 +91,12 @@ it is still text, selectable and searchable, with the fonts embedded.
 follows it immediately.
 
 **Opening a PDF** works too, as of v0.11: it gets a tab of its own and shows its pages,
-fitted to the window, `Page Up` and `Page Down` by a page, `Ctrl`+wheel to zoom. It is
-read-only — filling in a form and signing one are what comes next.
+fitted to the window, `Page Up` and `Page Down` by a page, `Ctrl`+wheel to zoom.
+
+**And you can fill one in.** If the PDF carries a form — the kind you are sent, print,
+fill in by hand and scan back — **File → Fill PDF Form…** lists its fields, takes what you
+type, and writes a filled copy. Your answers are appended to the file rather than written
+over it, so the original is still in there.
 
 ---
 

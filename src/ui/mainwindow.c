@@ -1364,6 +1364,8 @@ static BOOL RefusedForPdf(HWND hwnd, int id) {
         case IDM_FILE_PRINT_PREVIEW:
         case IDM_FILE_EXPORT_PDF:
         case IDM_FILE_PAGE_SETUP:
+            // ...but not IDM_FILE_FILL_FORM, which is the one command that
+            // means something here.
         case IDM_VIEW_PAGE_LAYOUT:
         case IDM_INSERT_PICTURE:
         case IDM_INSERT_PAGE_NUMBERS:
@@ -1707,6 +1709,31 @@ void MainWindow_OnCommand(HWND hwnd, int id, HWND hwndCtl, UINT codeNotify) {
         case IDM_SETTINGS_DEFAULTS:
             Dialogs_Defaults(hwnd);
             break;
+
+        case IDM_FILE_FILL_FORM: {
+            // The form belongs to the file rather than to anything drawn, so
+            // this works on the PDF the active tab is showing.
+            Tab* tab = App_GetActiveTab();
+
+            WCHAR pdfPath[MAX_PATH];
+            if (!tab || !tab->hPdfView || !PdfView_Path(tab->hPdfView, pdfPath, MAX_PATH)) {
+                MessageBoxW(hwnd,
+                    L"Open a PDF first.\n\n"
+                    L"File > Open reads one, and this fills in the form it carries.",
+                    APP_NAME, MB_ICONINFORMATION);
+                break;
+            }
+
+            WCHAR savedTo[MAX_PATH] = {0};
+            if (!Dialogs_PdfForm(hwnd, pdfPath, savedTo, MAX_PATH)) break;
+            if (!savedTo[0]) break;
+
+            // Show what was written: a filled form nobody can see is a filled
+            // form nobody trusts.
+            Document* filled = Document_CreateFromFile(savedTo);
+            if (filled) MainWindow_OpenDocument(filled);
+            break;
+        }
 
         // Insert menu
         case IDM_INSERT_PAGE_NUMBERS:

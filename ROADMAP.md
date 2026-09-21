@@ -232,9 +232,12 @@ the free tools for it are adware or a web upload.
       No parser needed to *show* a PDF, and it is the fastest way to something usable.
       Done: a `.pdf` opens in a tab, `--pdf-info` reports it on the command line, and the
       self-check writes a PDF by hand, opens it and asserts there is ink on the render.
-- [ ] **Fill in a form.** AcroForm fields are objects in the file; filling one means
-      setting its value and appending an incremental update, which is a bounded amount
-      of PDF parsing — the cross-reference table and the objects a field touches.
+- [x] **Fill in a form.** Done for the files this reads: classic cross-reference tables,
+      text fields, appearance streams written per field so the value shows everywhere.
+      The update is appended, so the original bytes never move.
+- [ ] **Inflate**, and with it the PDFs this cannot open yet: a file whose
+      cross-reference is a compressed stream (PDF 1.5 and later) is refused with a
+      sentence saying so. About 300 lines of deflate, and no new dependency.
 - [ ] **A visible signature.** An image or an inked scribble placed on the page, stamped
       in as an XObject. This is what most people mean by "sign a PDF", and it is the
       same incremental-update machinery as a filled field.

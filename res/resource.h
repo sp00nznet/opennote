@@ -222,6 +222,13 @@
 
 // The comments dialog
 #define IDC_STATIC_SEARCH        1159
+
+// Filling in a PDF form
+#define IDD_PDF_FORM             1170
+#define IDC_PDF_FORM_LIST        1171
+#define IDC_PDF_FORM_EDIT        1172
+#define IDC_PDF_FORM_SAVE        1173
+#define IDM_FILE_FILL_FORM       7420
 #define IDD_COMMENTS             1160
 #define IDC_COMMENTS_LIST        1161
 #define IDC_COMMENTS_DELETE      1162

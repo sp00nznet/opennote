@@ -110,10 +110,14 @@ heading — so the numbers follow the document instead of describing where it us
 here; the output is vector and the text in it is still text.
 
 **And, as of v0.11, a PDF opens.** It gets a tab of its own and shows its pages — Windows
-has shipped the renderer since 8.1, so there is still no PDF library in here. It is
-read-only for now: filling in a form field and stamping a signature are what v0.11 is
-for, and they are the reason this matters — the form you have to fill in and send back
-arrives as a PDF, and the free tools for it are adware or a web upload.
+has shipped the renderer since 8.1, so there is still no PDF library in here. **And a PDF form can be filled in** — the reason this matters: the form you have to fill
+in and send back arrives as a PDF, and the free tools for it are adware or a web upload.
+File → Fill PDF Form lists the fields, takes what you type and writes a filled copy, as an
+incremental update: the original bytes stay, the answers are appended. Nothing here parses
+a PDF except the part that does that, and a file whose cross-reference is compressed is
+refused with a sentence saying so rather than read wrongly.
+
+Stamping a signature on one is next.
 
 The stretch is the part Word actually gets paid for: `.docx`, real page layout, `.doc`,
 track changes. Everything needed for that is already in Windows and already paid for.

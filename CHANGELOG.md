@@ -11,6 +11,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **`OPENNOTE_DB`** names the database file, so a copy run from a stick keeps its notes
   beside itself rather than in whichever account it is plugged into — and a test that
   opens documents cannot write to the store somebody is actually using.
+- **A PDF form can be filled in.** **File → Fill PDF Form…** lists the fields a PDF
+  carries, fills them in and writes the result. The file is written as an *incremental
+  update* — the original bytes, untouched, with the changed objects and a new
+  cross-reference table appended — which is how PDF was designed to be edited: a mistake
+  can be undone by truncating the file back to the previous `%%EOF`. Each filled field
+  gets an appearance stream written for it, so the value shows up in any reader rather
+  than only in one that regenerates appearances.
+  `--pdf-fields` and `--pdf-fill` do the same from the command line.
 - **A PDF opens and is shown.** opennote has written PDFs since v0.8 and could not read
   one; a `.pdf` now opens in a tab and draws its pages — fitted to the window, scrolled
   with the wheel, `Page Up` / `Page Down` by a page, `Ctrl`+wheel to zoom, `Ctrl+0` to fit

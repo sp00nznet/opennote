@@ -25,6 +25,10 @@ BOOL Dialogs_SaveFile(HWND hParent, WCHAR* pathBuffer, int bufferSize, const WCH
 int Dialogs_SaveChanges(HWND hParent, const WCHAR* filename);  // Returns IDYES, IDNO, or IDCANCEL
 
 // Input dialog
+// The form in a PDF: its fields, and filling them in. `savedTo` is given the
+// file that was written, when one was.
+BOOL Dialogs_PdfForm(HWND hParent, const WCHAR* pdfPath, WCHAR* savedTo, size_t savedChars);
+
 // The document's comments: who said what, and a way to remove one. Returns
 // TRUE when something was deleted, which is when the document has changed.
 BOOL Dialogs_Comments(HWND hParent, DocModel* doc);

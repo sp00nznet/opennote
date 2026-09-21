@@ -172,6 +172,11 @@ so rather than half-working.
 | `Ctrl` + wheel | Zoom |
 | `Ctrl+0` | Fit the page across the window, which is how it opens |
 
+**File → Fill PDF Form…** lists the fields the PDF carries. Double-click one to fill it
+in, then **Save As** writes the filled copy — the original file is not changed, and the
+copy is the original with the answers appended, which is how PDF is meant to be edited.
+Text fields are filled; tick boxes and choice lists are listed but not written yet.
+
 The status bar shows the page count and the zoom.
 
 ---
