@@ -73,6 +73,8 @@
 #define IDM_SETTINGS_FONT_20    5520
 
 // Help menu
+#define IDM_HELP_GUIDE          5002
+#define IDM_HELP_CONTROLS       5003
 #define IDM_HELP_ABOUT          5001
 
 // Accelerators

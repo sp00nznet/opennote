@@ -131,6 +131,9 @@ HMENU MenuBar_Create(void) {
 
     // Help menu
     HMENU hHelpMenu = CreatePopupMenu();
+    AppendMenuW(hHelpMenu, MF_STRING, IDM_HELP_GUIDE, L"&Getting Started");
+    AppendMenuW(hHelpMenu, MF_STRING, IDM_HELP_CONTROLS, L"&Controls");
+    AppendMenuW(hHelpMenu, MF_SEPARATOR, 0, NULL);
     AppendMenuW(hHelpMenu, MF_STRING, IDM_HELP_ABOUT, L"&About opennote");
     AppendMenuW(hMenu, MF_POPUP, (UINT_PTR)hHelpMenu, L"&Help");
 

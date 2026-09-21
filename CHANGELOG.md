@@ -8,6 +8,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **Documentation that exists.** `docs/getting-started.md` (installing, the first document,
+  pages, printing, notes, optional sync), `docs/controls.md` (every key, toolbar button
+  and mouse gesture, including the page layout view's own, which had never been written
+  down anywhere) and `docs/overview.md` (where this came from, what is WordPad about it,
+  what is Word about it, the goals, and what it is deliberately not). The README indexes
+  them, and **Help → Getting Started** and **Help → Controls** open them from inside the
+  application.
 - **A plain text file lays out and prints like everything else.** Page layout used to
   refuse anything but rich text, and printing a note drew a single page with DrawText and
   stopped -- a long note printed its first page and lost the rest. A text file now becomes

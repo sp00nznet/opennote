@@ -1261,6 +1261,21 @@ void MainWindow_OnCommand(HWND hwnd, int id, HWND hwndCtl, UINT codeNotify) {
             break;
 
         // Help menu
+        //
+        // The documentation lives in the repository rather than in a help file
+        // nobody would ship: one executable stays one executable.
+        case IDM_HELP_GUIDE:
+            ShellExecuteW(hwnd, L"open",
+                          L"https://github.com/sp00nznet/opennote/blob/main/docs/getting-started.md",
+                          NULL, NULL, SW_SHOWNORMAL);
+            break;
+
+        case IDM_HELP_CONTROLS:
+            ShellExecuteW(hwnd, L"open",
+                          L"https://github.com/sp00nznet/opennote/blob/main/docs/controls.md",
+                          NULL, NULL, SW_SHOWNORMAL);
+            break;
+
         case IDM_HELP_ABOUT:
             Dialogs_About(hwnd);
             break;

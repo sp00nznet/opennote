@@ -122,7 +122,7 @@ See [ROADMAP.md](ROADMAP.md) for the ordering.
 
 ---
 
-## Getting Started
+## Build and run
 
 From a clean machine:
 
@@ -190,6 +190,9 @@ OpenNote.exe --selftest      # run the built-in checks and exit
 | `Ctrl+U` | Underline | `Ctrl+P` | Print |
 | `Ctrl+Shift+L` | Page layout view | `Esc` | Close it, keeping the edits |
 
+Every key, button and mouse gesture, including the page layout view's own, is in
+[docs/controls.md](docs/controls.md).
+
 ### Cloud sync
 
 Off unless you connect an account, and it talks to GitHub or Google directly — there is
@@ -217,9 +220,23 @@ application completely.
 
 ---
 
+## Documentation
+
+| | |
+|---|---|
+| [Getting started](docs/getting-started.md) | Installing, the first document, pages, printing, notes, sync — the twenty minutes after the download |
+| [Controls](docs/controls.md) | Every key, toolbar button and mouse gesture, in both views |
+| [Overview](docs/overview.md) | What this is: where it came from, what is WordPad about it, what is Word about it, and the goals |
+| [Cloud sync setup](docs/cloud-sync-setup.md) | Registering your own OAuth application with GitHub and Google |
+| [Building the installer](docs/building-installer.md) | Packaging a release |
+| [ROADMAP.md](ROADMAP.md) | The ordering, version by version |
+| [SECURITY.md](SECURITY.md) | Known issues, stated rather than buried |
+
+---
+
 ## Building from source
 
-Covered under [Getting Started](#getting-started) above; that is the only way to run it
+Covered under [Build and run](#build-and-run) above; that is the only way to run it
 right now. `cmake -B build && cmake --build build --config Release` is the whole thing.
 
 Do not pass the OAuth CMake variables for a normal build — see
