@@ -71,7 +71,8 @@ The part Word actually gets paid for is `.docx` fidelity and page layout. Both a
   not approximated: styles resolved through `basedOn` to the document defaults, numbering
   that counts properly (letters, roman numerals, `1.2.` at a nested level), pictures,
   tables with their stated column widths, sections, columns, page breaks, headers and
-  footers, footnotes and endnotes, tracked-deletion handling, and Unicode throughout.
+  footers, footnotes and endnotes, tracked changes, comments, fields, bookmarks, and
+  Unicode throughout.
 
   There is no third-party dependency for any of it. A `.docx` is an Open Packaging
   Conventions container, and Windows ships the API for exactly that shape (`IOpcFactory`)
@@ -89,15 +90,22 @@ The part Word actually gets paid for is `.docx` fidelity and page layout. Both a
   the arrows walk the laid-out lines rather than the structure behind them, `Page Up` means
   a page, the ruler's markers set indents, and undo is a stack of model snapshots.
 
+- **What a working document carries.** Tracked changes are model state: a deletion is
+  kept rather than dropped, shown nowhere, and written back where it came from, with
+  accept and reject to settle them. Comments live in their own part with markers in the
+  text. Fields — `PAGE`, `NUMPAGES`, `DATE`, `TIME`, `REF`, `PAGEREF` — are answered when
+  the document is laid out, which is the only moment the answer is known, and a table of
+  contents is built from the headings with each entry pointing at its own.
+
 - **PDF export** that is vector — the text stays text, the fonts are embedded — through
   Windows' own PDF printer. There is no PDF library in here either.
 
 **Fidelity is measured, not claimed.** A generated corpus of documents goes through
 load → model → save → reload, and every property the source stated is compared with what
 came back. The number is in the README, a build fails when it gets worse, and the current
-reading is `196/196` conformance checks across 10 documents, `51158/51158` properties
-surviving the model round-trip and `51032/51041` surviving a load, edit and save — with
-each of the nine losses named rather than rounded away.
+reading is `230/230` conformance checks across 12 documents, `84327/84327` properties
+surviving the model round-trip and `84189/84191` surviving a load, edit and save — with
+both remaining losses named rather than rounded away.
 
 ---
 
@@ -137,9 +145,11 @@ each of the nine losses named rather than rounded away.
 
 [ROADMAP.md](../ROADMAP.md) has the ordering. The short version:
 
-- **v0.10 — the business tier.** What a company needs that a person does not: track
-  changes as real state with accept and reject, comments, fields (page numbers, dates,
-  cross-references), a table of contents.
+- **v0.11 — PDF, the other direction.** opennote writes a PDF and cannot read one.
+  Rendering a page (Windows ships `Windows.Data.Pdf`), filling in a form, and stamping a
+  visible signature on it — the form you have to fill in and send back arrives as a PDF,
+  and the free tools for it are adware or a web upload. A cryptographic signature is a
+  separate, later job.
 - **v1.0 — `.doc`.** The legacy binary format over compound file storage. The widest gap,
   and the one that needs format archaeology rather than careful reading.
 

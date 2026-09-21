@@ -60,6 +60,30 @@ formatting half of the toolbar greys out, because a `.txt` has nowhere to keep i
 | — | **Format → Clear Formatting** |
 | — | **Format → Font…**, **Word Wrap**, **Tab Size** (plain text) |
 
+## Insert
+
+Everything here belongs to a rich text document — a `.txt` has nowhere to keep it.
+
+| | What it does |
+|---|--------------|
+| **Insert → Picture…** | A picture at the caret |
+| **Insert → Page Numbers** | A centred "Page N of M" footer. They are fields, so they are right after you add a page rather than right when you typed them |
+| **Insert → Table of Contents** | Built from the document's headings, at the top. Each entry points at its heading, so the page numbers follow the document. Run it again after editing and the old one is replaced rather than added to |
+| **Insert → Date Field** | A date that updates when the document is laid out. `F5` inserts today's date as plain text instead, which is what Notepad does |
+
+## Review
+
+| | What it does |
+|---|--------------|
+| **Review → New Comment…** | A comment on the paragraph you are in — the page view's caret when that is the view, the text view's selection otherwise. It is signed with your Windows account name |
+| **Review → Comments…** | Every comment in the document, with who wrote it and when. Delete removes one and its markers |
+| **Review → Accept All Changes** | Tracked deletions go, tracked insertions become ordinary text. Nothing on screen changes, because that is already what was being shown |
+| **Review → Reject All Changes** | The other way round: deleted text comes back and inserted text goes |
+
+A document with tracked changes reads as it will once they are accepted. Deleted text is
+carried, not shown — it is in the file, and it goes back into the file when you save.
+There is no mode that shows insertions underlined and deletions struck through yet.
+
 ## View
 
 | Key | What it does |

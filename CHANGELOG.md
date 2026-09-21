@@ -7,6 +7,49 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.10.0] - 2026-09-21
+
+**The business tier: what a company cannot leave Word for, as distinct from what a
+person cannot.** Tracked changes, comments, fields and a table of contents -- plus the
+first tagged release, which the earlier versions deliberately went without.
+
+### Added
+- **Tracked changes are state the document carries.** A deletion used to be dropped on
+  read -- correct on screen, and lossy the moment the file was saved again. `w:ins` and
+  `w:del` become a mark on the run now, the deleted text stays in the model, and both go
+  back out where they came from. Nothing shows it: the document reads as it stands once
+  the changes are accepted, which is what a reader wants to see, while the file keeps its
+  history. **Review → Accept All Changes** and **Reject All Changes** resolve them.
+- **Fields**: `PAGE`, `NUMPAGES`, `DATE`, `TIME`, `REF` and `PAGEREF`, in both the simple
+  and the complex spelling, with bookmarks alongside them. A field is an instruction and
+  the answer it last gave, and the answer is worked out again every time the document is
+  laid out. Anything else keeps the result it came in with, so a field opennote does not
+  understand survives untouched.
+- **Insert → Page Numbers** — a centred "Page N of M" footer, as fields rather than text,
+  so it is right after the document changes.
+- **Insert → Table of Contents** — built from the document's headings, each entry
+  pointing at a bookmark on its heading, so the page numbers follow the document.
+  Building it twice leaves one.
+- **Insert → Date Field** — a date that updates rather than a date that was true once.
+- **Comments.** The comment lives in `comments.xml` and the document holds the markers:
+  where it starts, where it ends, where the bubble hangs. **Review → New Comment** puts
+  one on the paragraph you are in, signed with the Windows account; **Review → Comments**
+  lists them and takes one off.
+
+### Fixed
+- **The editor was losing heading level, style name and list number format** on every
+  save, because the RichEdit control cannot hold any of them. They are carried over from
+  the document's own model now, the same way pictures and tracked changes are. Editor
+  fidelity went from 9 losses in 51041 properties to **2 in 84191**.
+- **Three menu commands could never run.** Review's Accept, Reject and New Comment had
+  landed on 7340-7342, which are the toolbar's own control ids; the control's
+  notification is handled first and the switch never reached them.
+
+### Conformance
+`230/230` checks across 12 documents, `84327/84327` model properties and `84189/84191`
+through the editor -- with tracked changes, fields, bookmarks and comments now among the
+properties being counted.
+
 ### Added
 - **Documentation that exists.** `docs/getting-started.md` (installing, the first document,
   pages, printing, notes, optional sync), `docs/controls.md` (every key, toolbar button

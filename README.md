@@ -26,7 +26,7 @@ payware, read the published spec it is hiding behind, give it away.
 
 ## Status
 
-**v0.9.0 — alpha. Reads what a `.docx` actually contains: styles, numbering, pictures, headers, footnotes.** Downloads are on the
+**v0.10.0 — alpha. Tracked changes, comments, fields and a table of contents: the part of a Word document a company cannot do without.** Downloads are on the
 [releases page](https://github.com/sp00nznet/opennote/releases/latest): a bare executable
 and an installer, with the release notes saying what each one does and does not give you.
 
@@ -42,7 +42,7 @@ container, and Windows ships the API for exactly that shape (`IOpcFactory`) alon
 pull XML reader (`IXmlReader`). The container and the parser were never this project's
 code to own.
 
-**Conformance:** `196/196 checks across 10 documents`, and fidelity is measured rather than claimed — see
+**Conformance:** `230/230 checks across 12 documents`, and fidelity is measured rather than claimed — see
 [Conformance](#conformance) below.
 
 As of v0.7 a document is a real tree (sections, paragraphs, runs, tables, cells) rather
@@ -91,6 +91,20 @@ formatting still belongs to the rich text view, and the page view writes its cha
 back to the document when it closes.
 
 ![The page layout view](gfx/pageview.png)
+
+### Review, and the parts a document works out for itself
+
+As of v0.10 a document carries what a working document carries. **Tracked changes** are
+state rather than something dropped on the way in: a deletion is kept, invisible until
+you reject it, and written back where it came from — Review → Accept All Changes and
+Reject All Changes resolve them. **Comments** live in their own part with markers in the
+text; Review → New Comment adds one to the paragraph you are in.
+
+**Fields** are answered when the document is laid out, because that is the only moment
+the answer is known: `PAGE`, `NUMPAGES`, `DATE`, `TIME`, `REF` and `PAGEREF`. On top of
+them, **Insert → Page Numbers** puts "Page N of M" in the footer and **Insert → Table of
+Contents** builds one from the headings, each entry pointing at a bookmark on its
+heading — so the numbers follow the document instead of describing where it used to be.
 
 **Export to PDF** goes through Windows' own PDF printer, so there is no PDF library in
 here; the output is vector and the text in it is still text.
@@ -251,9 +265,9 @@ than a bare "tests passed", and **fidelity is a number, not a claim**:
 
 ```
 > OpenNote.exe --docx-check build/corpus
-docx conformance: 196/196 checks across 10 documents
-model fidelity:   51158/51158 properties survive .docx -> model -> .docx
-editor fidelity:  51032/51041 properties survive a load, edit and save
+docx conformance: 230/230 checks across 12 documents
+model fidelity:   84327/84327 properties survive .docx -> model -> .docx
+editor fidelity:  84189/84191 properties survive a load, edit and save
 ```
 
 Fidelity counts what the *source document stated* and the round trip failed to preserve.

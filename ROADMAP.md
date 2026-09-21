@@ -6,7 +6,7 @@ The short version: **Windows shipped a rich text editor for thirty years and rem
 in 2024.** WordPad is gone from Windows 11 24H2 and from Windows Server 2025. The
 replacement Microsoft points you at is a subscription. OpenNote is aiming at that hole.
 
-**v0.9.0.** Published binaries — a bare executable and an installer — are built by CI
+**v0.10.0.** Published binaries — a bare executable and an installer — are built by CI
 from the tagged commit.
 
 Nothing below is a promise of a date.
@@ -206,15 +206,43 @@ keeps its model beside the view and hands back what the view cannot say. That wo
 it is measured — the editor path loses nine properties out of fifty thousand, each one
 named — but it is scaffolding until the laid-out view is the only view.
 
-### v0.10.0 — The business tier
+### v0.10.0 — The business tier — **done**
 
 The reason a company cannot leave Word, as distinct from the reason a person cannot.
 
-- [ ] Track changes as model state, with accept and reject. Deletions are currently
-      dropped on read, which is correct for display and lossy for a round-trip
-- [ ] Comments
-- [ ] Fields: page numbers, dates, cross-references
-- [ ] Table of contents
+- [x] Track changes as model state, with accept and reject. A deletion is kept rather
+      than dropped, invisible everywhere text is measured, and written back out
+- [x] Comments, in a part of their own with markers in the document
+- [x] Fields: page numbers, dates, cross-references — answered when the document is laid
+      out, which is the only time the answer is known
+- [x] Table of contents, built from the headings, each entry pointing at a bookmark
+
+Two things it does not do, both layout work rather than model work: show markup on the
+page (insertions underlined, deletions struck through) and show a comment in the margin.
+The round trip was what mattered first — a comment dropped on read is a comment deleted
+on save.
+
+### v0.11.0 — PDF, the other direction
+
+opennote writes a PDF today and cannot read one. That is a one-way door with a lot of
+people standing at it: the form you have to fill in and send back arrives as a PDF, and
+the free tools for it are adware or a web upload.
+
+- [ ] **Render.** Windows ships `Windows.Data.Pdf`, which turns a page into a bitmap.
+      No parser needed to *show* a PDF, and it is the fastest way to something usable.
+- [ ] **Fill in a form.** AcroForm fields are objects in the file; filling one means
+      setting its value and appending an incremental update, which is a bounded amount
+      of PDF parsing — the cross-reference table and the objects a field touches.
+- [ ] **A visible signature.** An image or an inked scribble placed on the page, stamped
+      in as an XObject. This is what most people mean by "sign a PDF", and it is the
+      same incremental-update machinery as a filled field.
+- [ ] **A cryptographic signature**, separately and later: a PKCS#7 detached signature
+      over a byte range, from a certificate in the Windows store. Windows has the crypto
+      (`CryptMsg`); what it costs is the `/ByteRange` placeholder dance and the care that
+      anything claiming to verify a signature deserves. Reading and *verifying* someone
+      else's signature is a different job again, and is not promised here.
+
+Everything above uses what Windows already ships. Nothing in it needs a PDF library.
 
 ### v1.0.0 — `.doc`
 

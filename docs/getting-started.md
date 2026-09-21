@@ -45,7 +45,7 @@ because there was nothing there to lose.
 |--------|--------------|
 | `.txt`, `.md`, source files | Plain text, with syntax highlighting where it recognises the extension |
 | `.rtf` | Rich text — fonts, colours, lists, pictures, tables |
-| `.docx` | Word documents — styles, numbering, pictures, headers and footers, footnotes, tables, tracked deletions |
+| `.docx` | Word documents — styles, numbering, pictures, headers and footers, footnotes, tables, tracked changes, comments, fields |
 | anything else | As text |
 
 Everything it opens, it saves back in the same format.
@@ -88,6 +88,25 @@ it is still text, selectable and searchable, with the fonts embedded.
 
 **File → Page Setup…** sets paper size, orientation and margins, and the layout view
 follows it immediately.
+
+---
+
+## Working on someone else's document
+
+A document that has been through a review carries more than its text, and opennote keeps
+all of it.
+
+**Tracked changes** arrive intact. What you see is the document as it will read once the
+changes are accepted; the deleted text is still in the file, and it is still there when
+you save. **Review → Accept All Changes** and **Reject All Changes** settle them.
+
+**Comments** arrive too. **Review → Comments…** lists them — who said what, and when —
+and **Review → New Comment…** adds one to the paragraph you are in.
+
+**Insert → Page Numbers** puts "Page N of M" in the footer, and **Insert → Table of
+Contents** builds one from the document's headings. Both are fields: the numbers are
+worked out each time the document is laid out, so they stay right when the document
+changes underneath them rather than describing where things used to be.
 
 ---
 
