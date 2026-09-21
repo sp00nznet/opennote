@@ -17,6 +17,10 @@ heading and one body line are drawn and the rest dropped, because three bars in
 sixteen pixels is a smudge.
 
 Pure standard library: the rasteriser and the PNG and ICO writers are all here.
+
+The generalised version of this, with the toolbar's glyphs alongside it and an
+accent colour per product, lives in asset-forge as pipelines/ui_icons.py. This
+file stays because a build should not need another repository checked out.
 """
 
 import os
