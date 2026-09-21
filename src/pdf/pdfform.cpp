@@ -25,6 +25,7 @@
 #include "pdf/pdfread.h"
 #include "core/inflate.h"
 #include "core/imagedib.h"
+#include "pdf/pdfsign.h"
 
 #include <stdlib.h>
 #include <string.h>
@@ -158,6 +159,12 @@ struct PdfForm {
 
     Stamp stamps[MAX_STAMPS];
     int   stampCount;
+
+    // A signature waiting to be made. The certificate is the user's; this
+    // holds it only until the file is written.
+    PdfCertificate signingCert;
+    WCHAR          signName[256];
+    WCHAR          signReason[256];
 };
 
 static BOOL ObjectBody(const PdfForm* form, int number, Span* out);
@@ -1048,30 +1055,19 @@ static BOOL ReadFields(PdfForm* form) {
 
     Span acroForm;
     if (!DictValue(catalog, "AcroForm", &acroForm)) {
-        Why(L"This PDF has no form in it.");
-        return FALSE;
+        // No form at all. That is not a failure: a PDF with nothing to fill in
+        // is still one that can be signed or stamped, and the caller finds out
+        // there are no fields by asking how many there are.
+        return TRUE;
     }
 
     form->acroFormObject = AsReference(acroForm);
 
     Span acro;
-    if (!Resolve(form, acroForm, &acro)) {
-        Why(L"This PDF's form could not be read.");
-        return FALSE;
-    }
+    if (!Resolve(form, acroForm, &acro)) return TRUE;
 
     Span fields;
-    if (!DictValue(acro, "Fields", &fields)) {
-        Why(L"This PDF's form has no fields.");
-        return FALSE;
-    }
-
-    ReadFieldKids(form, fields, NULL);
-
-    if (form->fieldCount == 0) {
-        Why(L"This PDF's form has no fields in it.");
-        return FALSE;
-    }
+    if (DictValue(acro, "Fields", &fields)) ReadFieldKids(form, fields, NULL);
     return TRUE;
 }
 
@@ -1263,6 +1259,16 @@ extern "C" int PdfForm_PageCount(PdfForm* form) {
     if (!form) return 0;
     ReadPages(form);
     return form->pageCount;
+}
+
+extern "C" BOOL PdfForm_SignWithCertificate(PdfForm* form, PdfCertificate certificate,
+                                            const WCHAR* name, const WCHAR* reason) {
+    if (!form || !certificate) return FALSE;
+
+    form->signingCert = certificate;
+    wcsncpy_s(form->signName, 256, name ? name : L"", _TRUNCATE);
+    wcsncpy_s(form->signReason, 256, reason ? reason : L"", _TRUNCATE);
+    return TRUE;
 }
 
 extern "C" BOOL PdfForm_StampImage(PdfForm* form, int pageIndex, const WCHAR* imagePath,
@@ -1549,7 +1555,7 @@ static void WriteAppearance(Out* out, const FormField* field, int fontObject) {
 extern "C" BOOL PdfForm_Save(PdfForm* form, const WCHAR* path) {
     if (!form || !path || !path[0]) return FALSE;
 
-    int changed = form->stampCount;
+    int changed = form->stampCount + (form->signingCert ? 1 : 0);
     for (int i = 0; i < form->fieldCount; i++) {
         if (form->fields[i].changed) changed++;
     }
@@ -1711,6 +1717,70 @@ extern "C" BOOL PdfForm_Save(PdfForm* form, const WCHAR* path) {
         OutText(&out, "\nendobj\n");
     }
 
+    // The signature: a dictionary with a hole in it, a field that points at
+    // the dictionary, and the form told that it holds one.
+    //
+    // The hole is the point. `/Contents` is written as a run of zeros, and
+    // `/ByteRange` says "everything except that", so the signature can cover a
+    // file it is itself part of. Both are written at a fixed width and patched
+    // once the file is finished, because changing their length afterwards
+    // would move everything after them.
+    size_t byteRangeAt = 0;
+    size_t contentsAt = 0;
+    size_t contentsLen = 0;
+    int signatureField = 0;
+
+    if (form->signingCert) {
+        int signatureObject = nextObject++;
+        written[writtenCount].number = signatureObject;
+        written[writtenCount].offset = out.len;
+        writtenCount++;
+
+        SYSTEMTIME now;
+        GetLocalTime(&now);
+
+        char name[512] = "";
+        char reason[512] = "";
+        WriteDrawnString(form->signName, name, sizeof(name));
+        WriteDrawnString(form->signReason, reason, sizeof(reason));
+
+        OutFormat(&out,
+            "%d 0 obj\n<< /Type /Sig /Filter /Adobe.PPKLite "
+            "/SubFilter /adbe.pkcs7.detached /Name %s /Reason %s "
+            "/M (D:%04d%02d%02d%02d%02d%02d) /ByteRange [0 ",
+            signatureObject, name, reason,
+            now.wYear, now.wMonth, now.wDay, now.wHour, now.wMinute, now.wSecond);
+
+        // Three ten-digit numbers, filled in later.
+        byteRangeAt = out.len;
+        OutText(&out, "0000000000 0000000000 0000000000] /Contents ");
+
+        contentsAt = out.len;
+        OutText(&out, "<");
+        for (int i = 0; i < 16384; i++) OutText(&out, "0");
+        OutText(&out, ">");
+        contentsLen = out.len - contentsAt;
+
+        OutText(&out, " >>\nendobj\n");
+
+        // The field that carries it. Invisible: a certificate signature says
+        // something about the bytes, and putting a picture on the page is the
+        // other command's job.
+        signatureField = nextObject++;
+        written[writtenCount].number = signatureField;
+        written[writtenCount].offset = out.len;
+        writtenCount++;
+
+        int page = form->pageCount > 0 ? form->pages[0] : 0;
+
+        OutFormat(&out,
+            "%d 0 obj\n<< /Type /Annot /Subtype /Widget /FT /Sig /T (Signature) "
+            "/Rect [0 0 0 0] /F 132 /V %d 0 R",
+            signatureField, signatureObject);
+        if (page > 0) OutFormat(&out, " /P %d 0 R", page);
+        OutText(&out, " >>\nendobj\n");
+    }
+
     // The form itself, told to regenerate appearances -- belt as well as the
     // braces of writing them.
     if (form->acroFormObject > 0) {
@@ -1722,9 +1792,26 @@ extern "C" BOOL PdfForm_Save(PdfForm* form, const WCHAR* path) {
 
             OutFormat(&out, "%d 0 obj\n", form->acroFormObject);
 
-            static const char* const formKeys[] = { "NeedAppearances", NULL };
+            static const char* const formKeys[] = { "NeedAppearances", "Fields", "SigFlags", NULL };
+
+            Span existingFields;
+            BOOL hasFields = DictValue(acro, "Fields", &existingFields);
+
             CopyDictExcept(&out, acro, formKeys);
-            OutText(&out, " /NeedAppearances true >>");
+            OutText(&out, " /NeedAppearances true");
+
+            OutText(&out, " /Fields [");
+            if (hasFields && existingFields.len > 2) {
+                OutAdd(&out, existingFields.at + 1, existingFields.len - 2);
+            }
+            if (signatureField > 0) OutFormat(&out, " %d 0 R", signatureField);
+            OutText(&out, "]");
+
+            // 3 is "this document holds a signature, and appending to it would
+            // invalidate one".
+            if (signatureField > 0) OutText(&out, " /SigFlags 3");
+
+            OutText(&out, " >>");
 
             OutText(&out, "\nendobj\n");
         }
@@ -1805,6 +1892,95 @@ extern "C" BOOL PdfForm_Save(PdfForm* form, const WCHAR* path) {
         return FALSE;
     }
 
+    // --- the signature, now that there are bytes to sign --------------------
+    //
+    // The file is finished except for two holes in it. The byte range says
+    // where the second hole is, and the signature covers everything either
+    // side of it -- so the numbers go in first, and then the signature is made
+    // over the file as it will be on disk.
+    if (form->signingCert && contentsAt > 0) {
+        size_t contentsEnd = contentsAt + contentsLen;
+
+        char range[64];
+        int rangeLen = snprintf(range, sizeof(range), "%010zu %010zu %010zu",
+                                contentsAt, contentsEnd, out.len - contentsEnd);
+
+        // The placeholder was written at exactly this width; if that ever
+        // stopped being true, every offset in the file would shift.
+        if (rangeLen != 32 || byteRangeAt + 32 > out.len) {
+            free(out.bytes);
+            return FALSE;
+        }
+        memcpy(out.bytes + byteRangeAt, range, 32);
+
+        size_t signatureLen = 0;
+        BYTE* signature = PdfSign_Detached(
+            form->signingCert,
+            (const BYTE*)out.bytes, contentsAt,
+            (const BYTE*)out.bytes + contentsEnd, out.len - contentsEnd,
+            &signatureLen);
+
+        if (!signature || signatureLen == 0) {
+            free(signature);
+            free(out.bytes);
+            return FALSE;
+        }
+
+        // Hex, into the hole, zero-padded to the end of it. The brackets stay
+        // where they are: they are part of the hole the range describes.
+        size_t room = (contentsLen - 2) / 2;
+        if (signatureLen > room) {
+            free(signature);
+            free(out.bytes);
+            return FALSE;
+        }
+
+        static const char* const hex = "0123456789ABCDEF";
+        char* at = out.bytes + contentsAt + 1;
+
+        for (size_t i = 0; i < signatureLen; i++) {
+            at[i * 2] = hex[(signature[i] >> 4) & 0xF];
+            at[i * 2 + 1] = hex[signature[i] & 0xF];
+        }
+        for (size_t i = signatureLen * 2; i < contentsLen - 2; i++) at[i] = '0';
+
+        // Checked here rather than believed: the bytes that went into the
+        // file have to verify against the file they went into, read back out
+        // of the hole the way a reader would read them.
+        BYTE* readBack = (BYTE*)malloc(room ? room : 1);
+        if (readBack) {
+            size_t readLen = 0;
+
+            for (size_t i = 0; i + 1 < contentsLen - 2; i += 2) {
+                int high = at[i], low = at[i + 1];
+
+                int hi = (high >= '0' && high <= '9') ? high - '0'
+                       : (high >= 'A' && high <= 'F') ? high - 'A' + 10 : -1;
+                int lo = (low >= '0' && low <= '9') ? low - '0'
+                       : (low >= 'A' && low <= 'F') ? low - 'A' + 10 : -1;
+                if (hi < 0 || lo < 0) break;
+
+                readBack[readLen++] = (BYTE)((hi << 4) | lo);
+                if (readLen >= signatureLen) break;
+            }
+
+            BOOL verified = PdfSign_VerifyDetached(
+                readBack, readLen,
+                (const BYTE*)out.bytes, contentsAt,
+                (const BYTE*)out.bytes + contentsEnd, out.len - contentsEnd);
+
+            free(readBack);
+
+            if (!verified) {
+                free(signature);
+                free(out.bytes);
+                return FALSE;
+            }
+        }
+
+        free(signature);
+    }
+
     HANDLE file = CreateFileW(path, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS,
                               FILE_ATTRIBUTE_NORMAL, NULL);
     if (file == INVALID_HANDLE_VALUE) {
@@ -1824,6 +2000,10 @@ extern "C" BOOL PdfForm_Save(PdfForm* form, const WCHAR* path) {
             free(form->stamps[i].alpha);
         }
         form->stampCount = 0;
+
+        // A signature is made once: saving again would sign a file that
+        // already holds one, which is a different operation.
+        form->signingCert = NULL;
     }
     return ok;
 }
@@ -1980,6 +2160,113 @@ static BOOL WriteBytes(const WCHAR* path, const BYTE* bytes, size_t len) {
     return ok;
 }
 
+// ---------------------------------------------------------------------------
+// Checking a signature that is already in a file
+//
+// The reverse of writing one: find `/ByteRange` and `/Contents`, take the
+// signature out of the hole, and hand the two covered ranges to Windows. What
+// comes back is "these bytes have not changed", which is a smaller claim than
+// most readers' green ticks imply -- see the report's comment.
+// ---------------------------------------------------------------------------
+
+extern "C" BOOL PdfForm_CheckSignature(const WCHAR* path, PdfSignatureReport* out) {
+    if (!out) return FALSE;
+    memset(out, 0, sizeof(*out));
+    if (!path || !path[0]) return FALSE;
+
+    HANDLE file = CreateFileW(path, GENERIC_READ, FILE_SHARE_READ, NULL,
+                              OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+    if (file == INVALID_HANDLE_VALUE) return FALSE;
+
+    LARGE_INTEGER size = {};
+    if (!GetFileSizeEx(file, &size) || size.QuadPart < 32 ||
+        size.QuadPart > 256 * 1024 * 1024) {
+        CloseHandle(file);
+        return FALSE;
+    }
+
+    size_t len = (size_t)size.QuadPart;
+    BYTE* bytes = (BYTE*)malloc(len);
+    DWORD read = 0;
+
+    BOOL ok = bytes && ReadFile(file, bytes, (DWORD)len, &read, NULL) && read == (DWORD)len;
+    CloseHandle(file);
+
+    if (!ok) {
+        free(bytes);
+        return FALSE;
+    }
+
+    const char* range = FindLast((const char*)bytes, len, "/ByteRange");
+    if (!range) {
+        free(bytes);
+        return TRUE;        // no signature is not a failure to look
+    }
+
+    out->present = TRUE;
+
+    size_t numbers[4] = { 0, 0, 0, 0 };
+    const char* at = range + 10;
+    const char* end = (const char*)bytes + len;
+
+    for (int i = 0; i < 4; i++) {
+        while (at < end && (*at < 48 || *at > 57)) at++;
+        while (at < end && *at >= 48 && *at <= 57) {
+            numbers[i] = numbers[i] * 10 + (size_t)(*at - 48);
+            at++;
+        }
+    }
+
+    if (numbers[1] >= len || numbers[2] > len || numbers[2] <= numbers[1]) {
+        free(bytes);
+        return TRUE;
+    }
+
+    // Anything after the range's end is content the signature never saw --
+    // which is legal, and worth saying out loud.
+    out->coversWholeFile = (numbers[2] + numbers[3] == len);
+
+    const char* hole = (const char*)bytes + numbers[1];
+    if (*hole != '<') {
+        free(bytes);
+        return TRUE;
+    }
+
+    size_t holeLen = numbers[2] - numbers[1];
+    BYTE* signature = (BYTE*)malloc(holeLen / 2 + 1);
+    size_t signatureLen = 0;
+
+    for (size_t i = 1; signature && i + 1 < holeLen - 1; i += 2) {
+        int high = hole[i], low = hole[i + 1];
+
+        int hi = (high >= 48 && high <= 57) ? high - 48
+               : (high >= 65 && high <= 70) ? high - 65 + 10
+               : (high >= 97 && high <= 102) ? high - 97 + 10 : -1;
+        int lo = (low >= 48 && low <= 57) ? low - 48
+               : (low >= 65 && low <= 70) ? low - 65 + 10
+               : (low >= 97 && low <= 102) ? low - 97 + 10 : -1;
+        if (hi < 0 || lo < 0) break;
+
+        signature[signatureLen++] = (BYTE)((hi << 4) | lo);
+    }
+
+    // The hole is padded with zeros to a fixed size; the signature itself ends
+    // where its own encoding says, and the padding is not part of it.
+    while (signatureLen > 0 && signature[signatureLen - 1] == 0) signatureLen--;
+
+    if (signature && signatureLen > 0) {
+        out->intact = PdfSign_VerifyDetachedNamed(
+            signature, signatureLen,
+            bytes, numbers[1],
+            bytes + numbers[2], numbers[3],
+            out->signer, 256);
+    }
+
+    free(signature);
+    free(bytes);
+    return TRUE;
+}
+
 extern "C" BOOL PdfForm_SelfTest(char* failure, size_t failureSize) {
     WCHAR temp[MAX_PATH];
     WCHAR path[MAX_PATH];
@@ -2116,6 +2403,195 @@ extern "C" BOOL PdfForm_SelfTest(char* failure, size_t failureSize) {
     int stampedPages = Pdf_PageCount(rendered);
     Pdf_Close(rendered);
     if (stampedPages != 1) FAIL("the stamped file did not come back as one page");
+
+    // --- a signature over the file it is part of ---
+    //
+    // The one that matters: the byte range has to cover the document, and the
+    // signature has to verify against the bytes on disk. Both are checked the
+    // way a reader checks them -- by reading the file back and doing the sums
+    // again -- rather than by trusting the call that wrote it.
+    {
+        PdfCertificate certificate = PdfSign_TemporaryCertificate();
+        if (!certificate) FAIL("no certificate to sign the test file with");
+
+        form = PdfForm_Open(path, &why);
+        if (!form) {
+            PdfSign_DiscardTemporary(certificate);
+            FAIL("the form could not be opened for signing");
+        }
+
+        PdfForm_SignWithCertificate(form, certificate, L"opennote self-check",
+                                    L"checking that a signature covers the file");
+
+        BOOL saved = PdfForm_Save(form, filled);
+        PdfForm_Close(form);
+        form = NULL;
+
+        if (!saved) {
+            PdfSign_DiscardTemporary(certificate);
+            FAIL("the signed file could not be written");
+        }
+
+        // Read it back as bytes, the way anybody verifying it would.
+        HANDLE signedFile = CreateFileW(filled, GENERIC_READ, FILE_SHARE_READ, NULL,
+                                        OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+        if (signedFile == INVALID_HANDLE_VALUE) {
+            PdfSign_DiscardTemporary(certificate);
+            FAIL("the signed file could not be read back");
+        }
+
+        LARGE_INTEGER signedSize = {};
+        GetFileSizeEx(signedFile, &signedSize);
+
+        BYTE* signedBytes = (BYTE*)malloc((size_t)signedSize.QuadPart);
+        DWORD got = 0;
+
+        BOOL readOk = signedBytes &&
+                      ReadFile(signedFile, signedBytes, (DWORD)signedSize.QuadPart, &got, NULL) &&
+                      got == (DWORD)signedSize.QuadPart;
+        CloseHandle(signedFile);
+
+        if (!readOk) {
+            free(signedBytes);
+            PdfSign_DiscardTemporary(certificate);
+            FAIL("the signed file came back short");
+        }
+
+        size_t signedLen = (size_t)signedSize.QuadPart;
+
+        // /ByteRange [0 a b c] -- four numbers saying what is covered.
+        const char* range = FindLast((const char*)signedBytes, signedLen, "/ByteRange");
+        if (!range) {
+            free(signedBytes);
+            PdfSign_DiscardTemporary(certificate);
+            FAIL("the signed file has no byte range in it");
+        }
+
+        size_t numbers[4] = { 0, 0, 0, 0 };
+        const char* at = range + 10;
+        for (int i = 0; i < 4; i++) {
+            while (at < (const char*)signedBytes + signedLen &&
+                   (*at < 48 || *at > 57)) at++;
+            while (at < (const char*)signedBytes + signedLen && *at >= 48 && *at <= 57) {
+                numbers[i] = numbers[i] * 10 + (size_t)(*at - 48);
+                at++;
+            }
+        }
+
+        // The two covered halves have to be the whole file bar the hole.
+        if (numbers[0] != 0 ||
+            numbers[1] + numbers[3] + (numbers[2] - numbers[1]) != signedLen ||
+            numbers[2] != numbers[1] + (numbers[2] - numbers[1])) {
+            free(signedBytes);
+            PdfSign_DiscardTemporary(certificate);
+            FAIL("the byte range does not cover the file");
+        }
+
+        // The signature lives in the hole, as hex between angle brackets.
+        const char* hole = (const char*)signedBytes + numbers[1];
+        if (*hole != '<') {
+            free(signedBytes);
+            PdfSign_DiscardTemporary(certificate);
+            FAIL("the byte range does not start at the signature");
+        }
+
+        size_t holeLen = numbers[2] - numbers[1];
+        BYTE* signature = (BYTE*)malloc(holeLen / 2);
+        size_t signatureLen = 0;
+
+        for (size_t i = 1; i + 1 < holeLen - 1 && signature; i += 2) {
+            int high = hole[i], low = hole[i + 1];
+
+            int hi = (high >= '0' && high <= '9') ? high - '0'
+                   : (high >= 'A' && high <= 'F') ? high - 'A' + 10 : -1;
+            int lo = (low >= '0' && low <= '9') ? low - '0'
+                   : (low >= 'A' && low <= 'F') ? low - 'A' + 10 : -1;
+            if (hi < 0 || lo < 0) break;
+
+            signature[signatureLen++] = (BYTE)((hi << 4) | lo);
+        }
+
+        // The trailing zeros are padding rather than signature; DER says how
+        // long the real thing is, and a verify over the lot would fail.
+        while (signatureLen > 0 && signature[signatureLen - 1] == 0) signatureLen--;
+
+        BOOL verified = signature && signatureLen > 0 && PdfSign_VerifyDetached(
+            signature, signatureLen,
+            signedBytes, numbers[1],
+            signedBytes + numbers[2], numbers[3]);
+
+        if (!verified) {
+            free(signature);
+            free(signedBytes);
+            PdfSign_DiscardTemporary(certificate);
+            FAIL("the signature does not verify against the file it is in");
+        }
+
+        // A signed file is still a file anybody can open: a signature that
+        // costs you the document is not worth making.
+        PdfFile* opened = Pdf_Open(filled);
+        if (!opened) {
+            free(signature);
+            free(signedBytes);
+            PdfSign_DiscardTemporary(certificate);
+            FAIL("Windows would not open the signed file");
+        }
+        Pdf_Close(opened);
+
+        // ...and it is a signature over the document: change a byte of the
+        // document and it has to stop verifying.
+        signedBytes[10] = (BYTE)(signedBytes[10] ^ 0xFF);
+
+        BOOL stillVerifies = PdfSign_VerifyDetached(
+            signature, signatureLen,
+            signedBytes, numbers[1],
+            signedBytes + numbers[2], numbers[3]);
+
+        free(signature);
+        PdfSign_DiscardTemporary(certificate);
+
+        if (stillVerifies) {
+            free(signedBytes);
+            FAIL("a changed document still verified");
+        }
+
+        // The same questions, asked the way the program asks them of a file
+        // somebody hands it.
+        PdfSignatureReport report = {0};
+        if (!PdfForm_CheckSignature(filled, &report)) {
+            free(signedBytes);
+            FAIL("the signed file could not be checked");
+        }
+
+        if (!report.present)  { free(signedBytes); FAIL("the signature was not found"); }
+        if (!report.intact)   { free(signedBytes); FAIL("the signature did not check out"); }
+        if (!report.coversWholeFile) {
+            free(signedBytes);
+            FAIL("the signature was reported as covering less than the file");
+        }
+        if (!wcsstr(report.signer, L"opennote self-check")) {
+            free(signedBytes);
+            FAIL("the signer was not reported");
+        }
+
+        // ...and on a file somebody has since edited. The tampered bytes are
+        // already in hand; written out, they have to fail the same check.
+        WCHAR tamperedPath[MAX_PATH];
+        swprintf_s(tamperedPath, MAX_PATH, L"%sopennote-selftest-tampered.pdf", temp);
+
+        BOOL wroteTampered = WriteBytes(tamperedPath, signedBytes, signedLen);
+        free(signedBytes);
+
+        if (wroteTampered) {
+            PdfSignatureReport after = {0};
+            BOOL checked = PdfForm_CheckSignature(tamperedPath, &after);
+            DeleteFileW(tamperedPath);
+
+            if (!checked) FAIL("the tampered file could not be checked");
+            if (!after.present) FAIL("the tampered file lost its signature");
+            if (after.intact) FAIL("a tampered file was reported as unchanged");
+        }
+    }
 
     // --- and the same, for a file in the shape everything writes today ---
     if (!WriteBytes(path, MODERN_FORM, sizeof(MODERN_FORM))) {

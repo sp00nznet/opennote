@@ -11,6 +11,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **`OPENNOTE_DB`** names the database file, so a copy run from a stick keeps its notes
   beside itself rather than in whichever account it is plugged into — and a test that
   opens documents cannot write to the store somebody is actually using.
+- **A PDF can be signed with a certificate**, which is the other kind of signature:
+  **File → Sign PDF with a Certificate…** makes a detached PKCS#7 over the file's byte
+  range using a certificate from your own Windows store. Windows does the cryptography;
+  opennote does the placeholder dance that lets a signature cover the file it is part of,
+  and verifies what it wrote before handing the file back.
+- **A signature can be checked.** `--pdf-verify`, and a line in the status bar when a
+  signed PDF opens. It reports exactly one thing — whether the bytes covered by the
+  signature have changed since it was made. Whether the certificate is one to trust is a
+  different question, and this does not answer it.
 - **A PDF can be signed** — visibly. **File → Sign PDF…** takes a picture of a signature
   and the next drag across the page says where it goes; the picture is stamped in with
   its transparency kept, and the file is written as an incremental update like a filled

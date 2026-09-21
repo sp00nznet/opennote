@@ -30,6 +30,7 @@ HMENU MenuBar_Create(void) {
     AppendMenuW(hFileMenu, MF_STRING, IDM_FILE_EXPORT_PDF, L"Export to P&DF...");
     AppendMenuW(hFileMenu, MF_STRING, IDM_FILE_FILL_FORM, L"&Fill PDF Form...");
     AppendMenuW(hFileMenu, MF_STRING, IDM_FILE_SIGN_PDF, L"S&ign PDF...");
+    AppendMenuW(hFileMenu, MF_STRING, IDM_FILE_SIGN_CERT, L"Sign PDF with a &Certificate...");
     AppendMenuW(hFileMenu, MF_SEPARATOR, 0, NULL);
     AppendMenuW(hFileMenu, MF_STRING, IDM_FILE_EXIT, L"E&xit");
     AppendMenuW(hMenu, MF_POPUP, (UINT_PTR)hFileMenu, L"&File");

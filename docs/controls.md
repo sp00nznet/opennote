@@ -177,6 +177,12 @@ drag a box where it goes (or click to drop one at a sensible size). It is writte
 copy, with the original bytes untouched underneath. This is a *visible* signature — what
 it proves is what ink on paper proves, and no more.
 
+**File → Sign PDF with a Certificate…** is the other kind of signature: it signs the
+bytes with a certificate you hold the private key for, so that a change to the document
+afterwards can be detected. A signed PDF says so in the status bar when it opens — and
+says whether its bytes still match. That is all it says: whether the certificate is one
+anybody should trust is a separate question, and opennote does not answer it.
+
 **File → Fill PDF Form…** lists the fields the PDF carries. Double-click one to fill it
 in, then **Save As** writes the filled copy — the original file is not changed, and the
 copy is the original with the answers appended, which is how PDF is meant to be edited.

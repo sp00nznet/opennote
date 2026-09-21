@@ -62,6 +62,7 @@ set(SUPERNOTE_SOURCES
     src/core/docx.c
     src/pdf/pdfread.cpp
     src/pdf/pdfform.cpp
+    src/pdf/pdfsign.cpp
     src/pdf/pdfview.cpp
     src/db/database.c
     src/db/notes_repo.c
@@ -110,6 +111,7 @@ target_link_libraries(OpenNote PRIVATE
     winhttp
     ws2_32
     crypt32
+    cryptui
     bcrypt
     xmllite
     dwrite

@@ -19,6 +19,8 @@
 // with a compressed cross-reference stream (PDF 1.5 and later, which needs
 // inflate) is refused rather than half-read -- see ROADMAP.md.
 
+#include "pdf/pdfsign.h"
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -58,9 +60,35 @@ int PdfForm_PageCount(PdfForm* form);
 BOOL PdfForm_StampImage(PdfForm* form, int pageIndex, const WCHAR* imagePath,
                         float x, float y, float width, float height);
 
+// Sign the document with a certificate, cryptographically: a detached PKCS#7
+// over the whole file except the hole the signature sits in. What it proves is
+// that the bytes have not changed since the holder of that key saw them --
+// which is a different claim from the picture PdfForm_StampImage puts on the
+// page, and a stronger one.
+//
+// Nothing is written until PdfForm_Save, which is also when the signing
+// happens: the bytes have to exist before they can be signed.
+BOOL PdfForm_SignWithCertificate(PdfForm* form, PdfCertificate certificate,
+                                 const WCHAR* name, const WCHAR* reason);
+
 // Write the filled form. `path` may be the file it came from -- the update is
 // appended -- or another name, in which case the original is copied first.
 BOOL PdfForm_Save(PdfForm* form, const WCHAR* path);
+
+// What a file's signature says, if it has one.
+//
+// `intact` means the bytes covered by the signature have not changed since it
+// was made. It does *not* mean the certificate is trusted, current, or
+// anybody's in particular -- that is a chain of checks this does not do, and
+// a green tick that implied otherwise would be worse than none.
+typedef struct {
+    BOOL  present;
+    BOOL  intact;
+    BOOL  coversWholeFile;     // FALSE when something was appended afterwards
+    WCHAR signer[256];
+} PdfSignatureReport;
+
+BOOL PdfForm_CheckSignature(const WCHAR* path, PdfSignatureReport* out);
 
 // Self-check, run by `OpenNote.exe --selftest`.
 BOOL PdfForm_SelfTest(char* failure, size_t failureSize);

@@ -7,6 +7,7 @@
 #include "pdf/pdfread.h"
 #include "pdf/pdfform.h"
 #include "pdf/pdfview.h"
+#include "pdf/pdfsign.h"
 
 // Twips per DIP. Mirrors the engine's constant, which lives in a C++-only
 // header because DirectWrite has no C binding.
@@ -45,6 +46,7 @@ static int RunSelfTest(void) {
         { "pdf",    Pdf_SelfTest    },
         { "pdfform",PdfForm_SelfTest},
         { "pdfview",PdfView_SelfTest},
+        { "pdfsign",PdfSign_SelfTest},
     };
 
     int failed = 0;
@@ -351,6 +353,85 @@ static int RunPdfStamp(int argc, WCHAR** argv) {
 
     wprintf(L"%s -> %s, stamped on page %d\n", argv[2], argv[3], page + 1);
     return 0;
+}
+
+// Signing on the command line. The certificate is chosen in the standard
+// Windows dialog: a signature is worth what the certificate behind it is
+// worth, so this program never picks one for you.
+static int RunPdfSign(int argc, WCHAR** argv) {
+    if (argc < 4) {
+        printf("usage: OpenNote.exe --pdf-sign <in.pdf> <out.pdf>\n");
+        return 2;
+    }
+
+    PdfCertificate certificate = PdfSign_ChooseCertificate(NULL);
+    if (!certificate) {
+        wprintf(L"FAILED: no certificate was chosen\n");
+        return 1;
+    }
+
+    WCHAR who[256] = L"";
+    PdfSign_SubjectName(certificate, who, 256);
+
+    const WCHAR* why = NULL;
+    PdfForm* form = PdfForm_Open(argv[2], &why);
+    if (!form) {
+        PdfSign_ReleaseCertificate(certificate);
+        wprintf(L"FAILED: %s\n", why ? why : L"the file could not be read");
+        return 1;
+    }
+
+    PdfForm_SignWithCertificate(form, certificate, who, L"Signed with opennote");
+    BOOL ok = PdfForm_Save(form, argv[3]);
+
+    PdfForm_Close(form);
+    PdfSign_ReleaseCertificate(certificate);
+
+    if (!ok) {
+        wprintf(L"FAILED: nothing was written to %s\n", argv[3]);
+        return 1;
+    }
+
+    wprintf(L"%s -> %s, signed by %s\n", argv[2], argv[3], who);
+    return 0;
+}
+
+// What a file's signature says. The wording is deliberate: this checks that
+// the bytes have not changed, which is not the same as the certificate being
+// one anybody should trust.
+static int RunPdfVerify(int argc, WCHAR** argv) {
+    if (argc < 3) {
+        printf("usage: OpenNote.exe --pdf-verify <file.pdf>\n");
+        return 2;
+    }
+
+    PdfSignatureReport report = {0};
+    if (!PdfForm_CheckSignature(argv[2], &report)) {
+        wprintf(L"FAILED: %s could not be read\n", argv[2]);
+        return 1;
+    }
+
+    if (!report.present) {
+        wprintf(L"%s: no signature\n", argv[2]);
+        return 0;
+    }
+
+    wprintf(L"%s: signed%s\n", argv[2],
+            report.signer[0] ? L"" : L" (the signer is not named)");
+    if (report.signer[0]) wprintf(L"  signer:   %s\n", report.signer);
+
+    wprintf(L"  bytes:    %s\n", report.intact
+            ? L"unchanged since it was signed"
+            : L"DO NOT MATCH the signature");
+
+    if (!report.coversWholeFile) {
+        wprintf(L"  warning:  something was appended after the signature, "
+                L"and that part is not covered\n");
+    }
+
+    wprintf(L"  note:     this says nothing about whether the certificate is "
+            L"one to trust\n");
+    return report.intact ? 0 : 1;
 }
 
 // Does `b` contain the same characters as `a`, ignoring whitespace and the
@@ -711,7 +792,9 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPWSTR lpCmdLi
                       wcsstr(lpCmdLine, L"--pdf-info") ||
                       wcsstr(lpCmdLine, L"--pdf-fields") ||
                       wcsstr(lpCmdLine, L"--pdf-fill") ||
-                      wcsstr(lpCmdLine, L"--pdf-stamp"))) {
+                      wcsstr(lpCmdLine, L"--pdf-stamp") ||
+                      wcsstr(lpCmdLine, L"--pdf-sign") ||
+                      wcsstr(lpCmdLine, L"--pdf-verify"))) {
         BOOL attached = FALSE;
         FILE* out = NULL;
         if (GetStdHandle(STD_OUTPUT_HANDLE) == NULL) {
@@ -730,6 +813,8 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPWSTR lpCmdLi
             else if (wcsstr(lpCmdLine, L"--pdf-fields"))    rc = RunPdfFields(argc, argv);
             else if (wcsstr(lpCmdLine, L"--pdf-fill"))      rc = RunPdfFill(argc, argv);
             else if (wcsstr(lpCmdLine, L"--pdf-stamp"))     rc = RunPdfStamp(argc, argv);
+            else if (wcsstr(lpCmdLine, L"--pdf-verify"))    rc = RunPdfVerify(argc, argv);
+            else if (wcsstr(lpCmdLine, L"--pdf-sign"))      rc = RunPdfSign(argc, argv);
             else                                            rc = RunDocxToRtf(argc, argv);
             LocalFree(argv);
         }

@@ -118,7 +118,11 @@ a PDF except the part that does that — which now includes the compressed cross
 streams and object streams every writer has produced since 2005, on top of an inflate
 written for the purpose: three hundred lines, no new dependency.
 
-Stamping a signature on one is next.
+**It can be signed, both ways.** A picture of a signature goes where you drag it; a
+certificate signature is a detached PKCS#7 over the file's byte range, made with a
+certificate from your own Windows store. Opening a signed PDF says so in the status bar,
+and says whether the bytes still match it — and nothing more than that, because whether a
+certificate is one to trust is a question this does not answer.
 
 The stretch is the part Word actually gets paid for: `.docx`, real page layout, `.doc`,
 track changes. Everything needed for that is already in Windows and already paid for.

@@ -245,11 +245,22 @@ the free tools for it are adware or a web upload.
       kept -- a signature PNG is mostly transparent, and dropping that puts a black box
       on the paper -- carried by an annotation, which is the same incremental-update
       machinery as a filled field.
-- [ ] **A cryptographic signature**, separately and later: a PKCS#7 detached signature
-      over a byte range, from a certificate in the Windows store. Windows has the crypto
-      (`CryptMsg`); what it costs is the `/ByteRange` placeholder dance and the care that
-      anything claiming to verify a signature deserves. Reading and *verifying* someone
-      else's signature is a different job again, and is not promised here.
+- [x] **A cryptographic signature**: a detached PKCS#7 over the byte range, from a
+      certificate in the user's own store. Windows does the crypto; what this does is the
+      `/ByteRange` placeholder dance, and it verifies what it wrote before handing the
+      file back.
+- [x] **Reading one.** `--pdf-verify`, and a line in the status bar when a signed PDF
+      opens. It reports one thing: whether the bytes covered by the signature have
+      changed. Whether the certificate is trusted, current or revoked is a chain of
+      checks this does not do -- and a green tick that implied otherwise would be worse
+      than none, which is why the wording says what it says.
+
+### After v0.11
+
+- [ ] Trust: chain building and revocation, so "signed by" can mean more than "says it
+      is signed by". That is `CertGetCertificateChain` and a policy, and it is the part
+      where being wrong is dangerous rather than annoying.
+- [ ] Tick boxes and choice lists, which are read today and not written.
 
 Everything above uses what Windows already ships. Nothing in it needs a PDF library.
 

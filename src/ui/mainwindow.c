@@ -2,6 +2,8 @@
 #include "res/resource.h"
 #include "ui/toolbar.h"
 #include "pdf/pdfview.h"
+#include "pdf/pdfform.h"
+#include "pdf/pdfsign.h"
 #include <windowsx.h>
 // ponytail: still here for the SCNotification dispatch below -- that is the
 // control's notification protocol, not an editing operation. Every editing
@@ -515,8 +517,27 @@ void MainWindow_OpenDocument(Document* newDoc) {
         TabControl_UpdateTabTitle(idx);
         MainWindow_UpdateTitle();
 
-        WCHAR status[64];
+        WCHAR status[320];
         PdfView_Describe(view, status, 64);
+
+        // A signed document says so the moment it opens: nobody thinks to go
+        // looking, and a signature nobody notices is a signature that may as
+        // well not be there.
+        PdfSignatureReport signature = {0};
+        if (PdfForm_CheckSignature(newDoc->filePath, &signature) && signature.present) {
+            WCHAR note[256];
+
+            if (signature.intact && signature.signer[0]) {
+                swprintf_s(note, 256, L" - signed by %s, unchanged since", signature.signer);
+            } else if (signature.intact) {
+                wcscpy_s(note, 256, L" - signed, and unchanged since");
+            } else {
+                wcscpy_s(note, 256, L" - SIGNED, BUT THE BYTES DO NOT MATCH");
+            }
+
+            wcscat_s(status, 320, note);
+        }
+
         StatusBar_SetMessage(status);
         return;
     }
@@ -1364,8 +1385,8 @@ static BOOL RefusedForPdf(HWND hwnd, int id) {
         case IDM_FILE_PRINT_PREVIEW:
         case IDM_FILE_EXPORT_PDF:
         case IDM_FILE_PAGE_SETUP:
-            // ...but not IDM_FILE_FILL_FORM or IDM_FILE_SIGN_PDF, which are
-            // the two commands that mean something here.
+            // ...but not the three commands that mean something here:
+            // filling in the form, and the two kinds of signing.
         case IDM_VIEW_PAGE_LAYOUT:
         case IDM_INSERT_PICTURE:
         case IDM_INSERT_PAGE_NUMBERS:
@@ -1709,6 +1730,67 @@ void MainWindow_OnCommand(HWND hwnd, int id, HWND hwndCtl, UINT codeNotify) {
         case IDM_SETTINGS_DEFAULTS:
             Dialogs_Defaults(hwnd);
             break;
+
+        case IDM_FILE_SIGN_CERT: {
+            // The other kind of signature: not a picture of one, but a claim
+            // that these bytes have not changed since the holder of a private
+            // key saw them.
+            Tab* tab = App_GetActiveTab();
+
+            WCHAR pdfPath[MAX_PATH];
+            if (!tab || !tab->hPdfView || !PdfView_Path(tab->hPdfView, pdfPath, MAX_PATH)) {
+                MessageBoxW(hwnd,
+                    L"Open a PDF first.\n\n"
+                    L"This signs it with a certificate you hold the private key for.",
+                    APP_NAME, MB_ICONINFORMATION);
+                break;
+            }
+
+            PdfCertificate certificate = PdfSign_ChooseCertificate(hwnd);
+            if (!certificate) break;
+
+            WCHAR who[256] = L"";
+            PdfSign_SubjectName(certificate, who, 256);
+
+            const WCHAR* why = NULL;
+            PdfForm* form = PdfForm_Open(pdfPath, &why);
+            if (!form) {
+                PdfSign_ReleaseCertificate(certificate);
+                MessageBoxW(hwnd, why ? why : L"This PDF could not be opened for signing.",
+                            APP_NAME, MB_ICONINFORMATION);
+                break;
+            }
+
+            WCHAR saveTo[MAX_PATH] = {0};
+            if (!Dialogs_SaveFile(hwnd, saveTo, MAX_PATH, L"signed.pdf")) {
+                PdfForm_Close(form);
+                PdfSign_ReleaseCertificate(certificate);
+                break;
+            }
+            if (!wcsrchr(saveTo, L'.')) wcscat_s(saveTo, MAX_PATH, L".pdf");
+
+            PdfForm_SignWithCertificate(form, certificate, who, L"Signed with opennote");
+            BOOL ok = PdfForm_Save(form, saveTo);
+
+            PdfForm_Close(form);
+            PdfSign_ReleaseCertificate(certificate);
+
+            if (!ok) {
+                MessageBoxW(hwnd,
+                    L"The signature could not be written.\n\n"
+                    L"The certificate may not have a private key this program can use.",
+                    APP_NAME, MB_ICONWARNING);
+                break;
+            }
+
+            Document* signedDoc = Document_CreateFromFile(saveTo);
+            if (signedDoc) MainWindow_OpenDocument(signedDoc);
+
+            WCHAR message[320];
+            swprintf_s(message, 320, L"Signed by %s", who[0] ? who : L"the chosen certificate");
+            StatusBar_SetMessage(message);
+            break;
+        }
 
         case IDM_FILE_SIGN_PDF: {
             // A signature is a picture of one: the file says what it looks
