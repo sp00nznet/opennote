@@ -1364,8 +1364,8 @@ static BOOL RefusedForPdf(HWND hwnd, int id) {
         case IDM_FILE_PRINT_PREVIEW:
         case IDM_FILE_EXPORT_PDF:
         case IDM_FILE_PAGE_SETUP:
-            // ...but not IDM_FILE_FILL_FORM, which is the one command that
-            // means something here.
+            // ...but not IDM_FILE_FILL_FORM or IDM_FILE_SIGN_PDF, which are
+            // the two commands that mean something here.
         case IDM_VIEW_PAGE_LAYOUT:
         case IDM_INSERT_PICTURE:
         case IDM_INSERT_PAGE_NUMBERS:
@@ -1709,6 +1709,39 @@ void MainWindow_OnCommand(HWND hwnd, int id, HWND hwndCtl, UINT codeNotify) {
         case IDM_SETTINGS_DEFAULTS:
             Dialogs_Defaults(hwnd);
             break;
+
+        case IDM_FILE_SIGN_PDF: {
+            // A signature is a picture of one: the file says what it looks
+            // like, and the next drag on the page says where it goes.
+            Tab* tab = App_GetActiveTab();
+            if (!tab || !tab->hPdfView) {
+                MessageBoxW(hwnd,
+                    L"Open a PDF first.\n\n"
+                    L"This puts a picture of a signature on one of its pages.",
+                    APP_NAME, MB_ICONINFORMATION);
+                break;
+            }
+
+            WCHAR path[MAX_PATH] = {0};
+            static const WCHAR filter[] =
+                L"Images (*.png;*.jpg;*.jpeg;*.bmp;*.gif;*.tif;*.tiff)\0"
+                L"*.png;*.jpg;*.jpeg;*.bmp;*.gif;*.tif;*.tiff\0"
+                L"All Files (*.*)\0*.*\0";
+
+            OPENFILENAMEW ofn = {
+                .lStructSize = sizeof(ofn),
+                .hwndOwner = hwnd,
+                .lpstrFilter = filter,
+                .nFilterIndex = 1,
+                .lpstrFile = path,
+                .nMaxFile = MAX_PATH,
+                .lpstrTitle = L"Choose a picture of your signature",
+                .Flags = OFN_FILEMUSTEXIST | OFN_HIDEREADONLY | OFN_NOCHANGEDIR
+            };
+
+            if (GetOpenFileNameW(&ofn)) PdfView_BeginStamp(tab->hPdfView, path);
+            break;
+        }
 
         case IDM_FILE_FILL_FORM: {
             // The form belongs to the file rather than to anything drawn, so

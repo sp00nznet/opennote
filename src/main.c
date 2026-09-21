@@ -6,6 +6,7 @@
 #include "core/inflate.h"
 #include "pdf/pdfread.h"
 #include "pdf/pdfform.h"
+#include "pdf/pdfview.h"
 
 // Twips per DIP. Mirrors the engine's constant, which lives in a C++-only
 // header because DirectWrite has no C binding.
@@ -43,6 +44,7 @@ static int RunSelfTest(void) {
         { "inflate",Inflate_SelfTest},
         { "pdf",    Pdf_SelfTest    },
         { "pdfform",PdfForm_SelfTest},
+        { "pdfview",PdfView_SelfTest},
     };
 
     int failed = 0;
@@ -309,6 +311,45 @@ static int RunPdfFill(int argc, WCHAR** argv) {
 
     wprintf(L"%s -> %s, %d field%s filled\n", argv[2], argv[3], filled,
             filled == 1 ? L"" : L"s");
+    return 0;
+}
+
+// Stamping a picture on a page: a signature, or anything else that has to be
+// put where a form has no field for it.
+static int RunPdfStamp(int argc, WCHAR** argv) {
+    if (argc < 9) {
+        printf("usage: OpenNote.exe --pdf-stamp <in.pdf> <out.pdf> <image> "
+               "<page> <x> <y> <width> [height]\n"
+               "       x, y, width and height are in points from the bottom left\n");
+        return 2;
+    }
+
+    const WCHAR* why = NULL;
+    PdfForm* form = PdfForm_Open(argv[2], &why);
+    if (!form) {
+        wprintf(L"FAILED: %s\n", why ? why : L"the file could not be read");
+        return 1;
+    }
+
+    int page = _wtoi(argv[5]);
+    float x = (float)_wtof(argv[6]);
+    float y = (float)_wtof(argv[7]);
+    float width = (float)_wtof(argv[8]);
+    float height = argc >= 10 ? (float)_wtof(argv[9]) : width / 3.0f;
+
+    BOOL ok = PdfForm_StampImage(form, page, argv[4], x, y, width, height) &&
+              PdfForm_Save(form, argv[3]);
+
+    int pages = PdfForm_PageCount(form);
+    PdfForm_Close(form);
+
+    if (!ok) {
+        wprintf(L"FAILED: the stamp was not written (the file has %d page%s)\n",
+                pages, pages == 1 ? L"" : L"s");
+        return 1;
+    }
+
+    wprintf(L"%s -> %s, stamped on page %d\n", argv[2], argv[3], page + 1);
     return 0;
 }
 
@@ -669,7 +710,8 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPWSTR lpCmdLi
                       wcsstr(lpCmdLine, L"--export-pdf") ||
                       wcsstr(lpCmdLine, L"--pdf-info") ||
                       wcsstr(lpCmdLine, L"--pdf-fields") ||
-                      wcsstr(lpCmdLine, L"--pdf-fill"))) {
+                      wcsstr(lpCmdLine, L"--pdf-fill") ||
+                      wcsstr(lpCmdLine, L"--pdf-stamp"))) {
         BOOL attached = FALSE;
         FILE* out = NULL;
         if (GetStdHandle(STD_OUTPUT_HANDLE) == NULL) {
@@ -687,6 +729,7 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPWSTR lpCmdLi
             else if (wcsstr(lpCmdLine, L"--pdf-info"))      rc = RunPdfInfo(argc, argv);
             else if (wcsstr(lpCmdLine, L"--pdf-fields"))    rc = RunPdfFields(argc, argv);
             else if (wcsstr(lpCmdLine, L"--pdf-fill"))      rc = RunPdfFill(argc, argv);
+            else if (wcsstr(lpCmdLine, L"--pdf-stamp"))     rc = RunPdfStamp(argc, argv);
             else                                            rc = RunDocxToRtf(argc, argv);
             LocalFree(argv);
         }

@@ -24,6 +24,7 @@
 #include "pdf/pdfform.h"
 #include "pdf/pdfread.h"
 #include "core/inflate.h"
+#include "core/imagedib.h"
 
 #include <stdlib.h>
 #include <string.h>
@@ -111,6 +112,18 @@ struct DecodedStream {
 
 #define MAX_DECODED 8
 
+// A picture waiting to be put on a page: its pixels, where it goes, and which
+// page it goes on.
+struct Stamp {
+    int    page;             // the page's object number
+    float  rect[4];          // in points, from the bottom left
+    BYTE*  rgb;              // owned; three bytes a pixel, top row first
+    BYTE*  alpha;            // owned; one byte a pixel, or NULL when opaque
+    int    width, height;
+};
+
+#define MAX_STAMPS 16
+
 struct PdfForm {
     char*  bytes;
     size_t len;
@@ -137,6 +150,14 @@ struct PdfForm {
 
     FormField fields[MAX_FIELDS];
     int       fieldCount;
+
+    // The pages, in order, and anything waiting to be stamped on one.
+    int   pages[1024];
+    int   pageCount;
+    BOOL  pagesRead;
+
+    Stamp stamps[MAX_STAMPS];
+    int   stampCount;
 };
 
 static BOOL ObjectBody(const PdfForm* form, int number, Span* out);
@@ -349,37 +370,44 @@ static BOOL ObjectBody(const PdfForm* form, int number, Span* out) {
         int first = DictValue(container, "First", &field) ? (int)AsNumber(field) : 0;
         if (where->index >= count || first <= 0) return FALSE;
 
-        // The header: `count` pairs of numbers, in order.
+        // The header is `count` pairs of "number offset", and an object runs
+        // to where the next one starts. Reading to the end of the stream
+        // instead -- which is what this did at first -- hands back this object
+        // and every one after it, and a dictionary copied from that span
+        // carries its neighbours with it.
         const char* at = (const char*)stream->bytes;
-        const char* end = at + (first < (int)stream->len ? first : (int)stream->len);
+        const char* end = at + ((size_t)first < stream->len ? (size_t)first : stream->len);
 
-        int offsets[2] = { 0, 0 };
-        int seen = 0;
+        size_t offsets[2] = { 0, 0 };
+        BOOL haveThis = FALSE, haveNext = FALSE;
 
-        for (int i = 0; i <= where->index && at < end; i++) {
+        for (int i = 0; i < count && at < end; i++) {
+            size_t pair[2] = { 0, 0 };
+
             for (int part = 0; part < 2; part++) {
                 while (at < end && IsWhite(*at)) at++;
 
-                int value = 0;
+                size_t value = 0;
                 while (at < end && *at >= 48 && *at <= 57) {
-                    value = value * 10 + (*at - 48);
+                    value = value * 10 + (size_t)(*at - 48);
                     at++;
                 }
-
-                if (i == where->index) offsets[part] = value;
-                else if (i == where->index - 1 && part == 1) seen = value;
+                pair[part] = value;
             }
+
+            if (i == where->index)     { offsets[0] = pair[1]; haveThis = TRUE; }
+            if (i == where->index + 1) { offsets[1] = pair[1]; haveNext = TRUE; break; }
         }
-        (void)seen;
 
-        size_t start = (size_t)first + (size_t)offsets[1];
-        if (start >= stream->len) return FALSE;
+        if (!haveThis) return FALSE;
 
-        // It runs to the next object's offset, or to the end of the stream.
-        // Reading a little too much is harmless: a dictionary ends where its
-        // brackets say it does.
-        out->at = (const char*)stream->bytes + start;
-        out->len = stream->len - start;
+        size_t begin = (size_t)first + offsets[0];
+        size_t stop = haveNext ? (size_t)first + offsets[1] : stream->len;
+
+        if (begin >= stream->len || stop > stream->len || stop <= begin) return FALSE;
+
+        out->at = (const char*)stream->bytes + begin;
+        out->len = stop - begin;
         return TRUE;
     }
 
@@ -1132,6 +1160,7 @@ extern "C" void PdfForm_Close(PdfForm* form) {
     if (!form) return;
 
     for (int i = 0; i < form->decodedCount; i++) free(form->decoded[i].bytes);
+    for (int i = 0; i < form->stampCount; i++) free(form->stamps[i].rgb);
 
     free(form->compressed);
     free(form->bytes);
@@ -1164,6 +1193,159 @@ extern "C" BOOL PdfForm_SetFieldValue(PdfForm* form, int index, const WCHAR* tex
 
     wcsncpy_s(form->fields[index].value, 1024, text ? text : L"", _TRUNCATE);
     form->fields[index].changed = TRUE;
+    return TRUE;
+}
+
+
+// ---------------------------------------------------------------------------
+// Pages
+//
+// The page tree: the catalogue names a /Pages node, which has /Kids, which are
+// either pages or more nodes. Flattened in order, because "page 3" has to mean
+// the third one somebody sees.
+// ---------------------------------------------------------------------------
+
+static void CollectPages(PdfForm* form, int node, int depth) {
+    if (depth > 32 || form->pageCount >= 1024) return;
+
+    Span body;
+    if (!ObjectBody(form, node, &body)) return;
+
+    Span type;
+    if (DictValue(body, "Type", &type) && SpanIs(type, "/Page")) {
+        form->pages[form->pageCount++] = node;
+        return;
+    }
+
+    Span kids;
+    if (!DictValue(body, "Kids", &kids)) return;
+
+    // Every reference in the array, in the order they are written.
+    const char* at = kids.at;
+    const char* end = kids.at + kids.len;
+
+    while (at < end) {
+        while (at < end && !(*at >= 48 && *at <= 57)) at++;
+        if (at >= end) break;
+
+        const char* start = at;
+        int tokens = 0;
+
+        while (at < end && tokens < 3) {
+            while (at < end && IsWhite(*at)) at++;
+            const char* tokenStart = at;
+            while (at < end && !IsWhite(*at) && *at != ']') at++;
+            if (at == tokenStart) break;
+            tokens++;
+        }
+
+        if (tokens < 3) break;
+
+        Span reference = { start, (size_t)(at - start) };
+        int number = AsReference(reference);
+        if (number > 0) CollectPages(form, number, depth + 1);
+    }
+}
+
+static void ReadPages(PdfForm* form) {
+    if (form->pagesRead) return;
+    form->pagesRead = TRUE;
+
+    Span catalog, pages;
+    if (!ObjectBody(form, form->rootObject, &catalog)) return;
+    if (!DictValue(catalog, "Pages", &pages)) return;
+
+    int root = AsReference(pages);
+    if (root > 0) CollectPages(form, root, 0);
+}
+
+extern "C" int PdfForm_PageCount(PdfForm* form) {
+    if (!form) return 0;
+    ReadPages(form);
+    return form->pageCount;
+}
+
+extern "C" BOOL PdfForm_StampImage(PdfForm* form, int pageIndex, const WCHAR* imagePath,
+                                   float x, float y, float width, float height) {
+    if (!form || !imagePath || width <= 0.0f || height <= 0.0f) return FALSE;
+    if (form->stampCount >= MAX_STAMPS) return FALSE;
+
+    ReadPages(form);
+    if (pageIndex < 0 || pageIndex >= form->pageCount) return FALSE;
+
+    // The picture, as pixels. WIC reads whatever the file is; what a PDF wants
+    // is three bytes a pixel with the top row first, which a DIB is upside
+    // down from.
+    HANDLE file = CreateFileW(imagePath, GENERIC_READ, FILE_SHARE_READ, NULL,
+                              OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+    if (file == INVALID_HANDLE_VALUE) return FALSE;
+
+    LARGE_INTEGER size = {};
+    if (!GetFileSizeEx(file, &size) || size.QuadPart <= 0 ||
+        size.QuadPart > 64 * 1024 * 1024) {
+        CloseHandle(file);
+        return FALSE;
+    }
+
+    BYTE* encoded = (BYTE*)malloc((size_t)size.QuadPart);
+    DWORD read = 0;
+    if (!encoded || !ReadFile(file, encoded, (DWORD)size.QuadPart, &read, NULL) ||
+        read != (DWORD)size.QuadPart) {
+        free(encoded);
+        CloseHandle(file);
+        return FALSE;
+    }
+    CloseHandle(file);
+
+    int imageWidth = 0, imageHeight = 0;
+    BYTE* bgra = ImageDib_DecodeAlpha(encoded, (size_t)read, &imageWidth, &imageHeight);
+    free(encoded);
+
+    if (!bgra || imageWidth <= 0 || imageHeight <= 0) {
+        free(bgra);
+        return FALSE;
+    }
+
+    size_t pixelCount = (size_t)imageWidth * imageHeight;
+    BYTE* rgb = (BYTE*)malloc(pixelCount * 3);
+    BYTE* alpha = (BYTE*)malloc(pixelCount);
+
+    if (!rgb || !alpha) {
+        free(rgb);
+        free(alpha);
+        free(bgra);
+        return FALSE;
+    }
+
+    BOOL transparent = FALSE;
+
+    for (size_t i = 0; i < pixelCount; i++) {
+        rgb[i * 3 + 0] = bgra[i * 4 + 2];
+        rgb[i * 3 + 1] = bgra[i * 4 + 1];
+        rgb[i * 3 + 2] = bgra[i * 4 + 0];
+
+        alpha[i] = bgra[i * 4 + 3];
+        if (alpha[i] != 255) transparent = TRUE;
+    }
+    free(bgra);
+
+    // A picture with nothing transparent in it needs no mask, and a mask
+    // costs a byte a pixel.
+    if (!transparent) {
+        free(alpha);
+        alpha = NULL;
+    }
+
+    Stamp* stamp = &form->stamps[form->stampCount++];
+    stamp->page = form->pages[pageIndex];
+    stamp->rect[0] = x;
+    stamp->rect[1] = y;
+    stamp->rect[2] = x + width;
+    stamp->rect[3] = y + height;
+    stamp->rgb = rgb;
+    stamp->alpha = alpha;
+    stamp->width = imageWidth;
+    stamp->height = imageHeight;
     return TRUE;
 }
 
@@ -1208,18 +1390,15 @@ static void OutFormat(Out* out, const char* format, ...) {
     if (len > 0) OutAdd(out, buffer, (size_t)len);
 }
 
-// The field's dictionary with its /V replaced, and an /AP pointing at the
-// appearance this writes for it. Everything else in the dictionary is carried
-// through as the bytes it already was.
-static void WriteFieldObject(Out* out, const PdfForm* form, const FormField* field,
-                             int appearanceObject) {
-    Span body;
-    if (!ObjectBody(form, field->object, &body)) return;
-
-    char value[4096];
-    WritePdfString(field->value, value, sizeof(value));
-
-    // Copy the dictionary, dropping the keys being replaced.
+// Copy a dictionary, leaving out the keys about to be rewritten, and leave it
+// open for the caller to add them and close it.
+//
+// Rewriting an object means keeping everything it said except the one thing
+// being changed -- a page keeps its size, its contents and its resources; a
+// field keeps its name, its box and its font. Re-serialising a parsed tree
+// would lose whatever this does not model, so the bytes are copied and only
+// the named keys are stepped over.
+static void CopyDictExcept(Out* out, Span body, const char* const* skip) {
     const char* at = body.at;
     const char* end = body.at + body.len;
 
@@ -1234,56 +1413,65 @@ static void WriteFieldObject(Out* out, const PdfForm* form, const FormField* fie
         if (at + 1 < end && at[0] == '<' && at[1] == '<') { depth++; OutAdd(out, at, 2); at += 2; continue; }
         if (at + 1 < end && at[0] == '>' && at[1] == '>') {
             depth--;
-            if (depth == 0) break;
+            if (depth == 0) break;          // the caller closes it
             OutAdd(out, at, 2);
             at += 2;
             continue;
         }
 
-        // At the dictionary's own level, the keys being rewritten are skipped
-        // along with their values.
         if (depth == 1 && *at == '/') {
-            Span rest = { at, (size_t)(end - at) };
-            BOOL skip = FALSE;
+            BOOL skipped = FALSE;
 
-            static const char* replaced[] = { "V", "AP", "AS", NULL };
-            for (int i = 0; replaced[i] && !skip; i++) {
-                size_t len = strlen(replaced[i]);
-                if (rest.len < len + 1) continue;
-                if (memcmp(at + 1, replaced[i], len) != 0) continue;
+            for (int i = 0; skip[i] && !skipped; i++) {
+                size_t len = strlen(skip[i]);
+                if ((size_t)(end - at) < len + 1) continue;
+                if (memcmp(at + 1, skip[i], len) != 0) continue;
 
                 char after = at[1 + len];
                 if (!IsWhite(after) && !IsDelimiter(after)) continue;
 
-                // Find where this key's value ends by asking the same code
-                // that reads one.
-                Span wrapper = { at - 2, (size_t)(end - at) + 2 };
-                // ...which needs a dictionary around it: the two characters
-                // before are "<<" only for the first key, so a small shim is
-                // used instead.
+                // Where the value ends is the same question DictValue answers,
+                // so it is asked -- with a dictionary wrapped round the rest so
+                // that the key is at the top level of something.
                 char shim[4096];
-                size_t take = rest.len < sizeof(shim) - 8 ? rest.len : sizeof(shim) - 8;
-                shim[0] = '<'; shim[1] = '<';
+                size_t take = (size_t)(end - at);
+                if (take > sizeof(shim) - 8) take = sizeof(shim) - 8;
+
+                shim[0] = '<';
+                shim[1] = '<';
                 memcpy(shim + 2, at, take);
                 shim[2 + take] = '>';
                 shim[3 + take] = '>';
 
                 Span shimSpan = { shim, take + 4 };
                 Span found;
-                if (DictValue(shimSpan, replaced[i], &found)) {
-                    size_t consumed = (size_t)(found.at - shim) + found.len - 2;
-                    at += consumed;
-                    skip = TRUE;
+                if (DictValue(shimSpan, skip[i], &found)) {
+                    at += (size_t)(found.at - shim) + found.len - 2;
+                    skipped = TRUE;
                 }
-                (void)wrapper;
             }
 
-            if (skip) continue;
+            if (skipped) continue;
         }
 
         OutAdd(out, at, 1);
         at++;
     }
+}
+
+// The field's dictionary with its /V replaced, and an /AP pointing at the
+// appearance this writes for it. Everything else in the dictionary is carried
+// through as the bytes it already was.
+static void WriteFieldObject(Out* out, const PdfForm* form, const FormField* field,
+                             int appearanceObject) {
+    Span body;
+    if (!ObjectBody(form, field->object, &body)) return;
+
+    char value[4096];
+    WritePdfString(field->value, value, sizeof(value));
+
+    static const char* const replaced[] = { "V", "AP", "AS", NULL };
+    CopyDictExcept(out, body, replaced);
 
     OutFormat(out, " /V %s", value);
     if (appearanceObject > 0) OutFormat(out, " /AP << /N %d 0 R >>", appearanceObject);
@@ -1361,7 +1549,7 @@ static void WriteAppearance(Out* out, const FormField* field, int fontObject) {
 extern "C" BOOL PdfForm_Save(PdfForm* form, const WCHAR* path) {
     if (!form || !path || !path[0]) return FALSE;
 
-    int changed = 0;
+    int changed = form->stampCount;
     for (int i = 0; i < form->fieldCount; i++) {
         if (form->fields[i].changed) changed++;
     }
@@ -1379,7 +1567,7 @@ extern "C" BOOL PdfForm_Save(PdfForm* form, const WCHAR* path) {
     int nextObject = form->objectCount > 0 ? form->objectCount : 1;
 
     struct Written { int number; size_t offset; };
-    Written written[MAX_FIELDS * 3 + 4];
+    Written written[MAX_FIELDS * 3 + MAX_STAMPS * 4 + 4];
     int writtenCount = 0;
 
     // A font to draw the filled text with, when the form does not name one
@@ -1425,6 +1613,104 @@ extern "C" BOOL PdfForm_Save(PdfForm* form, const WCHAR* path) {
         OutText(&out, "\nendobj\n");
     }
 
+    // The stamps: a picture, an appearance that draws it, an annotation that
+    // carries the appearance, and the page told about the annotation.
+    for (int i = 0; i < form->stampCount; i++) {
+        Stamp* stamp = &form->stamps[i];
+
+        // The transparency first, when there is any: a soft mask is an image
+        // of its own that the picture points at.
+        int mask = 0;
+        if (stamp->alpha) {
+            mask = nextObject++;
+            written[writtenCount].number = mask;
+            written[writtenCount].offset = out.len;
+            writtenCount++;
+
+            size_t alphaLen = (size_t)stamp->width * stamp->height;
+
+            OutFormat(&out,
+                "%d 0 obj\n<< /Type /XObject /Subtype /Image /Width %d /Height %d "
+                "/ColorSpace /DeviceGray /BitsPerComponent 8 /Length %zu >>\nstream\n",
+                mask, stamp->width, stamp->height, alphaLen);
+            OutAdd(&out, (const char*)stamp->alpha, alphaLen);
+            OutText(&out, "\nendstream\nendobj\n");
+        }
+
+        int image = nextObject++;
+        written[writtenCount].number = image;
+        written[writtenCount].offset = out.len;
+        writtenCount++;
+
+        size_t rgbLen = (size_t)stamp->width * stamp->height * 3;
+
+        OutFormat(&out,
+            "%d 0 obj\n<< /Type /XObject /Subtype /Image /Width %d /Height %d "
+            "/ColorSpace /DeviceRGB /BitsPerComponent 8",
+            image, stamp->width, stamp->height);
+
+        if (mask > 0) OutFormat(&out, " /SMask %d 0 R", mask);
+
+        OutFormat(&out, " /Length %zu >>\nstream\n", rgbLen);
+        OutAdd(&out, (const char*)stamp->rgb, rgbLen);
+        OutText(&out, "\nendstream\nendobj\n");
+
+        float width = stamp->rect[2] - stamp->rect[0];
+        float height = stamp->rect[3] - stamp->rect[1];
+
+        int appearance = nextObject++;
+        written[writtenCount].number = appearance;
+        written[writtenCount].offset = out.len;
+        writtenCount++;
+
+        char content[256];
+        int contentLen = snprintf(content, sizeof(content),
+            "q\n%.2f 0 0 %.2f 0 0 cm\n/Im0 Do\nQ\n", width, height);
+        if (contentLen < 0) contentLen = 0;
+
+        OutFormat(&out,
+            "%d 0 obj\n<< /Type /XObject /Subtype /Form /FormType 1 /BBox [0 0 %.2f %.2f] "
+            "/Resources << /ProcSet [/PDF /ImageC] /XObject << /Im0 %d 0 R >> >> "
+            "/Length %d >>\nstream\n",
+            appearance, width, height, image, contentLen);
+        OutAdd(&out, content, (size_t)contentLen);
+        OutText(&out, "\nendstream\nendobj\n");
+
+        int annotation = nextObject++;
+        written[writtenCount].number = annotation;
+        written[writtenCount].offset = out.len;
+        writtenCount++;
+
+        OutFormat(&out,
+            "%d 0 obj\n<< /Type /Annot /Subtype /Stamp /Name /Signature "
+            "/Rect [%.2f %.2f %.2f %.2f] /F 4 /AP << /N %d 0 R >> >>\nendobj\n",
+            annotation, stamp->rect[0], stamp->rect[1], stamp->rect[2], stamp->rect[3],
+            appearance);
+
+        // The page, with the annotation added to whatever it already had.
+        Span page;
+        if (!ObjectBody(form, stamp->page, &page)) continue;
+
+        written[writtenCount].number = stamp->page;
+        written[writtenCount].offset = out.len;
+        writtenCount++;
+
+        OutFormat(&out, "%d 0 obj\n", stamp->page);
+
+        // The page as it was, with the annotation added to whatever it had.
+        Span annots;
+        BOOL hasAnnots = DictValue(page, "Annots", &annots);
+
+        static const char* const pageKeys[] = { "Annots", NULL };
+        CopyDictExcept(&out, page, pageKeys);
+
+        OutText(&out, " /Annots [");
+        if (hasAnnots && annots.len > 2) OutAdd(&out, annots.at + 1, annots.len - 2);
+        OutFormat(&out, " %d 0 R] >>", annotation);
+
+        OutText(&out, "\nendobj\n");
+    }
+
     // The form itself, told to regenerate appearances -- belt as well as the
     // braces of writing them.
     if (form->acroFormObject > 0) {
@@ -1436,28 +1722,9 @@ extern "C" BOOL PdfForm_Save(PdfForm* form, const WCHAR* path) {
 
             OutFormat(&out, "%d 0 obj\n", form->acroFormObject);
 
-            // The dictionary as it was, with /NeedAppearances added or made
-            // true. Dropping the old key and adding it back is the same trick
-            // the field uses.
-            const char* at = acro.at;
-            const char* end = acro.at + acro.len;
-            while (at < end && IsWhite(*at)) at++;
-
-            if (at + 1 < end && at[0] == '<' && at[1] == '<') {
-                Span inner = { at, (size_t)(end - at) };
-                Span need;
-
-                OutText(&out, "<< /NeedAppearances true");
-
-                if (DictValue(inner, "NeedAppearances", &need)) {
-                    // Copy everything except that key and its value.
-                    size_t before = (size_t)(need.at - at) - 17;   // "/NeedAppearances "
-                    OutAdd(&out, at + 2, before - 2);
-                    OutAdd(&out, need.at + need.len, (size_t)(end - (need.at + need.len)));
-                } else {
-                    OutAdd(&out, at + 2, (size_t)(end - at) - 2);
-                }
-            }
+            static const char* const formKeys[] = { "NeedAppearances", NULL };
+            CopyDictExcept(&out, acro, formKeys);
+            OutText(&out, " /NeedAppearances true >>");
 
             OutText(&out, "\nendobj\n");
         }
@@ -1552,6 +1819,11 @@ extern "C" BOOL PdfForm_Save(PdfForm* form, const WCHAR* path) {
 
     if (ok) {
         for (int i = 0; i < form->fieldCount; i++) form->fields[i].changed = FALSE;
+        for (int i = 0; i < form->stampCount; i++) {
+            free(form->stamps[i].rgb);
+            free(form->stamps[i].alpha);
+        }
+        form->stampCount = 0;
     }
     return ok;
 }
@@ -1784,6 +2056,66 @@ extern "C" BOOL PdfForm_SelfTest(char* failure, size_t failureSize) {
     int pages = Pdf_PageCount(rendered);
     Pdf_Close(rendered);
     if (pages != 1) FAIL("the filled form did not come back as one page");
+
+    // --- a stamp on a page ---
+    //
+    // Put down, written, and the file still one Windows opens: a picture on a
+    // page is the whole of what a visible signature is.
+    form = PdfForm_Open(path, &why);
+    if (!form) FAIL("the form could not be opened for stamping");
+
+    if (PdfForm_PageCount(form) != 1) FAIL("the test form did not report one page");
+
+    WCHAR picture[MAX_PATH];
+    swprintf_s(picture, MAX_PATH, L"%sopennote-selftest-stamp.bmp", temp);
+
+    {
+        const int w = 2, h = 2;
+        const int rowBytes = ((w * 3 + 3) & ~3);
+        const int pixelBytes = rowBytes * h;
+
+        BYTE bmp[14 + 40 + 32] = {0};
+        bmp[0] = 'B';
+        bmp[1] = 'M';
+        *(DWORD*)(bmp + 2) = 14 + 40 + pixelBytes;
+        *(DWORD*)(bmp + 10) = 14 + 40;
+
+        BITMAPINFOHEADER* bi = (BITMAPINFOHEADER*)(bmp + 14);
+        bi->biSize = sizeof(BITMAPINFOHEADER);
+        bi->biWidth = w;
+        bi->biHeight = h;
+        bi->biPlanes = 1;
+        bi->biBitCount = 24;
+        bi->biCompression = BI_RGB;
+        bi->biSizeImage = pixelBytes;
+
+        for (int i = 0; i < pixelBytes; i++) bmp[14 + 40 + i] = (BYTE)(i * 9);
+
+        if (!WriteBytes(picture, bmp, 14 + 40 + pixelBytes)) {
+            FAIL("could not write a test picture to stamp");
+        }
+    }
+
+    if (!PdfForm_StampImage(form, 0, picture, 72.0f, 72.0f, 144.0f, 54.0f)) {
+        DeleteFileW(picture);
+        FAIL("the picture would not go on the page");
+    }
+
+    if (!PdfForm_Save(form, filled)) {
+        DeleteFileW(picture);
+        FAIL("the stamped file could not be written");
+    }
+
+    PdfForm_Close(form);
+    form = NULL;
+    DeleteFileW(picture);
+
+    rendered = Pdf_Open(filled);
+    if (!rendered) FAIL("Windows would not open the stamped file");
+
+    int stampedPages = Pdf_PageCount(rendered);
+    Pdf_Close(rendered);
+    if (stampedPages != 1) FAIL("the stamped file did not come back as one page");
 
     // --- and the same, for a file in the shape everything writes today ---
     if (!WriteBytes(path, MODERN_FORM, sizeof(MODERN_FORM))) {

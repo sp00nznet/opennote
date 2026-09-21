@@ -11,6 +11,80 @@
 
 #pragma comment(lib, "windowscodecs.lib")
 
+
+// The same road as above, stopping at 32-bit BGRA and keeping the rows the way
+// round a picture has them rather than the way round a DIB does.
+BYTE* ImageDib_DecodeAlpha(const BYTE* bytes, size_t len, int* widthOut, int* heightOut) {
+    if (!bytes || !len || !widthOut || !heightOut) return NULL;
+
+    *widthOut = 0;
+    *heightOut = 0;
+
+    HRESULT init = CoInitializeEx(NULL, COINIT_APARTMENTTHREADED);
+    BOOL ownCom = SUCCEEDED(init);
+
+    IWICImagingFactory* factory = NULL;
+    IWICStream* stream = NULL;
+    IWICBitmapDecoder* decoder = NULL;
+    IWICBitmapFrameDecode* frame = NULL;
+    IWICFormatConverter* converter = NULL;
+    BYTE* pixels = NULL;
+
+    HRESULT hr = CoCreateInstance(&CLSID_WICImagingFactory, NULL, CLSCTX_INPROC_SERVER,
+                                  &IID_IWICImagingFactory, (void**)&factory);
+
+    if (SUCCEEDED(hr)) hr = IWICImagingFactory_CreateStream(factory, &stream);
+    if (SUCCEEDED(hr)) hr = IWICStream_InitializeFromMemory(stream, (BYTE*)bytes, (DWORD)len);
+    if (SUCCEEDED(hr)) {
+        hr = IWICImagingFactory_CreateDecoderFromStream(
+            factory, (IStream*)stream, NULL, WICDecodeMetadataCacheOnLoad, &decoder);
+    }
+    if (SUCCEEDED(hr)) hr = IWICBitmapDecoder_GetFrame(decoder, 0, &frame);
+    if (SUCCEEDED(hr)) hr = IWICImagingFactory_CreateFormatConverter(factory, &converter);
+    if (SUCCEEDED(hr)) {
+        hr = IWICFormatConverter_Initialize(converter, (IWICBitmapSource*)frame,
+                                            &GUID_WICPixelFormat32bppBGRA,
+                                            WICBitmapDitherTypeNone, NULL, 0.0,
+                                            WICBitmapPaletteTypeCustom);
+    }
+
+    UINT width = 0, height = 0;
+    if (SUCCEEDED(hr)) hr = IWICFormatConverter_GetSize(converter, &width, &height);
+    if (SUCCEEDED(hr) && (width == 0 || height == 0 || width > 20000 || height > 20000)) {
+        hr = E_FAIL;
+    }
+
+    if (SUCCEEDED(hr)) {
+        UINT stride = width * 4;
+        size_t total = (size_t)stride * height;
+
+        pixels = (BYTE*)malloc(total);
+        if (!pixels) {
+            hr = E_OUTOFMEMORY;
+        } else {
+            hr = IWICFormatConverter_CopyPixels(converter, NULL, stride,
+                                                (UINT)total, pixels);
+        }
+    }
+
+    if (SUCCEEDED(hr)) {
+        *widthOut = (int)width;
+        *heightOut = (int)height;
+    } else {
+        free(pixels);
+        pixels = NULL;
+    }
+
+    if (converter) IWICFormatConverter_Release(converter);
+    if (frame) IWICBitmapFrameDecode_Release(frame);
+    if (decoder) IWICBitmapDecoder_Release(decoder);
+    if (stream) IWICStream_Release(stream);
+    if (factory) IWICImagingFactory_Release(factory);
+    if (ownCom) CoUninitialize();
+
+    return pixels;
+}
+
 BYTE* ImageDib_Decode(const BYTE* bytes, size_t len,
                       BITMAPINFOHEADER* headerOut, size_t* pixelsLenOut) {
     if (!bytes || !len || !headerOut || !pixelsLenOut) return NULL;

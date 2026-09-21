@@ -11,6 +11,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **`OPENNOTE_DB`** names the database file, so a copy run from a stick keeps its notes
   beside itself rather than in whichever account it is plugged into — and a test that
   opens documents cannot write to the store somebody is actually using.
+- **A PDF can be signed** — visibly. **File → Sign PDF…** takes a picture of a signature
+  and the next drag across the page says where it goes; the picture is stamped in with
+  its transparency kept, and the file is written as an incremental update like a filled
+  form. This is a picture of a signature, not a cryptographic one: what it proves is what
+  ink on paper proves.
 - **The PDFs written this century open too.** A cross-reference stream, a PNG predictor
   and the object streams a PDF 1.5 keeps its dictionaries in all need DEFLATE undone, so
   opennote has an inflate of its own now — RFC 1951, about 300 lines, no new dependency.

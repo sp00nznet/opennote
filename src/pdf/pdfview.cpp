@@ -15,13 +15,18 @@
 #include "supernote.h"
 #include "res/resource.h"
 
+#include <windowsx.h>
+#include <math.h>
 #include <d2d1.h>
 #include <shellscalingapi.h>
 
 #include "core/doctree.h"
 #include "layout/layoutimage.h"
 #include "pdf/pdfread.h"
+#include "pdf/pdfform.h"
 #include "pdf/pdfview.h"
+#include "ui/dialogs.h"
+#include "ui/statusbar.h"
 
 #define PDFVIEW_CLASS L"OpenNotePdfView"
 
@@ -58,6 +63,14 @@ struct PdfViewState {
 
     CachedPage cache[CACHE_SIZE];
     UINT64     clock;
+
+    // Placing a picture: the file to put down, and the box being dragged for
+    // it, in view coordinates.
+    WCHAR stampPath[MAX_PATH];
+    BOOL  placing;
+    BOOL  dragging;
+    float dragFrom[2];
+    float dragTo[2];
 };
 
 // ---------------------------------------------------------------------------
@@ -242,6 +255,15 @@ static void Paint(HWND hwnd, PdfViewState* st) {
         st->target->DrawRectangle(paper, st->edge, 1.0f);
     }
 
+    // The box being dragged for a stamp, over the top of everything.
+    if (st->dragging) {
+        D2D1_RECT_F box = D2D1::RectF(
+            min(st->dragFrom[0], st->dragTo[0]), min(st->dragFrom[1], st->dragTo[1]),
+            max(st->dragFrom[0], st->dragTo[0]), max(st->dragFrom[1], st->dragTo[1]));
+
+        st->target->DrawRectangle(box, st->edge, 2.0f);
+    }
+
     HRESULT hr = st->target->EndDraw();
     if (hr == D2DERR_RECREATE_TARGET) DiscardTarget(st);
 }
@@ -287,6 +309,8 @@ static void Zoom(HWND hwnd, PdfViewState* st, float factor) {
     PdfView_Describe(hwnd, status, 64);
     StatusBar_SetMessage(status);
 }
+
+static void FinishStamp(HWND hwnd, PdfViewState* st);
 
 static LRESULT CALLBACK PdfViewProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
     PdfViewState* st = (PdfViewState*)GetWindowLongPtrW(hwnd, GWLP_USERDATA);
@@ -387,7 +411,39 @@ static LRESULT CALLBACK PdfViewProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
 
         case WM_LBUTTONDOWN:
             SetFocus(hwnd);
+            if (st && st->placing) {
+                st->dragging = TRUE;
+                st->dragFrom[0] = (float)GET_X_LPARAM(lParam);
+                st->dragFrom[1] = (float)GET_Y_LPARAM(lParam);
+                st->dragTo[0] = st->dragFrom[0];
+                st->dragTo[1] = st->dragFrom[1];
+                SetCapture(hwnd);
+            }
             return 0;
+
+        case WM_MOUSEMOVE:
+            if (st && st->dragging) {
+                st->dragTo[0] = (float)GET_X_LPARAM(lParam);
+                st->dragTo[1] = (float)GET_Y_LPARAM(lParam);
+                InvalidateRect(hwnd, NULL, FALSE);
+            }
+            return 0;
+
+        case WM_LBUTTONUP:
+            if (st && st->dragging) {
+                ReleaseCapture();
+                st->dragTo[0] = (float)GET_X_LPARAM(lParam);
+                st->dragTo[1] = (float)GET_Y_LPARAM(lParam);
+                FinishStamp(hwnd, st);
+            }
+            return 0;
+
+        case WM_SETCURSOR:
+            if (st && st->placing) {
+                SetCursor(LoadCursorW(NULL, IDC_CROSS));
+                return TRUE;
+            }
+            break;
 
         case WM_DESTROY:
             if (st) {
@@ -474,6 +530,142 @@ extern "C" HWND PdfView_Create(HWND hParent, const WCHAR* path) {
     return hwnd;
 }
 
+
+// ---------------------------------------------------------------------------
+// Placing a stamp
+//
+// A point on the view is a point on a page, and a page measures in points from
+// its bottom left -- so the box somebody drags has to be turned upside down on
+// the way in. Getting that wrong puts the signature at the top of the page,
+// which is the one mistake that looks like the program working.
+// ---------------------------------------------------------------------------
+
+// The arithmetic on its own, so it can be checked without a window: which
+// page a point is on, and where on it in the page's own measure.
+struct ViewGeometry {
+    float viewWidth;
+    float scrollY;
+    float zoom;
+    float pageWidthPt, pageHeightPt;
+    int   pageCount;
+};
+
+static BOOL MapPoint(const ViewGeometry* g, float x, float y,
+                     int* pageOut, float* pageXOut, float* pageYOut) {
+    float pageW = g->pageWidthPt * (96.0f / 72.0f) * g->zoom;
+    float pageH = g->pageHeightPt * (96.0f / 72.0f) * g->zoom;
+
+    float left = (g->viewWidth - pageW) / 2.0f;
+    if (left < PAGE_MARGIN) left = PAGE_MARGIN;
+
+    for (int i = 0; i < g->pageCount; i++) {
+        float top = PAGE_MARGIN + i * (pageH + PAGE_GAP) - g->scrollY;
+        if (y < top || y > top + pageH) continue;
+
+        *pageOut = i;
+        *pageXOut = (x - left) / g->zoom * (72.0f / 96.0f);
+
+        // Down the window is up the page: a PDF measures from the bottom left.
+        *pageYOut = g->pageHeightPt - ((y - top) / g->zoom * (72.0f / 96.0f));
+        return TRUE;
+    }
+    return FALSE;
+}
+
+static BOOL PageAt(HWND hwnd, PdfViewState* st, float x, float y,
+                   int* pageOut, float* pageXOut, float* pageYOut) {
+    RECT rc;
+    GetClientRect(hwnd, &rc);
+
+    ViewGeometry g;
+    g.viewWidth = (float)(rc.right - rc.left);
+    g.scrollY = st->scrollY;
+    g.zoom = st->zoom;
+    g.pageWidthPt = st->pageWidthPt;
+    g.pageHeightPt = st->pageHeightPt;
+    g.pageCount = st->pageCount;
+
+    return MapPoint(&g, x, y, pageOut, pageXOut, pageYOut);
+}
+
+static void FinishStamp(HWND hwnd, PdfViewState* st) {
+    st->dragging = FALSE;
+    st->placing = FALSE;
+    InvalidateRect(hwnd, NULL, FALSE);
+
+    int page = 0;
+    float x0 = 0.0f, y0 = 0.0f, x1 = 0.0f, y1 = 0.0f;
+
+    if (!PageAt(hwnd, st, st->dragFrom[0], st->dragFrom[1], &page, &x0, &y0) ||
+        !PageAt(hwnd, st, st->dragTo[0], st->dragTo[1], &page, &x1, &y1)) {
+        StatusBar_SetMessage(L"The signature has to be placed on a page");
+        return;
+    }
+
+    float x = min(x0, x1), y = min(y0, y1);
+    float width = (float)fabs(x1 - x0), height = (float)fabs(y1 - y0);
+
+    // A click rather than a drag: two inches by three quarters of one, which
+    // is about the size of a signature on paper.
+    if (width < 8.0f || height < 6.0f) {
+        width = 144.0f;
+        height = 54.0f;
+        y = y - height;
+    }
+
+    const WCHAR* why = NULL;
+    PdfForm* form = PdfForm_Open(st->path, &why);
+    if (!form) {
+        MessageBoxW(GetAncestor(hwnd, GA_ROOT),
+                    why ? why : L"This PDF could not be opened for signing.",
+                    APP_NAME, MB_ICONINFORMATION);
+        return;
+    }
+
+    if (!PdfForm_StampImage(form, page, st->stampPath, x, y, width, height)) {
+        PdfForm_Close(form);
+        MessageBoxW(GetAncestor(hwnd, GA_ROOT),
+                    L"That picture could not be placed on the page.",
+                    APP_NAME, MB_ICONWARNING);
+        return;
+    }
+
+    WCHAR saveTo[MAX_PATH] = {0};
+    if (!Dialogs_SaveFile(GetAncestor(hwnd, GA_ROOT), saveTo, MAX_PATH, L"signed.pdf")) {
+        PdfForm_Close(form);
+        return;
+    }
+    if (!wcsrchr(saveTo, L'.')) wcscat_s(saveTo, MAX_PATH, L".pdf");
+
+    BOOL ok = PdfForm_Save(form, saveTo);
+    PdfForm_Close(form);
+
+    if (!ok) {
+        MessageBoxW(GetAncestor(hwnd, GA_ROOT), L"The signed PDF could not be written.",
+                    APP_NAME, MB_ICONWARNING);
+        return;
+    }
+
+    // Show what was written, which is the only way anybody trusts it.
+    Document* signedDoc = Document_CreateFromFile(saveTo);
+    if (signedDoc) MainWindow_OpenDocument(signedDoc);
+}
+
+extern "C" BOOL PdfView_BeginStamp(HWND hPdfView, const WCHAR* imagePath) {
+    if (!hPdfView || !IsWindow(hPdfView) || !imagePath || !imagePath[0]) return FALSE;
+
+    PdfViewState* st = (PdfViewState*)GetWindowLongPtrW(hPdfView, GWLP_USERDATA);
+    if (!st) return FALSE;
+
+    wcsncpy_s(st->stampPath, MAX_PATH, imagePath, _TRUNCATE);
+    st->placing = TRUE;
+    st->dragging = FALSE;
+
+    SetFocus(hPdfView);
+    StatusBar_SetMessage(L"Drag a box where the signature goes, or click to drop one");
+    return TRUE;
+}
+
 extern "C" BOOL PdfView_Path(HWND hPdfView, WCHAR* out, size_t outChars) {
     if (!out || outChars == 0) return FALSE;
     out[0] = L'\0';
@@ -499,4 +691,73 @@ extern "C" void PdfView_Describe(HWND hPdfView, WCHAR* out, size_t outChars) {
     swprintf_s(out, outChars, L"PDF - %d page%s at %d%%",
                st->pageCount, st->pageCount == 1 ? L"" : L"s",
                (int)(st->zoom * 100.0f + 0.5f));
+}
+
+// ---------------------------------------------------------------------------
+// Self-check
+//
+// Only the mapping, which is the part with arithmetic in it. Putting a
+// signature at the top of the page when it was dropped at the bottom is the
+// one mistake here that looks like the program working.
+// ---------------------------------------------------------------------------
+
+extern "C" BOOL PdfView_SelfTest(char* failure, size_t failureSize) {
+    #define FAIL(msg) do { \
+        strncpy_s(failure, failureSize, (msg), _TRUNCATE); \
+        return FALSE; \
+    } while (0)
+
+    ViewGeometry g;
+    g.viewWidth = 1000.0f;
+    g.scrollY = 0.0f;
+    g.zoom = 1.0f;
+    g.pageWidthPt = 612.0f;      // Letter
+    g.pageHeightPt = 792.0f;
+    g.pageCount = 3;
+
+    float pageH = 792.0f * (96.0f / 72.0f);
+    float left = (1000.0f - 612.0f * (96.0f / 72.0f)) / 2.0f;
+
+    int page = -1;
+    float x = 0.0f, y = 0.0f;
+
+    // The top left corner of the first page is the *top* left in points.
+    if (!MapPoint(&g, left, PAGE_MARGIN, &page, &x, &y)) FAIL("the first page was not found");
+    if (page != 0) FAIL("the top of the document is not page one");
+    if (x < -0.5f || x > 0.5f) FAIL("the left edge is not zero across");
+    if (y < 791.0f || y > 793.0f) FAIL("the top of the page is not its height up");
+
+    // ...and its bottom left corner is the origin.
+    if (!MapPoint(&g, left, PAGE_MARGIN + pageH, &page, &x, &y)) FAIL("the page bottom was not found");
+    if (y < -1.0f || y > 1.0f) FAIL("the bottom of the page is not the origin");
+
+    // A point between two pages is on neither.
+    if (MapPoint(&g, left, PAGE_MARGIN + pageH + PAGE_GAP / 2.0f, &page, &x, &y)) {
+        FAIL("the gap between pages was taken for a page");
+    }
+
+    // The second page, which is where scrolling and gaps have to agree.
+    if (!MapPoint(&g, left, PAGE_MARGIN + pageH + PAGE_GAP + 10.0f, &page, &x, &y)) {
+        FAIL("the second page was not found");
+    }
+    if (page != 1) FAIL("the page after the first is not page two");
+
+    // Scrolled down by a page, the same window point is the next page.
+    g.scrollY = pageH + PAGE_GAP;
+    if (!MapPoint(&g, left, PAGE_MARGIN + 10.0f, &page, &x, &y)) FAIL("scrolling lost the page");
+    if (page != 1) FAIL("scrolling by a page did not move by a page");
+
+    // Zoomed in, a point twice as far down the window is the same place on the
+    // page.
+    g.scrollY = 0.0f;
+    g.zoom = 2.0f;
+    if (!MapPoint(&g, left, PAGE_MARGIN + 2.0f * 96.0f, &page, &x, &y)) {
+        FAIL("the zoomed page was not found");
+    }
+    if (y < 719.0f || y > 721.0f) FAIL("zoom moved the point on the page");
+
+    failure[0] = '\0';
+    return TRUE;
+
+    #undef FAIL
 }

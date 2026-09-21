@@ -44,6 +44,20 @@ BOOL PdfForm_FieldIsText(const PdfForm* form, int index);
 // Put text in a field. Nothing is written to disk until PdfForm_Save.
 BOOL PdfForm_SetFieldValue(PdfForm* form, int index, const WCHAR* text);
 
+// How many pages it has, for the commands that put something on one.
+int PdfForm_PageCount(PdfForm* form);
+
+// Stamp a picture onto a page: a signature, an initial, a scanned scribble.
+// The rectangle is in points from the bottom left of the page, which is how a
+// PDF measures. Nothing is written until PdfForm_Save.
+//
+// It goes on as an annotation with the picture as its appearance, which is
+// the same shape a filled field takes and draws in every reader. This is a
+// *visible* signature -- a picture of one -- and not a cryptographic one; see
+// ROADMAP.md for the difference and why the second is its own job.
+BOOL PdfForm_StampImage(PdfForm* form, int pageIndex, const WCHAR* imagePath,
+                        float x, float y, float width, float height);
+
 // Write the filled form. `path` may be the file it came from -- the update is
 // appended -- or another name, in which case the original is copied first.
 BOOL PdfForm_Save(PdfForm* form, const WCHAR* path);

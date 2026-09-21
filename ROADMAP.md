@@ -240,9 +240,11 @@ the free tools for it are adware or a web upload.
       dictionaries in. About 300 lines, no new dependency. An update written for such a
       file is a cross-reference stream too, because a reader that understands only
       streams would not see a classic table appended after one.
-- [ ] **A visible signature.** An image or an inked scribble placed on the page, stamped
-      in as an XObject. This is what most people mean by "sign a PDF", and it is the
-      same incremental-update machinery as a filled field.
+- [x] **A visible signature.** File > Sign PDF takes a picture of one and the next drag
+      on the page says where it goes. It is stamped in as an image with its transparency
+      kept -- a signature PNG is mostly transparent, and dropping that puts a black box
+      on the paper -- carried by an annotation, which is the same incremental-update
+      machinery as a filled field.
 - [ ] **A cryptographic signature**, separately and later: a PKCS#7 detached signature
       over a byte range, from a certificate in the Windows store. Windows has the crypto
       (`CryptMsg`); what it costs is the `/ByteRange` placeholder dance and the care that

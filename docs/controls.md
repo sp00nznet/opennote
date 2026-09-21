@@ -172,6 +172,11 @@ so rather than half-working.
 | `Ctrl` + wheel | Zoom |
 | `Ctrl+0` | Fit the page across the window, which is how it opens |
 
+**File → Sign PDF…** puts a picture of your signature on a page: choose the image, then
+drag a box where it goes (or click to drop one at a sensible size). It is written to a
+copy, with the original bytes untouched underneath. This is a *visible* signature — what
+it proves is what ink on paper proves, and no more.
+
 **File → Fill PDF Form…** lists the fields the PDF carries. Double-click one to fill it
 in, then **Save As** writes the filled copy — the original file is not changed, and the
 copy is the original with the answers appended, which is how PDF is meant to be edited.

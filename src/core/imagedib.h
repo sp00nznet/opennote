@@ -21,6 +21,13 @@ extern "C" {
 BYTE* ImageDib_Decode(const BYTE* bytes, size_t len,
                       BITMAPINFOHEADER* headerOut, size_t* pixelsLenOut);
 
+// The same picture with its transparency kept: 32-bit BGRA, top row first,
+// no row padding. A signature is a PNG that is mostly transparent, and
+// dropping that turns the paper around it black -- so the stamp path asks for
+// this and writes the alpha out as a soft mask.
+BYTE* ImageDib_DecodeAlpha(const BYTE* bytes, size_t len,
+                           int* widthOut, int* heightOut);
+
 // ...and wrap that DIB in a Windows metafile, which is the only picture
 // RichEdit's RTF reader will actually take. Caller frees.
 BYTE* ImageDib_ToMetafile(const BYTE* pixels, const BITMAPINFOHEADER* header,
