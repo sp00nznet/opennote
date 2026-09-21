@@ -161,13 +161,13 @@ static HRESULT MakeTarget(const WCHAR* printerName, const WCHAR* docName,
     return S_OK;
 }
 
-extern "C" BOOL LayoutPrint_ToPrinter(const DocModel* doc, const WCHAR* printerName,
+extern "C" BOOL LayoutPrint_ToPrinter(DocModel* doc, const WCHAR* printerName,
                                       const WCHAR* docName, const WCHAR* outputFile,
                                       int* pagesOut) {
     if (pagesOut) *pagesOut = 0;
     if (!doc || !printerName || !printerName[0]) return FALSE;
 
-    LayoutResult* layout = Layout_Build(doc, L"Calibri", 11.0f);
+    LayoutResult* layout = Layout_BuildUpdating(doc, L"Calibri", 11.0f);
     if (!layout) return FALSE;
 
     // The console tools reach this without a window, so the apartment may not

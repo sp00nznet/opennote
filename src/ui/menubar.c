@@ -105,6 +105,15 @@ HMENU MenuBar_Create(void) {
 
     AppendMenuW(hMenu, MF_POPUP, (UINT_PTR)hFormatMenu, L"F&ormat");
 
+    // Insert: the parts of a document that work themselves out.
+    HMENU hInsertMenu = CreatePopupMenu();
+    AppendMenuW(hInsertMenu, MF_STRING, IDM_INSERT_PICTURE, L"&Picture...");
+    AppendMenuW(hInsertMenu, MF_SEPARATOR, 0, NULL);
+    AppendMenuW(hInsertMenu, MF_STRING, IDM_INSERT_PAGE_NUMBERS, L"Page &Numbers");
+    AppendMenuW(hInsertMenu, MF_STRING, IDM_INSERT_TOC, L"&Table of Contents");
+    AppendMenuW(hInsertMenu, MF_STRING, IDM_INSERT_DATE_FIELD, L"&Date Field");
+    AppendMenuW(hMenu, MF_POPUP, (UINT_PTR)hInsertMenu, L"&Insert");
+
     // Review: what a document carries besides its text.
     HMENU hReviewMenu = CreatePopupMenu();
     AppendMenuW(hReviewMenu, MF_STRING, IDM_REVIEW_ACCEPT_ALL, L"&Accept All Changes");

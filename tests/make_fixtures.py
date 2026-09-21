@@ -501,6 +501,73 @@ def fixture_margins(outdir):
 
 
 # --------------------------------------------------------------------------
+# fields: a page number, a date and a cross-reference
+# --------------------------------------------------------------------------
+def fixture_fields(outdir):
+    def footer_part():
+        return (
+            '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n'
+            '<w:ftr xmlns:w="%s" xmlns:r="%s"><w:p>'
+            '<w:pPr><w:jc w:val="center"/></w:pPr>'
+            '<w:r><w:t xml:space="preserve">Page </w:t></w:r>'
+            '<w:fldSimple w:instr=" PAGE "><w:r><w:t>1</w:t></w:r></w:fldSimple>'
+            '<w:r><w:t xml:space="preserve"> of </w:t></w:r>'
+            '<w:fldSimple w:instr=" NUMPAGES "><w:r><w:t>1</w:t></w:r></w:fldSimple>'
+            '</w:p></w:ftr>' % (W, R)
+        )
+
+    sect = (
+        '<w:sectPr>'
+        '<w:footerReference w:type="default" r:id="rIdFtr"/>'
+        '<w:pgSz w:w="12240" w:h="15840"/>'
+        '<w:pgMar w:top="1440" w:right="1440" w:bottom="1440" w:left="1440"'
+        ' w:header="720" w:footer="720"/>'
+        '</w:sectPr>'
+    )
+
+    body = [
+        # A bookmark around a heading, and the two ways of pointing at it.
+        p([
+            '<w:bookmarkStart w:id="1" w:name="intro"/>',
+            r("Introduction"),
+            '<w:bookmarkEnd w:id="1"/>',
+        ]),
+        # The complex spelling of a field: begin, instruction, separate,
+        # result, end -- which is what Word writes for anything with switches.
+        p([
+            r("Written on "),
+            '<w:r><w:fldChar w:fldCharType="begin"/></w:r>'
+            '<w:r><w:instrText xml:space="preserve"> DATE \\@ "yyyy-MM-dd" </w:instrText></w:r>'
+            '<w:r><w:fldChar w:fldCharType="separate"/></w:r>'
+            '<w:r><w:t>1999-12-31</w:t></w:r>'
+            '<w:r><w:fldChar w:fldCharType="end"/></w:r>',
+            r("."),
+        ]),
+        p([
+            r("See "),
+            '<w:fldSimple w:instr=" REF intro "><w:r><w:t>Introduction</w:t></w:r></w:fldSimple>',
+            r(" on page "),
+            '<w:fldSimple w:instr=" PAGEREF intro "><w:r><w:t>1</w:t></w:r></w:fldSimple>',
+            r("."),
+        ]),
+    ]
+    for i in range(60):
+        body.append(p([r("Filler paragraph %d, so the document runs past one page." % i)]))
+
+    expect = [
+        "# a field reaches the view as its result, which is what it reads as",
+        "contains:Introduction",
+        "contains:Written on ",
+        "# the instruction itself is not document text",
+        "absent:NUMPAGES",
+        "absent:fldCharType",
+    ]
+
+    parts = [("word/footer1.xml", FOOTER_CT, "footer", footer_part())]
+    return write(outdir, "fields", body, expect, parts=parts, sect=sect)
+
+
+# --------------------------------------------------------------------------
 # notes: a footnote belongs to the page its reference is on
 # --------------------------------------------------------------------------
 def fixture_notes(outdir):
@@ -566,6 +633,7 @@ def main():
         fixture_images(outdir),
         fixture_pages(outdir),
         fixture_margins(outdir),
+        fixture_fields(outdir),
         fixture_notes(outdir),
     ]
     for path in made:

@@ -120,6 +120,25 @@ typedef struct {
     WCHAR       date[32];        // ISO 8601, as the file states it
 } RevisionMark;
 
+// A field: an instruction and the result it last worked out.
+//
+// `{ PAGE }` in a footer, `{ DATE \\@ "d MMMM yyyy" }` on a letter, `{ REF
+// name }` pointing at a bookmark. The instruction is what the document says;
+// the run's text is the answer, which is cached in the file exactly as it is
+// here -- a reader with no idea how to work one out still shows something
+// sensible, and that is why Word stores it too.
+typedef enum {
+    FIELD_NONE,
+    FIELD_OTHER,        // a field this does not evaluate; its result is kept
+    FIELD_PAGE,
+    FIELD_NUMPAGES,
+    FIELD_DATE,
+    FIELD_TIME,
+    FIELD_REF,          // the text of a bookmark
+    FIELD_PAGEREF,      // the page a bookmark is on
+    FIELD_TOC
+} DocFieldKind;
+
 typedef struct DocRun {
     struct DocRun* next;
     CharProps      props;
@@ -137,6 +156,14 @@ typedef struct DocRun {
 
     // Whether this run was inserted or deleted with track changes on.
     RevisionMark   rev;
+
+    // A field instruction, when this run is a field's result. Owned.
+    WCHAR*         field;
+
+    // A bookmark's start or end. Owned, and worth no characters: a bookmark
+    // is a place in the text rather than anything in it.
+    WCHAR*         bookmark;
+    BOOL           bookmarkEnd;
 } DocRun;
 
 typedef struct DocPara {
@@ -269,6 +296,54 @@ DocStyle* Doc_FindStyle(const DocModel* doc, const WCHAR* id);
 // defaults, so a paragraph that states nothing still comes out right.
 void Doc_ResolveStyle(const DocModel* doc, const WCHAR* id,
                       ParaProps* paraOut, CharProps* runOut);
+
+// ---------------------------------------------------------------------------
+// Fields and bookmarks
+// ---------------------------------------------------------------------------
+
+// A field whose result is `text`. The instruction is kept as the document
+// states it, including its switches.
+DocRun* Doc_AddFieldRun(DocPara* para, const WCHAR* instr, const WCHAR* text,
+                        const CharProps* props);
+
+// A bookmark's start or end: a marker in the text that takes up no room.
+DocRun* Doc_AddBookmark(DocPara* para, const WCHAR* name, BOOL isEnd);
+
+DocFieldKind Doc_FieldKind(const WCHAR* instr);
+
+// The first argument after the keyword -- a bookmark name, usually. Empty
+// when there is none.
+void Doc_FieldArgument(const WCHAR* instr, WCHAR* out, size_t outChars);
+
+// The `\@ "..."` picture, which says how a date is to be written. Empty when
+// the field does not state one.
+void Doc_FieldPicture(const WCHAR* instr, WCHAR* out, size_t outChars);
+
+// The text a field resolves to when the answer does not depend on where it
+// lands: the date, the time, the text of a bookmark. Returns how many results
+// changed, so a caller knows whether anything has to be laid out again.
+int Doc_UpdateFields(DocModel* doc);
+
+// Does this document hold a field whose answer depends on the page it is on?
+// Those are the ones that need the document laid out before they can be told
+// what they say.
+BOOL Doc_HasPageFields(const DocModel* doc);
+
+// The text of a bookmark: everything between its start and its end marker.
+BOOL Doc_BookmarkText(const DocModel* doc, const WCHAR* name,
+                      WCHAR* out, size_t outChars);
+
+// A footer of "Page N of M", centred, replacing whatever footer was there.
+// The numbers are fields, so they are answered when the document is laid out
+// rather than written in and left to go stale.
+void Doc_InsertPageNumbers(DocModel* doc);
+
+// A table of contents at the top of the document, built from its headings.
+// Each entry points at a bookmark on its heading with a PAGEREF field, so the
+// page numbers follow the document instead of describing where it used to be.
+// Returns how many entries there were; zero means the document has no
+// headings to build one from, and nothing was inserted.
+int Doc_InsertTableOfContents(DocModel* doc);
 
 // ---------------------------------------------------------------------------
 // Tracked changes

@@ -215,6 +215,12 @@
 #define IDM_REVIEW_ACCEPT_ALL    7340
 #define IDM_REVIEW_REJECT_ALL    7341
 
+// Insert: things the document works out for itself -- page numbers, a table
+// of contents, a date that stays current.
+#define IDM_INSERT_PAGE_NUMBERS  7350
+#define IDM_INSERT_TOC           7351
+#define IDM_INSERT_DATE_FIELD    7352
+
 // Toolbar child controls
 #define IDC_TOOLBAR              7340
 #define IDC_FONT_COMBO           7341

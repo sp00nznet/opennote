@@ -74,6 +74,8 @@ static void FreeRuns(DocRun* run) {
     while (run) {
         DocRun* next = run->next;
         free(run->text);
+        free(run->field);
+        free(run->bookmark);
         if (run->image) {
             free(run->image->bytes);
             free(run->image);
@@ -480,6 +482,454 @@ WCHAR* Doc_GetText(const DocModel* doc) {
     return acc.buf;
 }
 
+
+// ---------------------------------------------------------------------------
+// Fields and bookmarks
+//
+// A field instruction is a little language: a keyword, arguments, and
+// switches introduced by a backslash. `PAGE`, `NUMPAGES`, `DATE \@ "d MMMM
+// yyyy"`, `REF heading1 \h`. Only the keyword and the first argument are
+// needed to answer the ones this evaluates; the rest is carried through
+// untouched, so a field it does not understand comes back out as it went in.
+// ---------------------------------------------------------------------------
+
+DocRun* Doc_AddFieldRun(DocPara* para, const WCHAR* instr, const WCHAR* text,
+                        const CharProps* props) {
+    DocRun* run = Doc_AddRun(para, text ? text : L"", -1, props);
+    if (!run) return NULL;
+
+    run->field = _wcsdup(instr ? instr : L"");
+    return run;
+}
+
+DocRun* Doc_AddBookmark(DocPara* para, const WCHAR* name, BOOL isEnd) {
+    if (!name || !name[0]) return NULL;
+
+    CharProps plain = {0};
+    if (para && para->runs) plain = para->runs->props;
+
+    DocRun* run = Doc_AddRun(para, L"", 0, &plain);
+    if (!run) return NULL;
+
+    run->bookmark = _wcsdup(name);
+    run->bookmarkEnd = isEnd;
+    return run;
+}
+
+// The instruction's first word, upper-cased, and where it ended.
+static const WCHAR* FieldKeyword(const WCHAR* instr, WCHAR* out, size_t outChars) {
+    out[0] = L'\0';
+    if (!instr) return NULL;
+
+    while (*instr == L' ' || *instr == L'\t') instr++;
+
+    size_t n = 0;
+    while (*instr && *instr != L' ' && *instr != L'\t' && n + 1 < outChars) {
+        out[n++] = (WCHAR)towupper(*instr);
+        instr++;
+    }
+    out[n] = L'\0';
+    return instr;
+}
+
+DocFieldKind Doc_FieldKind(const WCHAR* instr) {
+    if (!instr) return FIELD_NONE;
+
+    WCHAR word[32];
+    FieldKeyword(instr, word, 32);
+
+    if (!word[0])                        return FIELD_NONE;
+    if (wcscmp(word, L"PAGE") == 0)      return FIELD_PAGE;
+    if (wcscmp(word, L"NUMPAGES") == 0)  return FIELD_NUMPAGES;
+    if (wcscmp(word, L"DATE") == 0)      return FIELD_DATE;
+    if (wcscmp(word, L"CREATEDATE") == 0) return FIELD_DATE;
+    if (wcscmp(word, L"PRINTDATE") == 0) return FIELD_DATE;
+    if (wcscmp(word, L"SAVEDATE") == 0)  return FIELD_DATE;
+    if (wcscmp(word, L"TIME") == 0)      return FIELD_TIME;
+    if (wcscmp(word, L"REF") == 0)       return FIELD_REF;
+    if (wcscmp(word, L"PAGEREF") == 0)   return FIELD_PAGEREF;
+    if (wcscmp(word, L"TOC") == 0)       return FIELD_TOC;
+    return FIELD_OTHER;
+}
+
+void Doc_FieldArgument(const WCHAR* instr, WCHAR* out, size_t outChars) {
+    out[0] = L'\0';
+
+    WCHAR word[32];
+    const WCHAR* at = FieldKeyword(instr, word, 32);
+    if (!at) return;
+
+    while (*at == L' ' || *at == L'\t') at++;
+    if (*at == L'\\') return;              // a switch, so there is no argument
+
+    BOOL quoted = (*at == L'"');
+    if (quoted) at++;
+
+    size_t n = 0;
+    while (*at && n + 1 < outChars) {
+        if (quoted && *at == L'"') break;
+        if (!quoted && (*at == L' ' || *at == L'\t')) break;
+        out[n++] = *at++;
+    }
+    out[n] = L'\0';
+}
+
+void Doc_FieldPicture(const WCHAR* instr, WCHAR* out, size_t outChars) {
+    out[0] = L'\0';
+    if (!instr) return;
+
+    const WCHAR* at = wcsstr(instr, L"\\@");
+    if (!at) return;
+
+    at += 2;
+    while (*at == L' ' || *at == L'\t') at++;
+
+    BOOL quoted = (*at == L'"');
+    if (quoted) at++;
+
+    size_t n = 0;
+    while (*at && n + 1 < outChars) {
+        if (quoted && *at == L'"') break;
+        if (!quoted && (*at == L' ' || *at == L'\t')) break;
+        out[n++] = *at++;
+    }
+    out[n] = L'\0';
+}
+
+// A date picture written the way a field states it, which is close enough to
+// what Windows formats with that the picture can be passed straight through.
+// The one thing that has to be decided is which of the two formatters to ask,
+// and the tokens say: d, M and y are a date, h, m, s and t are a time.
+static void FormatDateField(const WCHAR* picture, BOOL wantTime,
+                            WCHAR* out, size_t outChars) {
+    SYSTEMTIME now;
+    GetLocalTime(&now);
+
+    BOOL hasDate = FALSE;
+    for (const WCHAR* c = picture; c && *c; c++) {
+        if (*c == L'd' || *c == L'M' || *c == L'y') { hasDate = TRUE; break; }
+    }
+
+    if (picture && picture[0] && hasDate) {
+        if (GetDateFormatEx(LOCALE_NAME_USER_DEFAULT, 0, &now, picture,
+                            out, (int)outChars, NULL)) {
+            return;
+        }
+    } else if (picture && picture[0]) {
+        if (GetTimeFormatEx(LOCALE_NAME_USER_DEFAULT, 0, &now, picture,
+                            out, (int)outChars)) {
+            return;
+        }
+    }
+
+    // No picture, or one Windows would not take: the locale's own short form.
+    if (wantTime) {
+        GetTimeFormatEx(LOCALE_NAME_USER_DEFAULT, TIME_NOSECONDS, &now, NULL,
+                        out, (int)outChars);
+    } else {
+        GetDateFormatEx(LOCALE_NAME_USER_DEFAULT, DATE_SHORTDATE, &now, NULL,
+                        out, (int)outChars, NULL);
+    }
+}
+
+// The text between a bookmark's two markers, which is what REF means.
+BOOL Doc_BookmarkText(const DocModel* doc, const WCHAR* name,
+                      WCHAR* out, size_t outChars) {
+    if (!doc || !name || !name[0] || outChars == 0) return FALSE;
+
+    out[0] = L'\0';
+    size_t n = 0;
+    BOOL inside = FALSE;
+
+    int count = Doc_CountParas(doc);
+    for (int i = 0; i < count; i++) {
+        const DocPara* para = Doc_ParaAt((DocModel*)doc, i);
+        if (!para) break;
+
+        for (const DocRun* r = para->runs; r; r = r->next) {
+            if (r->bookmark && wcscmp(r->bookmark, name) == 0) {
+                if (r->bookmarkEnd) return inside;
+                inside = TRUE;
+                continue;
+            }
+            if (!inside || RunIsHidden(r)) continue;
+
+            const WCHAR* piece = r->tab ? L"\t" : r->text;
+            for (const WCHAR* c = piece; c && *c && n + 1 < outChars; c++) {
+                out[n++] = *c;
+                out[n] = L'\0';
+            }
+        }
+
+        // A bookmark spanning paragraphs reads as one line per paragraph.
+        if (inside && n + 1 < outChars && i + 1 < count) {
+            out[n++] = L' ';
+            out[n] = L'\0';
+        }
+    }
+
+    return inside;
+}
+
+static int UpdateFieldsIn(DocModel* doc, DocPara* paras) {
+    int changed = 0;
+
+    for (DocPara* p = paras; p; p = p->next) {
+        for (DocRun* r = p->runs; r; r = r->next) {
+            if (!r->field) continue;
+
+            WCHAR value[512];
+            value[0] = L'\0';
+
+            switch (Doc_FieldKind(r->field)) {
+                case FIELD_DATE:
+                case FIELD_TIME: {
+                    WCHAR picture[128];
+                    Doc_FieldPicture(r->field, picture, 128);
+                    FormatDateField(picture,
+                                    Doc_FieldKind(r->field) == FIELD_TIME,
+                                    value, 512);
+                    break;
+                }
+                case FIELD_REF: {
+                    WCHAR name[128];
+                    Doc_FieldArgument(r->field, name, 128);
+                    if (!Doc_BookmarkText(doc, name, value, 512)) continue;
+                    break;
+                }
+                default:
+                    continue;       // the page fields, and the ones left alone
+            }
+
+            if (!value[0] || (r->text && wcscmp(r->text, value) == 0)) continue;
+
+            WCHAR* copy = _wcsdup(value);
+            if (!copy) continue;
+            free(r->text);
+            r->text = copy;
+            changed++;
+        }
+    }
+
+    return changed;
+}
+
+int Doc_UpdateFields(DocModel* doc) {
+    if (!doc) return 0;
+
+    int changed = 0;
+    for (DocBlock* b = doc->blocks; b; b = b->next) {
+        if (b->kind == BLOCK_PARA) {
+            changed += UpdateFieldsIn(doc, b->para);
+            continue;
+        }
+        for (DocRow* row = b->table.rows; row; row = row->next) {
+            for (DocCell* c = row->cells; c; c = c->next) {
+                changed += UpdateFieldsIn(doc, c->paras);
+            }
+        }
+    }
+
+    changed += UpdateFieldsIn(doc, doc->header);
+    changed += UpdateFieldsIn(doc, doc->footer);
+    for (DocNote* n = doc->notes; n; n = n->next) changed += UpdateFieldsIn(doc, n->paras);
+    return changed;
+}
+
+static BOOL PageFieldIn(const DocPara* paras) {
+    for (const DocPara* p = paras; p; p = p->next) {
+        for (const DocRun* r = p->runs; r; r = r->next) {
+            if (!r->field) continue;
+            DocFieldKind kind = Doc_FieldKind(r->field);
+            if (kind == FIELD_PAGE || kind == FIELD_NUMPAGES || kind == FIELD_PAGEREF) {
+                return TRUE;
+            }
+        }
+    }
+    return FALSE;
+}
+
+BOOL Doc_HasPageFields(const DocModel* doc) {
+    if (!doc) return FALSE;
+
+    for (const DocBlock* b = doc->blocks; b; b = b->next) {
+        if (b->kind == BLOCK_PARA) {
+            if (PageFieldIn(b->para)) return TRUE;
+            continue;
+        }
+        for (const DocRow* row = b->table.rows; row; row = row->next) {
+            for (const DocCell* c = row->cells; c; c = c->next) {
+                if (PageFieldIn(c->paras)) return TRUE;
+            }
+        }
+    }
+
+    return PageFieldIn(doc->header) || PageFieldIn(doc->footer);
+}
+
+
+// ---------------------------------------------------------------------------
+// Page numbers and a table of contents
+//
+// Both are fields rather than text. A page number written in as text is wrong
+// the moment a paragraph is added above it; a field is answered every time the
+// document is laid out, which is what makes it worth having at all.
+// ---------------------------------------------------------------------------
+
+void Doc_InsertPageNumbers(DocModel* doc) {
+    if (!doc) return;
+
+    FreeParas(doc->footer);
+    doc->footer = (DocPara*)calloc(1, sizeof(DocPara));
+    if (!doc->footer) return;
+
+    doc->footer->props = doc->defaultPara;
+    doc->footer->props.align = ALIGN_CENTER;
+    doc->footer->props.list = LIST_NONE;
+    doc->footer->props.headingLevel = 0;
+    doc->footer->props.style[0] = L'\0';
+
+    CharProps props = doc->defaultRun;
+
+    Doc_AddRun(doc->footer, L"Page ", -1, &props);
+    Doc_AddFieldRun(doc->footer, L" PAGE ", L"1", &props);
+    Doc_AddRun(doc->footer, L" of ", -1, &props);
+    Doc_AddFieldRun(doc->footer, L" NUMPAGES ", L"1", &props);
+}
+
+// A paragraph this built last time. They are replaced rather than added to, so
+// that building a table of contents twice leaves one.
+static BOOL IsTocEntry(const DocPara* para) {
+    return para && (_wcsnicmp(para->props.style, L"TOC", 3) == 0);
+}
+
+static void RemoveExistingToc(DocModel* doc) {
+    while (doc->blocks && doc->blocks->kind == BLOCK_PARA &&
+           IsTocEntry(doc->blocks->para)) {
+        DocPara* para = doc->blocks->para;
+        DocPara* rest = para->next;
+
+        para->next = NULL;
+        FreeParas(para);
+
+        if (rest) {
+            doc->blocks->para = rest;
+            continue;
+        }
+
+        DocBlock* dead = doc->blocks;
+        doc->blocks = dead->next;
+        free(dead);
+    }
+}
+
+int Doc_InsertTableOfContents(DocModel* doc) {
+    if (!doc) return 0;
+
+    RemoveExistingToc(doc);
+
+    // The headings, in document order, each given a bookmark to point at.
+    // Word names them `_Toc` and a number, and so does this: a reader that
+    // knows the convention sees a table of contents rather than a list.
+    struct { DocPara* para; int level; WCHAR mark[32]; } entries[256];
+    int count = 0;
+
+    int paras = Doc_CountParas(doc);
+    for (int i = 0; i < paras && count < 256; i++) {
+        DocPara* para = Doc_ParaAt(doc, i);
+        if (!para) break;
+
+        int level = para->props.headingLevel;
+        if (level < 1 || level > 3) continue;
+
+        // A heading with no words in it is a blank line with a style on it.
+        unsigned len = 0;
+        WCHAR* text = Doc_ParaText(para, &len);
+        BOOL empty = !text || !len;
+        free(text);
+        if (empty) continue;
+
+        entries[count].para = para;
+        entries[count].level = level;
+        swprintf_s(entries[count].mark, 32, L"_Toc%d", count + 1);
+
+        // Bookmark the heading, unless this already did.
+        BOOL marked = FALSE;
+        for (DocRun* r = para->runs; r; r = r->next) {
+            if (r->bookmark && wcscmp(r->bookmark, entries[count].mark) == 0) marked = TRUE;
+        }
+        if (!marked) {
+            DocRun* start = Doc_AddBookmark(para, entries[count].mark, FALSE);
+            if (start) {
+                // The marker belongs at the front of the heading, which is
+                // where the page number is measured from.
+                DocRun* prev = NULL;
+                for (DocRun* r = para->runs; r && r != start; r = r->next) prev = r;
+                if (prev) {
+                    prev->next = start->next;
+                    start->next = para->runs;
+                    para->runs = start;
+                }
+            }
+            Doc_AddBookmark(para, entries[count].mark, TRUE);
+        }
+
+        count++;
+    }
+
+    if (count == 0) return 0;
+
+    // Built from the bottom up, because each one goes in front of the first
+    // paragraph the document had.
+    DocPara* first = Doc_ParaAt(doc, 0);
+    CharProps props = doc->defaultRun;
+
+    for (int i = count - 1; i >= 0; i--) {
+        DocPara* entry = Doc_InsertParaBefore(doc, first);
+        if (!entry) break;
+
+        entry->props = doc->defaultPara;
+        entry->props.indentLeft = (entries[i].level - 1) * 360;
+        swprintf_s(entry->props.style, 64, L"TOC%d", entries[i].level);
+
+        unsigned len = 0;
+        WCHAR* text = Doc_ParaText(entries[i].para, &len);
+        if (text) {
+            Doc_AddRun(entry, text, (int)len, &props);
+            free(text);
+        }
+
+        // ponytail: the page number sits at the next default tab stop rather
+        // than against the right margin with a dotted leader. A leader is a
+        // per-paragraph tab stop -- `w:tabs` -- which the model does not carry
+        // yet; when it does, this becomes one right-aligned stop.
+        DocRun* tab = Doc_AddRun(entry, L"", 0, &props);
+        if (tab) tab->tab = TRUE;
+
+        WCHAR instr[64];
+        swprintf_s(instr, 64, L" PAGEREF %s \\h ", entries[i].mark);
+        Doc_AddFieldRun(entry, instr, L"1", &props);
+
+        first = entry;
+    }
+
+    // The heading above it, which is also how the block is recognised again.
+    DocPara* title = Doc_InsertParaBefore(doc, first);
+    if (title) {
+        title->props = doc->defaultPara;
+        title->props.headingLevel = 1;
+        title->props.spaceAfter = 240;
+        wcscpy_s(title->props.style, 64, L"TOCHeading");
+
+        CharProps heading = props;
+        heading.bold = TRUE;
+        if (!heading.halfPoints) heading.halfPoints = 32;
+        Doc_AddRun(title, L"Contents", -1, &heading);
+    }
+
+    return count;
+}
+
 // ---------------------------------------------------------------------------
 // Tracked changes
 //
@@ -498,6 +948,8 @@ static void ResolveRuns(DocPara* para, DocRevision drop) {
             if (prev) prev->next = next;
             else      para->runs = next;
             free(run->text);
+            free(run->field);
+            free(run->bookmark);
             if (run->image) {
                 free(run->image->bytes);
                 free(run->image);
@@ -665,6 +1117,7 @@ typedef struct {
     WCHAR        text[MAX_FLAT];
     CharProps    props[MAX_FLAT];
     RevisionMark rev[MAX_FLAT];
+    const WCHAR* field[MAX_FLAT];   // the instruction, when this character is a field's result
     int          len;
 } FlatPara;
 
@@ -678,6 +1131,7 @@ static void Flatten(const DocPara* para, FlatPara* out) {
                                 : (WCHAR)DOC_IMAGE_CHAR;
             out->props[out->len] = r->props;
             out->rev[out->len] = r->rev;
+            out->field[out->len] = r->field;
             out->len++;
             continue;
         }
@@ -685,6 +1139,7 @@ static void Flatten(const DocPara* para, FlatPara* out) {
             out->text[out->len] = *c;
             out->props[out->len] = r->props;
             out->rev[out->len] = r->rev;
+            out->field[out->len] = r->field;
             out->len++;
         }
     }
@@ -751,6 +1206,39 @@ static void CompareParas(const DocPara* pa, const DocPara* pb, int idx, DocDiff*
         if (fa.rev[i].kind != REV_NONE && fa.rev[i].author[0]) {
             CMP(wcscmp(fa.rev[i].author, fb.rev[i].author) == 0,
                 "para %d char %d: revision author changed", idx, i);
+        }
+
+        // A field that comes back as its own result and nothing else has
+        // become plain text: it will never answer again.
+        if (fa.field[i]) {
+            CMP(fb.field[i] && wcscmp(fa.field[i], fb.field[i]) == 0,
+                "para %d char %d: field instruction lost", idx, i);
+        }
+    }
+
+    // Bookmarks are markers rather than characters, so they are compared as
+    // their own sequence: the names, in the order they appear.
+    {
+        const DocRun* ra = pa->runs;
+        const DocRun* rb = pb->runs;
+
+        for (;;) {
+            while (ra && !ra->bookmark) ra = ra->next;
+            while (rb && !rb->bookmark) rb = rb->next;
+            if (!ra && !rb) break;
+
+            d->compared++;
+            if (!ra || !rb) {
+                DiffNote(d, "para %d: a bookmark was lost", idx);
+                break;
+            }
+            if (wcscmp(ra->bookmark, rb->bookmark) != 0 ||
+                ra->bookmarkEnd != rb->bookmarkEnd) {
+                DiffNote(d, "para %d: bookmark \"%ls\" changed", idx, ra->bookmark);
+            }
+
+            ra = ra->next;
+            rb = rb->next;
         }
     }
 }
@@ -906,7 +1394,7 @@ void Doc_Compare(const DocModel* a, const DocModel* b, DocDiff* d) {
 // round trip without occupying a character -- which is why it is a predicate
 // rather than a test against one field.
 static BOOL RunIsHidden(const DocRun* run) {
-    return run->rev.kind == REV_DELETED;
+    return run->rev.kind == REV_DELETED || run->bookmark != NULL;
 }
 
 BOOL Doc_RunIsHidden(const DocRun* run) {
@@ -1463,6 +1951,9 @@ static BOOL CloneParas(const DocPara* src, DocPara** dest) {
             rc->noteId = r->noteId;
             rc->noteIsEnd = r->noteIsEnd;
             rc->rev = r->rev;
+            rc->bookmarkEnd = r->bookmarkEnd;
+            if (r->field)    rc->field = _wcsdup(r->field);
+            if (r->bookmark) rc->bookmark = _wcsdup(r->bookmark);
 
             if (r->image) {
                 rc->image = (DocImage*)calloc(1, sizeof(DocImage));
@@ -2077,6 +2568,57 @@ BOOL Doc_SelfTest(char* failure, size_t failureSize) {
             FAIL("rejecting did not put the deleted text back");
         }
         free(text);
+    }
+
+    // --- a table of contents, built from the headings ---
+    {
+        Doc_Free(a);
+        Doc_Free(b);
+        b = NULL;
+        a = Doc_New();
+        if (!a) FAIL("could not allocate a model");
+
+        CharProps flat = {0};
+        for (int i = 0; i < 3; i++) {
+            DocPara* h = Doc_AddPara(a);
+            h->props.headingLevel = (i == 1) ? 2 : 1;
+
+            WCHAR label[32];
+            swprintf_s(label, 32, L"Heading %d", i + 1);
+            Doc_AddRun(h, label, -1, &flat);
+
+            DocPara* body = Doc_AddPara(a);
+            Doc_AddRun(body, L"Body text under it.", -1, &flat);
+        }
+
+        int before = Doc_CountParas(a);
+        if (Doc_InsertTableOfContents(a) != 3) FAIL("the table of contents missed a heading");
+
+        // A title, and one entry per heading.
+        if (Doc_CountParas(a) != before + 4) FAIL("the table of contents is the wrong size");
+
+        WCHAR* title = Doc_ParaText(Doc_ParaAt(a, 0), NULL);
+        if (!title || wcscmp(title, L"Contents") != 0) {
+            free(title);
+            FAIL("the table of contents has no heading of its own");
+        }
+        free(title);
+
+        // An entry points at its heading rather than stating a number, which
+        // is what makes the number right again after the document changes.
+        BOOL pointed = FALSE;
+        for (DocRun* r = Doc_ParaAt(a, 1)->runs; r; r = r->next) {
+            if (r->field && Doc_FieldKind(r->field) == FIELD_PAGEREF) pointed = TRUE;
+        }
+        if (!pointed) FAIL("a table of contents entry has no page reference");
+
+        // Building it twice leaves one.
+        if (Doc_InsertTableOfContents(a) != 3) FAIL("rebuilding the table of contents failed");
+        if (Doc_CountParas(a) != before + 4) FAIL("rebuilding left the old one behind");
+
+        Doc_InsertPageNumbers(a);
+        if (!a->footer) FAIL("page numbers did not reach the footer");
+        if (!Doc_HasPageFields(a)) FAIL("the page number is not a field");
     }
 
     Doc_Free(a);

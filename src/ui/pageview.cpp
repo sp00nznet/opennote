@@ -297,7 +297,7 @@ static void EnsureCaretVisible(HWND hwnd, PageViewState* st);
 // when a document gets big enough for the typing to lag.
 static void Relayout(HWND hwnd, PageViewState* st) {
     Layout_Free(st->layout);
-    st->layout = Layout_Build(st->doc, L"Calibri", 11.0f);
+    st->layout = Layout_BuildUpdating(st->doc, L"Calibri", 11.0f);
 
     UpdateScrollRange(hwnd, st);
     SetTitle(hwnd, st, NULL);
@@ -1575,7 +1575,7 @@ extern "C" HWND PageView_Create(HWND hParent, HWND hRichEdit, const DocModel* so
         }
     }
 
-    st->layout = Layout_Build(doc, L"Calibri", 11.0f);
+    st->layout = Layout_BuildUpdating(doc, L"Calibri", 11.0f);
     if (!st->layout) {
         if (st->rulerFont) st->rulerFont->Release();
         if (st->dwrite) st->dwrite->Release();

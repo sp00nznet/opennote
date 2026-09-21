@@ -29,6 +29,20 @@ extern "C" {
 LayoutResult* Layout_Build(const DocModel* doc, const WCHAR* defaultFont,
                            float defaultSizePt);
 
+// The same, for a document whose fields have to be answered: the date, the
+// time, a cross-reference, a page number. Laying the document out is what
+// reveals where everything landed, so this lays it out, writes the answers
+// into the model and lays it out once more when they changed the text.
+//
+// Anything that shows or prints a document uses this; Layout_Build stays the
+// one that does not touch what it is given.
+LayoutResult* Layout_BuildUpdating(DocModel* doc, const WCHAR* defaultFont,
+                                   float defaultSizePt);
+
+// Write the answers to page-dependent fields into the model. Returns how many
+// changed, which is how a caller knows whether to lay it out again.
+int Layout_UpdateFields(const LayoutResult* r, DocModel* doc);
+
 void Layout_Free(LayoutResult* result);
 
 int   Layout_PageCount(const LayoutResult* r);

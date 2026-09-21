@@ -109,7 +109,7 @@ static int RunLayoutReport(int argc, WCHAR** argv) {
         return 1;
     }
 
-    LayoutResult* r = Layout_Build(doc, L"Calibri", 11.0f);
+    LayoutResult* r = Layout_BuildUpdating(doc, L"Calibri", 11.0f);
     if (!r) {
         wprintf(L"FAILED: the document could not be laid out\n");
         Doc_Free(doc);
@@ -321,7 +321,7 @@ static int RunDocxCheck(int argc, WCHAR** argv) {
         {
             DocModel* lm = Docx_ReadToModel(docPath);
             if (lm) {
-                LayoutResult* lr = Layout_Build(lm, L"Calibri", 11.0f);
+                LayoutResult* lr = Layout_BuildUpdating(lm, L"Calibri", 11.0f);
 
                 checks++;
                 if (!lr) {

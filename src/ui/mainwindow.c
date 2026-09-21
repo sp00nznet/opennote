@@ -938,6 +938,102 @@ static void FlushPageLayout(void) {
     if (tab && tab->hPageView) PageView_Apply(tab->hPageView);
 }
 
+// What the Insert menu's field commands have in common: the document is
+// captured, something is added to the model, and the views are put back in
+// step with it.
+//
+// The model is the only place any of this can live. A page number in a footer,
+// a table of contents that knows what page a heading is on -- the control has
+// nowhere to keep either, which is why they are added here and shown by the
+// layout engine.
+typedef enum { INSERT_PAGE_NUMBERS, INSERT_TOC, INSERT_DATE } InsertKind;
+
+static void InsertField(HWND hwnd, InsertKind kind) {
+    Tab* tab = App_GetActiveTab();
+    if (!tab || !tab->document || !tab->hEditor) return;
+
+    if (!Editor_IsRich(tab->hEditor)) {
+        MessageBoxW(hwnd,
+            L"This belongs to a rich text document.\n\n"
+            L"Save the file as .rtf or .docx first, or start one with "
+            L"File > New Rich Text Document.",
+            APP_NAME, MB_ICONINFORMATION);
+        return;
+    }
+
+    FlushPageLayout();
+
+    Document* doc = tab->document;
+    DocModel* model = DocView_CaptureWith(tab->hEditor, doc->source);
+    if (!model) return;
+
+    WCHAR message[128] = L"";
+    BOOL textChanged = FALSE;
+
+    switch (kind) {
+        case INSERT_PAGE_NUMBERS:
+            Doc_InsertPageNumbers(model);
+            wcscpy_s(message, 128, L"Page numbers added to the footer");
+            break;
+
+        case INSERT_TOC: {
+            int entries = Doc_InsertTableOfContents(model);
+            if (entries == 0) {
+                Doc_Free(model);
+                MessageBoxW(hwnd,
+                    L"A table of contents is built from the document's headings, "
+                    L"and this one has none.\n\n"
+                    L"Give the headings a heading style first.",
+                    APP_NAME, MB_ICONINFORMATION);
+                return;
+            }
+            swprintf_s(message, 128, L"Table of contents: %d entr%s",
+                       entries, entries == 1 ? L"y" : L"ies");
+            textChanged = TRUE;
+            break;
+        }
+
+        case INSERT_DATE: {
+            // At the end, which is where a letter's date goes and the only
+            // place the control can be asked about without a caret in the
+            // model. The page view inserts where the caret is.
+            DocPara* last = Doc_ParaAt(model, Doc_CountParas(model) - 1);
+            if (!last) {
+                Doc_Free(model);
+                return;
+            }
+            CharProps props = model->defaultRun;
+            Doc_AddFieldRun(last, L" DATE \\@ \"d MMMM yyyy\" ", L"", &props);
+            Doc_UpdateFields(model);
+            wcscpy_s(message, 128, L"Date field added");
+            textChanged = TRUE;
+            break;
+        }
+    }
+
+    if (textChanged) {
+        char* rtf = DocRtf_Emit(model);
+        if (rtf) {
+            Rich_SetRtf(tab->hEditor, rtf);
+            free(rtf);
+        }
+    }
+
+    Doc_Free(doc->source);
+    doc->source = model;
+    doc->modified = TRUE;
+
+    if (tab->hPageView) {
+        TogglePageLayout(hwnd);
+        TogglePageLayout(hwnd);
+    }
+
+    TabControl_UpdateTabTitle(tab->index);
+    MainWindow_UpdateTitle();
+    StatusBar_UpdateModified(TRUE);
+    StatusBar_SetMessage(message);
+}
+
 // Accept or reject every tracked change in the document.
 //
 // The document is captured first, exactly as saving captures it, so anything
@@ -1319,6 +1415,19 @@ void MainWindow_OnCommand(HWND hwnd, int id, HWND hwndCtl, UINT codeNotify) {
         // Settings menu
         case IDM_SETTINGS_DEFAULTS:
             Dialogs_Defaults(hwnd);
+            break;
+
+        // Insert menu
+        case IDM_INSERT_PAGE_NUMBERS:
+            InsertField(hwnd, INSERT_PAGE_NUMBERS);
+            break;
+
+        case IDM_INSERT_TOC:
+            InsertField(hwnd, INSERT_TOC);
+            break;
+
+        case IDM_INSERT_DATE_FIELD:
+            InsertField(hwnd, INSERT_DATE);
             break;
 
         // Review menu

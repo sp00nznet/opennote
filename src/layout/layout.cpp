@@ -96,7 +96,34 @@ static void FlatFree(FlatText* f) {
     memset(f, 0, sizeof(*f));
 }
 
-static BOOL FlattenPara(const DocPara* para, FlatText* out) {
+// What a page-dependent field says. `page` is 1-based; zero means "not known
+// here", which is the body text's case: a field there has its answer written
+// into the model between passes, so the laid-out text and the model agree
+// about how many characters there are and a caret lands where it was clicked.
+struct FieldEnv {
+    int page;
+    int pageCount;
+};
+
+static BOOL FieldTextFor(const DocRun* run, const FieldEnv* env,
+                         WCHAR* out, size_t outChars) {
+    if (!run->field || !env) return FALSE;
+
+    switch (Doc_FieldKind(run->field)) {
+        case FIELD_PAGE:
+            if (env->page <= 0) return FALSE;
+            swprintf_s(out, outChars, L"%d", env->page);
+            return TRUE;
+        case FIELD_NUMPAGES:
+            if (env->pageCount <= 0) return FALSE;
+            swprintf_s(out, outChars, L"%d", env->pageCount);
+            return TRUE;
+        default:
+            return FALSE;
+    }
+}
+
+static BOOL FlattenPara(const DocPara* para, FlatText* out, const FieldEnv* env) {
     memset(out, 0, sizeof(*out));
 
     size_t cap = 256, len = 0;
@@ -116,11 +143,20 @@ static BOOL FlattenPara(const DocPara* para, FlatText* out) {
         WCHAR one[2];
 
         // Content the document carries without showing it -- a tracked
-        // deletion -- is not laid out and takes up no offsets, which is what
-        // the model says about it everywhere else.
+        // deletion, a bookmark marker -- is not laid out and takes up no
+        // offsets, which is what the model says about it everywhere else.
         if (Doc_RunIsHidden(r)) continue;
 
-        if (r->image) {
+        // A page number in a header is a different number on every page, so
+        // the same paragraph flattens to different text each time it is laid
+        // out. Everywhere else the model already holds the answer.
+        WCHAR fieldText[64];
+
+        if (FieldTextFor(r, env, fieldText, 64)) {
+            piece = fieldText;
+            pieceLen = wcslen(fieldText);
+            if (!pieceLen) continue;
+        } else if (r->image) {
             // A picture is one character wide in the text, so every offset
             // either side of it still means what it meant in the model. A
             // space is what goes there: it draws nothing, and the picture is
@@ -483,6 +519,11 @@ struct Flow {
     // at the bottom of it. The space they need comes out of the page before
     // the rest of the text is allowed to use it.
     const DocModel*  doc;
+
+    // Set while the margins are being laid out, where the page number is
+    // known and different on every page. NULL everywhere else.
+    const FieldEnv*  fields;
+
     const DocNote*   pending[32];
     int              pendingCount;
     float            pendingHeight;
@@ -617,7 +658,7 @@ static float MeasureNote(Flow* f, const DocNote* note) {
 
     for (const DocPara* p = note->paras; p; p = p->next) {
         FlatText flat;
-        if (!FlattenPara(p, &flat)) continue;
+        if (!FlattenPara(p, &flat, f->fields)) continue;
 
         IDWriteTextLayout* layout = MakeLayout(&f->ctx, flat.text, flat.len,
                                                flat.spans, flat.spanCount,
@@ -745,7 +786,7 @@ static void Unplace(Flow* f, int textsBefore, int imagesBefore) {
 static void PlacePara(Flow* f, const DocPara* para, float x, float width,
                       BOOL isCellText) {
     FlatText flat;
-    if (!FlattenPara(para, &flat)) return;
+    if (!FlattenPara(para, &flat, f->fields)) return;
 
     // A page break before this paragraph, whether the document said so in the
     // paragraph's properties or put a break run at the front of it. Both mean
@@ -922,7 +963,7 @@ static float MeasureCell(Flow* f, const DocCell* cell, float width) {
 
     for (const DocPara* p = cell->paras; p; p = p->next) {
         FlatText flat;
-        if (!FlattenPara(p, &flat)) continue;
+        if (!FlattenPara(p, &flat, f->fields)) continue;
 
         IDWriteTextLayout* layout = MakeLayout(&f->ctx, flat.text, flat.len,
                                                flat.spans, flat.spanCount,
@@ -1037,6 +1078,9 @@ static void PlaceMargins(Flow* f, const DocModel* doc) {
 
     int pages = r->pageCount;
     for (int p = 0; p < pages; p++) {
+        FieldEnv env = { p + 1, pages };
+        f->fields = &env;
+
         f->page = &r->pages[p];
         f->columnLeft = r->marginLeft;
         f->contentWidth = width;
@@ -1069,6 +1113,8 @@ static void PlaceMargins(Flow* f, const DocModel* doc) {
         for (int i = before; i < f->page->textCount; i++) {
             f->page->texts[i].isMargin = TRUE;
         }
+
+        f->fields = NULL;
     }
 }
 
@@ -1166,6 +1212,139 @@ extern "C" LayoutResult* Layout_Build(const DocModel* doc, const WCHAR* defaultF
     PlaceMargins(&f, doc);
 
     ctx.baseFormat->Release();
+    return r;
+}
+
+
+// ---------------------------------------------------------------------------
+// Fields whose answer is a page number
+//
+// A field in the body has its result written into the model rather than
+// substituted at draw time, because the model's text is what every offset is
+// measured against: a caret, a selection, an edit. Laying the document out is
+// what reveals the answer, so this runs between two passes -- and one extra
+// pass is all anybody does, Word included, since a page number that changes
+// the pagination that produced it has no fixed point to find.
+// ---------------------------------------------------------------------------
+
+static int PageOfPara(const LayoutResult* r, const DocPara* para, unsigned offset) {
+    for (int p = 0; p < r->pageCount; p++) {
+        const LaidPage* page = &r->pages[p];
+        for (int i = 0; i < page->textCount; i++) {
+            const LaidText* t = &page->texts[i];
+            if (t->isMarker || t->isMargin || t->para != para) continue;
+            if (offset < t->textStart) continue;
+            if (offset > t->textStart + t->textLen) continue;
+            return p + 1;
+        }
+    }
+    return 0;
+}
+
+// Where a bookmark's start marker sits, as a page number.
+static int PageOfBookmark(const LayoutResult* r, const DocModel* doc, const WCHAR* name) {
+    int count = Doc_CountParas(doc);
+
+    for (int i = 0; i < count; i++) {
+        const DocPara* para = Doc_ParaAt((DocModel*)doc, i);
+        if (!para) break;
+
+        unsigned at = 0;
+        for (const DocRun* run = para->runs; run; run = run->next) {
+            if (run->bookmark && !run->bookmarkEnd && wcscmp(run->bookmark, name) == 0) {
+                return PageOfPara(r, para, at);
+            }
+            at += Doc_RunLength(run);
+        }
+    }
+    return 0;
+}
+
+static int UpdatePageFieldsIn(const LayoutResult* r, DocModel* doc, DocPara* paras) {
+    int changed = 0;
+
+    for (DocPara* para = paras; para; para = para->next) {
+        unsigned at = 0;
+
+        for (DocRun* run = para->runs; run; run = run->next) {
+            unsigned start = at;
+            at += Doc_RunLength(run);
+
+            if (!run->field) continue;
+
+            WCHAR value[64];
+            value[0] = L'\0';
+
+            switch (Doc_FieldKind(run->field)) {
+                case FIELD_PAGE: {
+                    int page = PageOfPara(r, para, start);
+                    if (page > 0) swprintf_s(value, 64, L"%d", page);
+                    break;
+                }
+                case FIELD_NUMPAGES:
+                    swprintf_s(value, 64, L"%d", r->pageCount);
+                    break;
+                case FIELD_PAGEREF: {
+                    WCHAR name[128];
+                    Doc_FieldArgument(run->field, name, 128);
+                    int page = PageOfBookmark(r, doc, name);
+                    if (page > 0) swprintf_s(value, 64, L"%d", page);
+                    break;
+                }
+                default:
+                    break;
+            }
+
+            if (!value[0] || (run->text && wcscmp(run->text, value) == 0)) continue;
+
+            WCHAR* copy = _wcsdup(value);
+            if (!copy) continue;
+            free(run->text);
+            run->text = copy;
+            changed++;
+        }
+    }
+
+    return changed;
+}
+
+extern "C" int Layout_UpdateFields(const LayoutResult* r, DocModel* doc) {
+    if (!r || !doc) return 0;
+
+    int changed = 0;
+    for (DocBlock* b = doc->blocks; b; b = b->next) {
+        if (b->kind == BLOCK_PARA) {
+            changed += UpdatePageFieldsIn(r, doc, b->para);
+            continue;
+        }
+        for (DocRow* row = b->table.rows; row; row = row->next) {
+            for (DocCell* c = row->cells; c; c = c->next) {
+                changed += UpdatePageFieldsIn(r, doc, c->paras);
+            }
+        }
+    }
+
+    // The header and the footer are not here: the same paragraph is drawn on
+    // every page with a different number on it, so their fields are answered
+    // as they are laid out rather than cached in the model.
+    return changed;
+}
+
+extern "C" LayoutResult* Layout_BuildUpdating(DocModel* doc, const WCHAR* defaultFont,
+                                              float defaultSizePt) {
+    if (!doc) return NULL;
+
+    // The date, the time and anything pointing at a bookmark can be answered
+    // before a single line is measured.
+    Doc_UpdateFields(doc);
+
+    LayoutResult* r = Layout_Build(doc, defaultFont, defaultSizePt);
+    if (!r || !Doc_HasPageFields(doc)) return r;
+
+    if (Layout_UpdateFields(r, doc) > 0) {
+        Layout_Free(r);
+        r = Layout_Build(doc, defaultFont, defaultSizePt);
+    }
     return r;
 }
 
@@ -2052,6 +2231,93 @@ extern "C" BOOL Layout_SelfTest(char* failure, size_t failureSize) {
         if (Layout_PageContentBottom(r, notePage) > noteY) {
             FAIL("the page's text ran into its own footnote");
         }
+
+        Layout_Free(r); r = NULL;
+        Doc_Free(doc); doc = NULL;
+    }
+
+    // --- fields are answered by laying the document out -------------------
+    //
+    // A page number is the one property of a document that cannot be known
+    // before it is measured, which is why a field is worth having at all.
+    {
+        doc = Doc_New();
+        if (!doc) FAIL("could not allocate a model");
+
+        for (int i = 0; i < 300; i++) {
+            AddTextPara(doc, L"Body text, enough of it that the document runs to "
+                             L"several pages and a page number means something.", &plain);
+        }
+
+        // On a page well past the first: what page am I on, and of how many.
+        DocPara* marker = Doc_AddPara(doc);
+        DocRun* pageField = Doc_AddFieldRun(marker, L" PAGE ", L"1", &plain);
+        Doc_AddRun(marker, L" of ", -1, &plain);
+        DocRun* countField = Doc_AddFieldRun(marker, L" NUMPAGES ", L"1", &plain);
+
+        r = Layout_BuildUpdating(doc, L"Calibri", 11.0f);
+        if (!r) FAIL("Layout_BuildUpdating failed");
+
+        int pages = Layout_PageCount(r);
+        if (pages < 2) FAIL("the field document did not paginate");
+
+        WCHAR expected[16];
+        swprintf_s(expected, 16, L"%d", pages);
+        if (!countField->text || wcscmp(countField->text, expected) != 0) {
+            FAIL("NUMPAGES did not come out as the number of pages");
+        }
+
+        // The PAGE field is in the last paragraph, so it is on the last page.
+        if (!pageField->text || wcscmp(pageField->text, expected) != 0) {
+            FAIL("PAGE did not come out as the page it landed on");
+        }
+
+        Layout_Free(r); r = NULL;
+        Doc_Free(doc); doc = NULL;
+    }
+
+    // --- a page number in a footer is a different number on every page ----
+    {
+        doc = Doc_New();
+        if (!doc) FAIL("could not allocate a model");
+
+        doc->footer = (DocPara*)calloc(1, sizeof(DocPara));
+        if (!doc->footer) FAIL("could not allocate a footer");
+        Doc_AddFieldRun(doc->footer, L" PAGE ", L"1", &plain);
+
+        for (int i = 0; i < 900; i++) {
+            AddTextPara(doc, L"Body text, enough of it to reach double figures "
+                             L"so the footer has to widen.", &plain);
+        }
+
+        r = Layout_BuildUpdating(doc, L"Calibri", 11.0f);
+        if (!r) FAIL("Layout_BuildUpdating failed with a footer field");
+
+        int pages = Layout_PageCount(r);
+        if (pages < 10) FAIL("the footer document did not reach ten pages");
+
+        // "1" on the first page and two digits on the tenth: the same
+        // paragraph, laid out with different text, which is the whole point.
+        // The piece's own width is the column it was given, so the text has
+        // to be measured rather than the box it went in.
+        float first = 0.0f, tenth = 0.0f;
+        for (int i = 0; i < r->pages[0].textCount; i++) {
+            const LaidText* t = &r->pages[0].texts[i];
+            if (!t->isMargin || !t->layout) continue;
+            DWRITE_TEXT_METRICS m = {};
+            t->layout->GetMetrics(&m);
+            first = m.widthIncludingTrailingWhitespace;
+        }
+        for (int i = 0; i < r->pages[9].textCount; i++) {
+            const LaidText* t = &r->pages[9].texts[i];
+            if (!t->isMargin || !t->layout) continue;
+            DWRITE_TEXT_METRICS m = {};
+            t->layout->GetMetrics(&m);
+            tenth = m.widthIncludingTrailingWhitespace;
+        }
+
+        if (first <= 0.0f || tenth <= 0.0f) FAIL("the footer was not placed on every page");
+        if (tenth <= first) FAIL("the footer showed the same page number on every page");
 
         Layout_Free(r); r = NULL;
         Doc_Free(doc); doc = NULL;

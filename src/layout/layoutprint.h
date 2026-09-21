@@ -19,7 +19,7 @@
 // a printer DC: `ID2D1DCRenderTarget::BindDC` rejects one outright. Its
 // printing path is `ID2D1PrintControl`, which addresses the printer by name
 // and keeps the output vector -- text in the PDF stays text.
-BOOL LayoutPrint_ToPrinter(const DocModel* doc, const WCHAR* printerName,
+BOOL LayoutPrint_ToPrinter(DocModel* doc, const WCHAR* printerName,
                            const WCHAR* docName, const WCHAR* outputFile,
                            int* pagesOut);
 

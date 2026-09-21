@@ -800,6 +800,22 @@ typedef struct {
     // here while their children go past and stamped onto every run inside.
     RevisionMark rev;
     int          revDepth;      // nesting, because an insertion can be deleted
+
+    // Fields, which come in two spellings. `w:fldSimple` states the
+    // instruction as an attribute and holds the result. A complex field is
+    // three markers in the run stream -- begin, separate, end -- with the
+    // instruction between the first two and the result between the last two,
+    // which is what Word writes whenever the field is longer than a word.
+    WCHAR field[512];           // the instruction currently in force
+    WCHAR instr[512];           // collected between `begin` and `separate`
+    BOOL  inInstruction;        // the text arriving is instruction, not content
+    BOOL  inFieldResult;
+    int   fieldSimpleDepth;
+
+    // Bookmarks are numbered in the file and named only at their start, so
+    // the end has to be matched back to a name.
+    struct { int id; WCHAR name[128]; } bookmarks[64];
+    int   bookmarkCount;
 } Build;
 
 static DocPara* NewParagraph(Build* b) {
@@ -1083,6 +1099,56 @@ static BOOL BuildModel(IStream* stream, DocModel* doc, const NumTable* numbering
                 }
             }
 
+            // --- fields and bookmarks ---
+            else if (NameIs(local, len, L"fldSimple")) {
+                GetAttr(reader, L"instr", b.field, 512);
+                b.inFieldResult = TRUE;
+                if (!empty) b.fieldSimpleDepth++;
+                else        b.field[0] = L'\0';
+            } else if (NameIs(local, len, L"fldChar")) {
+                WCHAR type[16];
+                if (GetAttr(reader, L"fldCharType", type, 16)) {
+                    if (_wcsicmp(type, L"begin") == 0) {
+                        b.instr[0] = L'\0';
+                        b.field[0] = L'\0';
+                        b.inInstruction = TRUE;
+                        b.inFieldResult = FALSE;
+                    } else if (_wcsicmp(type, L"separate") == 0) {
+                        wcsncpy_s(b.field, 512, b.instr, _TRUNCATE);
+                        b.inInstruction = FALSE;
+                        b.inFieldResult = TRUE;
+                    } else if (_wcsicmp(type, L"end") == 0) {
+                        b.inInstruction = FALSE;
+                        b.inFieldResult = FALSE;
+                        b.field[0] = L'\0';
+                    }
+                }
+            } else if (NameIs(local, len, L"instrText")) {
+                b.inText = TRUE;
+            } else if (NameIs(local, len, L"bookmarkStart")) {
+                int id = AttrInt(reader, L"id", -1);
+                WCHAR name[128];
+                if (GetAttr(reader, L"name", name, 128) && b.para) {
+                    // `_GoBack` is Word's note to itself about where the
+                    // cursor was, and means nothing to anybody else.
+                    if (wcscmp(name, L"_GoBack") != 0) {
+                        Doc_AddBookmark(b.para, name, FALSE);
+                        if (b.bookmarkCount < 64) {
+                            b.bookmarks[b.bookmarkCount].id = id;
+                            wcsncpy_s(b.bookmarks[b.bookmarkCount].name, 128, name, _TRUNCATE);
+                            b.bookmarkCount++;
+                        }
+                    }
+                }
+            } else if (NameIs(local, len, L"bookmarkEnd")) {
+                int id = AttrInt(reader, L"id", -1);
+                for (int i = 0; i < b.bookmarkCount && b.para; i++) {
+                    if (b.bookmarks[i].id != id) continue;
+                    Doc_AddBookmark(b.para, b.bookmarks[i].name, TRUE);
+                    break;
+                }
+            }
+
             // --- content ---
             else if (NameIs(local, len, L"t") || NameIs(local, len, L"delText")) {
                 b.inText = TRUE;
@@ -1149,8 +1215,18 @@ static BOOL BuildModel(IStream* stream, DocModel* doc, const NumTable* numbering
             const WCHAR* val = NULL;
             UINT vlen = 0;
             if (SUCCEEDED(IXmlReader_GetValue(reader, &val, &vlen)) && vlen) {
+                // A field's instruction is not document text: it is collected
+                // until the field says where its result begins.
+                if (b.inInstruction) {
+                    wcsncat_s(b.instr, 512, val, vlen);
+                    continue;
+                }
+
                 DocRun* r = Doc_AddRun(b.para, val, (int)vlen, &b.run);
-                if (r) r->rev = b.rev;
+                if (r) {
+                    r->rev = b.rev;
+                    if (b.field[0]) r->field = _wcsdup(b.field);
+                }
             }
 
         } else if (nt == XmlNodeType_EndElement) {
@@ -1178,7 +1254,15 @@ static BOOL BuildModel(IStream* stream, DocModel* doc, const NumTable* numbering
                 b.inNumPr = FALSE;
             }
             else if (NameIs(local, len, L"t") ||
-                     NameIs(local, len, L"delText"))     b.inText = FALSE;
+                     NameIs(local, len, L"delText") ||
+                     NameIs(local, len, L"instrText"))   b.inText = FALSE;
+            else if (NameIs(local, len, L"fldSimple")) {
+                if (b.fieldSimpleDepth > 0) b.fieldSimpleDepth--;
+                if (b.fieldSimpleDepth == 0) {
+                    b.inFieldResult = FALSE;
+                    b.field[0] = L'\0';
+                }
+            }
             else if (NameIs(local, len, L"pPr"))     b.inParaProps = FALSE;
             else if (NameIs(local, len, L"rPr"))     b.inRunProps = FALSE;
             else if (NameIs(local, len, L"tblGrid")) b.inTblGrid = FALSE;
@@ -1601,6 +1685,7 @@ static void CloseMark(StrBuf* x, const RevisionMark* m) {
 }
 
 static int g_revId = 0;    // ids only have to be unique within the document
+static int g_bookmarkId = 0;
 
 static void EmitPara(StrBuf* x, const DocPara* para, ImagePlan* plan) {
     SB_Add(x, "<w:p>");
@@ -1613,6 +1698,28 @@ static void EmitPara(StrBuf* x, const DocPara* para, ImagePlan* plan) {
             CloseMark(x, &open);
             open = r->rev;
             OpenMark(x, &open, &g_revId);
+        }
+
+        // A bookmark is a marker between runs rather than a run of its own.
+        // The id only has to pair a start with its end.
+        if (r->bookmark) {
+            if (r->bookmarkEnd) {
+                SB_AddF(x, "<w:bookmarkEnd w:id=\"%d\"/>", g_bookmarkId);
+            } else {
+                SB_AddF(x, "<w:bookmarkStart w:id=\"%d\" w:name=\"", ++g_bookmarkId);
+                SB_AddXmlText(x, r->bookmark, -1);
+                SB_Add(x, "\"/>");
+            }
+            continue;
+        }
+
+        // A field: the instruction as an attribute and the result inside,
+        // which is the short spelling of what Word writes as three markers.
+        // Read either, write the one that cannot be got wrong.
+        if (r->field) {
+            SB_Add(x, "<w:fldSimple w:instr=\"");
+            SB_AddXmlText(x, r->field, -1);
+            SB_Add(x, "\">");
         }
 
         SB_Add(x, "<w:r>");
@@ -1642,6 +1749,7 @@ static void EmitPara(StrBuf* x, const DocPara* para, ImagePlan* plan) {
             SB_AddF(x, "</w:%s>", tag);
         }
         SB_Add(x, "</w:r>");
+        if (r->field) SB_Add(x, "</w:fldSimple>");
     }
 
     CloseMark(x, &open);
