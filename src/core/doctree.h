@@ -172,6 +172,13 @@ typedef struct DocModel {
     DocStyle*    styles;
     ParaProps    defaultPara;
     CharProps    defaultRun;
+
+    // What goes in the margins, on every page. Paragraphs like any others,
+    // laid out into the space above the top margin and below the bottom one.
+    DocPara*     header;
+    DocPara*     footer;
+    int          headerFromTop;     // twips from the paper edge
+    int          footerFromBottom;
 } DocModel;
 
 // ---------------------------------------------------------------------------
@@ -267,6 +274,10 @@ WCHAR* DocEdit_RangeText(const DocModel* doc, DocPos a, DocPos b);
 
 // A deep copy. Undo is a stack of these.
 DocModel* Doc_Clone(const DocModel* src);
+
+// A deep copy of a chain of paragraphs, for the parts of a document that are
+// not blocks: a header, a footer.
+DocPara* Doc_CloneParas(const DocPara* src);
 
 // Self-check for the editing operations, run by `OpenNote.exe --selftest`.
 BOOL DocEdit_SelfTest(char* failure, size_t failureSize);

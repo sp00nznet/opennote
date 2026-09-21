@@ -32,6 +32,13 @@
 #define REL_STYLES     L"http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles"
 #define REL_NUMBERING     L"http://schemas.openxmlformats.org/officeDocument/2006/relationships/numbering"
 #define REL_IMAGE         L"http://schemas.openxmlformats.org/officeDocument/2006/relationships/image"
+#define REL_HEADER        L"http://schemas.openxmlformats.org/officeDocument/2006/relationships/header"
+#define REL_FOOTER        L"http://schemas.openxmlformats.org/officeDocument/2006/relationships/footer"
+
+#define CT_HEADER \
+    L"application/vnd.openxmlformats-officedocument.wordprocessingml.header+xml"
+#define CT_FOOTER \
+    L"application/vnd.openxmlformats-officedocument.wordprocessingml.footer+xml"
 
 #define CT_STYLES     L"application/vnd.openxmlformats-officedocument.wordprocessingml.styles+xml"
 #define CT_NUMBERING     L"application/vnd.openxmlformats-officedocument.wordprocessingml.numbering+xml"
@@ -343,6 +350,38 @@ static BYTE* ReadRelatedBytes(DocxPkg* pkg, const WCHAR* relId, size_t* lenOut,
 
     IOpcRelationshipSet_Release(rels);
     return bytes;
+}
+
+// The part a relationship id names, as a stream -- the same lookup the
+// pictures use, for the parts that hold markup rather than bytes.
+static IStream* RelatedStreamById(DocxPkg* pkg, const WCHAR* relId) {
+    if (!relId || !relId[0]) return NULL;
+
+    IOpcRelationshipSet* rels = NULL;
+    if (FAILED(IOpcPart_GetRelationshipSet(pkg->docPart, &rels))) return NULL;
+
+    IStream* stream = NULL;
+    IOpcRelationship* rel = NULL;
+
+    if (SUCCEEDED(IOpcRelationshipSet_GetRelationship(rels, relId, &rel))) {
+        IUri* target = NULL;
+        if (SUCCEEDED(IOpcRelationship_GetTargetUri(rel, &target))) {
+            IOpcPartUri* uri = NULL;
+            if (SUCCEEDED(IOpcUri_CombinePartUri((IOpcUri*)pkg->docUri, target, &uri))) {
+                IOpcPart* part = NULL;
+                if (SUCCEEDED(IOpcPartSet_GetPart(pkg->parts, uri, &part))) {
+                    IOpcPart_GetContentStream(part, &stream);
+                    IOpcPart_Release(part);
+                }
+                IOpcPartUri_Release(uri);
+            }
+            IUri_Release(target);
+        }
+        IOpcRelationship_Release(rel);
+    }
+
+    IOpcRelationshipSet_Release(rels);
+    return stream;
 }
 
 // "width:120pt;height:90pt" out of a VML shape's style attribute, in EMU.
@@ -732,7 +771,9 @@ typedef struct {
 
     // The page setup, which arrives at the end of the body -- and again at the
     // end of any paragraph that closes a section.
-    BOOL inSection;
+    BOOL  inSection;
+    WCHAR headerRel[64];
+    WCHAR footerRel[64];
 
     // A picture, which arrives in pieces: an extent, then a relationship id
     // several elements later.
@@ -911,6 +952,29 @@ static BOOL BuildModel(IStream* stream, DocModel* doc, const NumTable* numbering
                 if (right >= 0)  doc->section.marginRight = right;
                 if (bottom >= 0) doc->section.marginBottom = bottom;
                 if (left >= 0)   doc->section.marginLeft = left;
+
+                int header = AttrInt(reader, L"header", -1);
+                int footer = AttrInt(reader, L"footer", -1);
+                if (header >= 0) doc->headerFromTop = header;
+                if (footer >= 0) doc->footerFromBottom = footer;
+            } else if (b.inSection && (NameIs(local, len, L"headerReference") ||
+                                       NameIs(local, len, L"footerReference"))) {
+                // Which header this is -- default, first page, even pages.
+                // Only the default one is kept: a document with a different
+                // first page is a section problem, and sections are one per
+                // document here.
+                WCHAR type[24];
+                BOOL isDefault = !GetAttr(reader, L"type", type, 24) ||
+                                 _wcsicmp(type, L"default") == 0;
+
+                WCHAR relId[64];
+                if (isDefault && GetAttr(reader, L"id", relId, 64)) {
+                    BOOL header = NameIs(local, len, L"headerReference");
+                    if (header) wcsncpy_s(b.headerRel, 64, relId, _TRUNCATE);
+                    else        wcsncpy_s(b.footerRel, 64, relId, _TRUNCATE);
+                }
+            } else if (b.inSection && NameIs(local, len, L"pgMar2_unused")) {
+                // (kept out of the way; the real pgMar is read above)
             } else if (b.inSection && NameIs(local, len, L"cols")) {
                 int num = AttrInt(reader, L"num", 1);
                 int space = AttrInt(reader, L"space", 720);
@@ -1065,6 +1129,49 @@ static BOOL BuildModel(IStream* stream, DocModel* doc, const NumTable* numbering
     }
 
     IXmlReader_Release(reader);
+
+    // The header and the footer are parts of their own, holding paragraphs
+    // like any others -- so they are read the same way, into a model of their
+    // own, and what comes out is taken over.
+    if (b.headerRel[0] || b.footerRel[0]) {
+        struct { const WCHAR* rel; DocPara** into; } wanted[] = {
+            { b.headerRel, &doc->header },
+            { b.footerRel, &doc->footer },
+        };
+
+        for (int i = 0; i < 2; i++) {
+            if (!wanted[i].rel[0]) continue;
+
+            IStream* part = RelatedStreamById(pkg, wanted[i].rel);
+            if (!part) continue;
+
+            DocModel* piece = Doc_New();
+            if (piece) {
+                piece->defaultRun = doc->defaultRun;
+                piece->defaultPara = doc->defaultPara;
+
+                if (BuildModel(part, piece, numbering, pkg)) {
+                    // Take the paragraphs, leave the rest.
+                    DocPara* tail = NULL;
+                    for (DocBlock* blk = piece->blocks; blk; blk = blk->next) {
+                        if (blk->kind != BLOCK_PARA || !blk->para) continue;
+
+                        DocPara* copied = Doc_CloneParas(blk->para);
+                        if (!copied) continue;
+
+                        if (tail) tail->next = copied;
+                        else      *wanted[i].into = copied;
+
+                        tail = copied;
+                        while (tail->next) tail = tail->next;
+                    }
+                }
+                Doc_Free(piece);
+            }
+            IStream_Release(part);
+        }
+    }
+
     return TRUE;
 }
 
@@ -1534,6 +1641,24 @@ static BOOL BuildNumberingXml(const DocModel* doc, StrBuf* x, ListOut* lists, in
     return !x->failed;
 }
 
+// A header or a footer part: the same paragraphs, in a root of their own.
+static BOOL BuildMarginXml(const DocPara* paras, BOOL header, StrBuf* x, ImagePlan* plan) {
+    SB_AddF(x, "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>\r\n"
+               "<w:%s xmlns:w=\"" WML_NS "\" xmlns:r=\"" REL_NS "\""
+               " xmlns:wp=\"" WP_NS "\">",
+            header ? "hdr" : "ftr");
+
+    BOOL any = FALSE;
+    for (const DocPara* p = paras; p; p = p->next) {
+        EmitPara(x, p, plan);
+        any = TRUE;
+    }
+    if (!any) SB_Add(x, "<w:p/>");
+
+    SB_AddF(x, "</w:%s>", header ? "hdr" : "ftr");
+    return !x->failed;
+}
+
 static BOOL BuildDocumentXml(const DocModel* doc, StrBuf* x, ImagePlan* plan) {
     // The drawing namespaces are declared on the root whether or not the
     // document holds a picture; a namespace nothing uses costs a line.
@@ -1562,14 +1687,21 @@ static BOOL BuildDocumentXml(const DocModel* doc, StrBuf* x, ImagePlan* plan) {
     // A body with no paragraph at all is not a document Word will open.
     if (!any) SB_Add(x, "<w:p/>");
 
-    SB_AddF(x, "<w:sectPr><w:pgSz w:w=\"%d\" w:h=\"%d\"%s/>"
+    SB_Add(x, "<w:sectPr>");
+
+    if (doc->header) SB_Add(x, "<w:headerReference w:type=\"default\" r:id=\"rIdHdr\"/>");
+    if (doc->footer) SB_Add(x, "<w:footerReference w:type=\"default\" r:id=\"rIdFtr\"/>");
+
+    SB_AddF(x, "<w:pgSz w:w=\"%d\" w:h=\"%d\"%s/>"
                "<w:pgMar w:top=\"%d\" w:right=\"%d\" w:bottom=\"%d\" w:left=\"%d\" "
-               "w:header=\"720\" w:footer=\"720\" w:gutter=\"0\"/>",
+               "w:header=\"%d\" w:footer=\"%d\" w:gutter=\"0\"/>",
             doc->section.pageWidth, doc->section.pageHeight,
             doc->section.pageWidth > doc->section.pageHeight
                 ? " w:orient=\"landscape\"" : "",
             doc->section.marginTop, doc->section.marginRight,
-            doc->section.marginBottom, doc->section.marginLeft);
+            doc->section.marginBottom, doc->section.marginLeft,
+            doc->headerFromTop > 0 ? doc->headerFromTop : 720,
+            doc->footerFromBottom > 0 ? doc->footerFromBottom : 720);
 
     if (doc->section.columns > 1) {
         SB_AddF(x, "<w:cols w:num=\"%d\" w:space=\"%d\"/>",
@@ -1742,6 +1874,41 @@ BOOL Docx_WriteModel(const DocModel* doc, const WCHAR* path) {
                 IOpcRelationshipSet_Release(docRels);
                 SetError(L"A picture could not be written.");
                 goto done;
+            }
+        }
+
+        // The header and the footer, each a part with a relationship id the
+        // section refers to by name.
+        if (doc->header || doc->footer) {
+            struct {
+                const DocPara* paras;
+                BOOL           header;
+                const WCHAR*   uri;
+                const WCHAR*   relId;
+                const WCHAR*   type;
+                const WCHAR*   relType;
+            } margins[] = {
+                { doc->header, TRUE,  L"/word/header1.xml", L"rIdHdr", CT_HEADER, REL_HEADER },
+                { doc->footer, FALSE, L"/word/footer1.xml", L"rIdFtr", CT_FOOTER, REL_FOOTER },
+            };
+
+            for (int i = 0; i < 2; i++) {
+                if (!margins[i].paras) continue;
+
+                StrBuf part = {0};
+                BOOL partOk = BuildMarginXml(margins[i].paras, margins[i].header,
+                                             &part, &plan) &&
+                              AddRelatedPartWithId(factory, parts, docRels,
+                                                   margins[i].uri, margins[i].relId,
+                                                   margins[i].type, margins[i].relType,
+                                                   part.buf, part.len);
+                SB_Free(&part);
+
+                if (!partOk) {
+                    IOpcRelationshipSet_Release(docRels);
+                    SetError(L"The header or footer part could not be written.");
+                    goto done;
+                }
             }
         }
 

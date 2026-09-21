@@ -81,6 +81,9 @@ void Doc_Free(DocModel* doc) {
         block = next;
     }
 
+    FreeParas(doc->header);
+    FreeParas(doc->footer);
+
     DocStyle* style = doc->styles;
     while (style) {
         DocStyle* next = style->next;
@@ -602,6 +605,30 @@ void Doc_Compare(const DocModel* a, const DocModel* b, DocDiff* d) {
     }
 
     CompareSections(&a->section, &b->section, d);
+
+    // A header or a footer that did not come back is a loss like any other.
+    {
+        int ha = 0, hb = 0, fa = 0, fb = 0;
+        for (const DocPara* p = a->header; p; p = p->next) ha++;
+        for (const DocPara* p = b->header; p; p = p->next) hb++;
+        for (const DocPara* p = a->footer; p; p = p->next) fa++;
+        for (const DocPara* p = b->footer; p; p = p->next) fb++;
+
+        CMP(ha == hb, "header paragraphs %d -> %d", ha, hb);
+        CMP(fa == fb, "footer paragraphs %d -> %d", fa, fb);
+
+        const DocPara* pa = a->header;
+        const DocPara* pb = b->header;
+        for (int i = 0; pa && pb; pa = pa->next, pb = pb->next, i++) {
+            CompareParas(pa, pb, -1 - i, d);
+        }
+
+        pa = a->footer;
+        pb = b->footer;
+        for (int i = 0; pa && pb; pa = pa->next, pb = pb->next, i++) {
+            CompareParas(pa, pb, -100 - i, d);
+        }
+    }
 
     d->compared++;
     if (Doc_CountTables(a) != Doc_CountTables(b)) {
@@ -1241,6 +1268,15 @@ static BOOL CloneParas(const DocPara* src, DocPara** dest) {
     return TRUE;
 }
 
+DocPara* Doc_CloneParas(const DocPara* src) {
+    DocPara* out = NULL;
+    if (!CloneParas(src, &out)) {
+        FreeParas(out);
+        return NULL;
+    }
+    return out;
+}
+
 DocModel* Doc_Clone(const DocModel* src) {
     if (!src) return NULL;
 
@@ -1249,6 +1285,14 @@ DocModel* Doc_Clone(const DocModel* src) {
     copy->section = src->section;
     copy->defaultPara = src->defaultPara;
     copy->defaultRun = src->defaultRun;
+    copy->headerFromTop = src->headerFromTop;
+    copy->footerFromBottom = src->footerFromBottom;
+
+    if (!CloneParas(src->header, &copy->header) ||
+        !CloneParas(src->footer, &copy->footer)) {
+        Doc_Free(copy);
+        return NULL;
+    }
 
     for (const DocStyle* st = src->styles; st; st = st->next) {
         DocStyle* sc = (DocStyle*)calloc(1, sizeof(DocStyle));

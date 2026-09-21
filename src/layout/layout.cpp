@@ -847,6 +847,65 @@ static void PlaceTable(Flow* f, const DocBlock* block) {
 }
 
 // ---------------------------------------------------------------------------
+// Headers and footers
+//
+// The same paragraphs as anything else, laid out into the margins rather than
+// into the text area -- and onto every page, which is why they happen after
+// the document has been flowed and the pages are known.
+//
+// ponytail: the same header on every page. A different first page, or
+// different left and right pages, is a section problem, and a document has
+// one section here.
+// ---------------------------------------------------------------------------
+
+static void PlaceMargins(Flow* f, const DocModel* doc) {
+    if (!doc->header && !doc->footer) return;
+
+    LayoutResult* r = f->result;
+    float width = r->pageWidth - r->marginLeft - r->marginRight;
+    if (width < 1.0f) return;
+
+    float headerTop = (doc->headerFromTop > 0 ? doc->headerFromTop : 720) / TWIPS_PER_DIP;
+    float footerUp = (doc->footerFromBottom > 0 ? doc->footerFromBottom : 720) / TWIPS_PER_DIP;
+
+    int pages = r->pageCount;
+    for (int p = 0; p < pages; p++) {
+        f->page = &r->pages[p];
+        f->columnLeft = r->marginLeft;
+        f->contentWidth = width;
+
+        // Everything placed from here on is margin furniture rather than the
+        // document's own text, which is what the checks measure.
+        int before = f->page->textCount;
+
+        // The header hangs from the top of the paper, above the text.
+        if (doc->header) {
+            f->y = headerTop;
+            f->bottom = r->marginTop;      // it may not grow into the text
+            for (const DocPara* para = doc->header; para; para = para->next) {
+                PlacePara(f, para, r->marginLeft, width, TRUE);
+            }
+        }
+
+        // The footer sits above the bottom edge. Its height is not known
+        // until it is laid out, so it is placed from the top of the space it
+        // is allowed and left there: a footer taller than the bottom margin
+        // grows downwards, off the paper, which is what Word does too.
+        if (doc->footer) {
+            f->y = r->pageHeight - footerUp;
+            f->bottom = r->pageHeight;
+            for (const DocPara* para = doc->footer; para; para = para->next) {
+                PlacePara(f, para, r->marginLeft, width, TRUE);
+            }
+        }
+
+        for (int i = before; i < f->page->textCount; i++) {
+            f->page->texts[i].isMargin = TRUE;
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Entry points
 // ---------------------------------------------------------------------------
 
@@ -922,6 +981,9 @@ extern "C" LayoutResult* Layout_Build(const DocModel* doc, const WCHAR* defaultF
         }
     }
 
+    // Every page is known now, so the margins can be filled in.
+    PlaceMargins(&f, doc);
+
     ctx.baseFormat->Release();
     return r;
 }
@@ -977,6 +1039,7 @@ extern "C" float Layout_PageContentBottom(const LayoutResult* r, int i) {
     float bottom = 0.0f;
 
     for (int j = 0; j < page->textCount; j++) {
+        if (page->texts[j].isMargin) continue;   // a footer belongs below it
         float b = page->texts[j].y + page->texts[j].height;
         if (b > bottom) bottom = b;
     }
@@ -1012,7 +1075,7 @@ static const LaidText* PieceFor(const LayoutResult* r, const DocPara* para,
         const LaidPage* page = &r->pages[p];
         for (int i = 0; i < page->textCount; i++) {
             const LaidText* t = &page->texts[i];
-            if (t->isMarker || t->para != para) continue;
+            if (t->isMarker || t->isMargin || t->para != para) continue;
 
             if (offset >= t->textStart && offset <= t->textStart + t->textLen) {
                 best = t;
@@ -1055,7 +1118,7 @@ extern "C" BOOL Layout_HitTest(const LayoutResult* r, int page, float x, float y
 
     for (int i = 0; i < p->textCount; i++) {
         const LaidText* t = &p->texts[i];
-        if (t->isMarker) continue;
+        if (t->isMarker || t->isMargin) continue;
 
         if (y >= t->y && y <= t->y + t->height &&
             x >= t->x && x <= t->x + t->width) {
@@ -1138,7 +1201,7 @@ extern "C" int Layout_RangeRects(const LayoutResult* r, int page, LayoutPos a, L
 
     for (int i = 0; i < p->textCount && written < cap; i++) {
         const LaidText* t = &p->texts[i];
-        if (t->isMarker || !t->layout) continue;
+        if (t->isMarker || t->isMargin || !t->layout) continue;
 
         // What part of this piece the selection covers, in the piece's own
         // offsets. A piece belonging to a paragraph strictly inside the range

@@ -457,7 +457,17 @@ DocModel* DocView_CaptureWith(HWND h, const DocModel* source) {
     // columns. When the document came from a file, its page comes from there
     // rather than from the defaults -- otherwise saving an A4 document from
     // the editor would quietly put it on Letter.
-    if (source) doc->section = source->section;
+    if (source) {
+        doc->section = source->section;
+
+        // ...and the same goes for what lives in the margins: the control has
+        // nowhere to show a header, so it keeps the one the document came
+        // with rather than losing it on the first save.
+        doc->headerFromTop = source->headerFromTop;
+        doc->footerFromBottom = source->footerFromBottom;
+        doc->header = Doc_CloneParas(source->header);
+        doc->footer = Doc_CloneParas(source->footer);
+    }
 
     ImageSource pictures;
     CollectImages(source, &pictures);

@@ -44,6 +44,7 @@ struct LaidText {
     UINT32             textStart;
     UINT32             textLen;
     BOOL               isMarker;  // a list bullet: drawn, but not text anybody edits
+    BOOL               isMargin;  // a header or a footer, which lives outside the text
 
     ColorSpan*         colors;    // owned; empty when the text is all default
     int                colorCount;

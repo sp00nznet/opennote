@@ -33,6 +33,8 @@ DOC_RELS = """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
 {rels}</Relationships>"""
 
+HEADER_CT = "application/vnd.openxmlformats-officedocument.wordprocessingml.header+xml"
+FOOTER_CT = "application/vnd.openxmlformats-officedocument.wordprocessingml.footer+xml"
 IMAGE_CT = "image/png"
 STYLES_CT = "application/vnd.openxmlformats-officedocument.wordprocessingml.styles+xml"
 NUMBERING_CT = "application/vnd.openxmlformats-officedocument.wordprocessingml.numbering+xml"
@@ -87,7 +89,14 @@ def write(outdir, name, body, expect, target="word/document.xml", parts=None, se
                 # A picture is named rIdImg1 and so on, because the drawing in
                 # the document refers to it by name.
                 relative = "/".join(part.split("/")[1:])
-                rid = "rIdImg%d" % i if rel == "image" else "rIdX%d" % i
+                if rel == "image":
+                    rid = "rIdImg%d" % i
+                elif rel == "header":
+                    rid = "rIdHdr"
+                elif rel == "footer":
+                    rid = "rIdFtr"
+                else:
+                    rid = "rIdX%d" % i
                 rels += '  <Relationship Id="%s" Type="%s%s" Target="%s"/>\n' % (
                     rid, REL_BASE, rel, relative)
 
@@ -444,6 +453,47 @@ def fixture_pages(outdir):
     return write(outdir, "pages", body, expect, sect=sect)
 
 
+# --------------------------------------------------------------------------
+# margins: what goes above and below the text, on every page
+# --------------------------------------------------------------------------
+def fixture_margins(outdir):
+    def part(root, text, align=None):
+        props = '<w:pPr><w:jc w:val="%s"/></w:pPr>' % align if align else ""
+        return (
+            '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n'
+            '<w:%s xmlns:w="%s" xmlns:r="%s"><w:p>%s'
+            '<w:r><w:t xml:space="preserve">%s</w:t></w:r>'
+            '</w:p></w:%s>' % (root, W, R, props, text, root)
+        )
+
+    sect = (
+        '<w:sectPr>'
+        '<w:headerReference w:type="default" r:id="rIdHdr"/>'
+        '<w:footerReference w:type="default" r:id="rIdFtr"/>'
+        '<w:pgSz w:w="12240" w:h="15840"/>'
+        '<w:pgMar w:top="1440" w:right="1440" w:bottom="1440" w:left="1440"'
+        ' w:header="720" w:footer="720"/>'
+        '</w:sectPr>'
+    )
+
+    body = [p([r("Body text on the page itself.")])]
+    for i in range(60):
+        body.append(p([r("Filler paragraph %d, so the document runs to more than one page." % i)]))
+
+    expect = [
+        "# the body reaches the view; the margins do not, because the control",
+        "# has no notion of a page to put them on",
+        "contains:Body text on the page itself.",
+        "absent:A header on every page",
+    ]
+
+    parts = [
+        ("word/header1.xml", HEADER_CT, "header", part("hdr", "A header on every page")),
+        ("word/footer1.xml", FOOTER_CT, "footer", part("ftr", "A footer, centred", "center")),
+    ]
+    return write(outdir, "margins", body, expect, parts=parts, sect=sect)
+
+
 def main():
     outdir = sys.argv[1] if len(sys.argv) > 1 else "build/corpus"
     os.makedirs(outdir, exist_ok=True)
@@ -457,6 +507,7 @@ def main():
         fixture_styles(outdir),
         fixture_images(outdir),
         fixture_pages(outdir),
+        fixture_margins(outdir),
     ]
     for path in made:
         print(f"  {os.path.basename(path)}  {os.path.getsize(path)} bytes")
