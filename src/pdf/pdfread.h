@@ -34,9 +34,12 @@ int  Pdf_PageCount(const PdfFile* pdf);
 // The page's size in points, which is what a PDF measures in: 72 to the inch.
 BOOL Pdf_PageSize(PdfFile* pdf, int pageIndex, float* widthPt, float* heightPt);
 
-// Render a page to PNG bytes, `widthPx` across (0 for the page's own size at
-// 96 dpi). The caller frees `bytesOut` with free().
-BOOL Pdf_RenderPage(PdfFile* pdf, int pageIndex, int widthPx,
+// Render a page to PNG bytes, `widthDip` across (0 for the page's own size at
+// 96 to the inch). The width is in DIPs rather than pixels: Windows renders at
+// the display's scale, so a page asked for at 400 comes back 900 pixels across
+// on a screen at 225%, which is what a bitmap drawn into a 400-DIP box wants.
+// The caller frees `bytesOut` with free().
+BOOL Pdf_RenderPage(PdfFile* pdf, int pageIndex, int widthDip,
                     BYTE** bytesOut, size_t* lenOut);
 
 // Self-check, run by `OpenNote.exe --selftest`.

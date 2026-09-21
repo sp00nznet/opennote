@@ -58,6 +58,7 @@ set(SUPERNOTE_SOURCES
     src/layout/layoutimage.cpp
     src/ui/pageview.cpp
     src/ui/richole.c
+    src/core/inflate.c
     src/core/docx.c
     src/pdf/pdfread.cpp
     src/pdf/pdfform.cpp

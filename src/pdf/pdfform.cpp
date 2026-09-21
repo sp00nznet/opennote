@@ -23,6 +23,7 @@
 
 #include "pdf/pdfform.h"
 #include "pdf/pdfread.h"
+#include "core/inflate.h"
 
 #include <stdlib.h>
 #include <string.h>
@@ -92,6 +93,24 @@ struct FormField {
     float fontSize;
 };
 
+// An object that lives inside an object stream rather than in the file's own
+// body: which stream, and where in it.
+struct Compressed {
+    int stream;
+    int index;
+};
+
+// An object stream, decompressed once and kept: a form's fields are usually
+// all in the same one, so decoding it per field would be the whole file's
+// worth of work per answer.
+struct DecodedStream {
+    int    object;
+    BYTE*  bytes;
+    size_t len;
+};
+
+#define MAX_DECODED 8
+
 struct PdfForm {
     char*  bytes;
     size_t len;
@@ -106,9 +125,27 @@ struct PdfForm {
     int rootObject;
     size_t prevXref;         // what the new table has to point back to
 
+    // Where the compressed objects are, when the file keeps any.
+    Compressed*   compressed;
+    DecodedStream decoded[MAX_DECODED];
+    int           decodedCount;
+
+    // A file whose cross-reference is a stream has to be updated with one
+    // too: a reader that understands only streams would not see a classic
+    // table appended after them.
+    BOOL xrefIsStream;
+
     FormField fields[MAX_FIELDS];
     int       fieldCount;
 };
+
+static BOOL ObjectBody(const PdfForm* form, int number, Span* out);
+static BYTE* DecodeStream(PdfForm* form, Span body, size_t* lenOut);
+static BOOL ReadTrailer(PdfForm* form, Span trailer, int depth);
+static BOOL Resolve(const PdfForm* form, Span value, Span* out);
+static BOOL DictValue(Span dict, const char* key, Span* out);
+static int  AsReference(Span value);
+static double AsNumber(Span value);
 
 static const WCHAR* g_why = NULL;
 
@@ -247,11 +284,8 @@ static double AsNumber(Span value) {
     return atof(text);
 }
 
-// The body of object `number`: everything between "N G obj" and "endobj".
-static BOOL ObjectBody(const PdfForm* form, int number, Span* out) {
-    if (number <= 0 || number >= form->objectCount) return FALSE;
-
-    size_t offset = form->offsets[number];
+// An object at a byte offset, whether or not the table has been read yet.
+static BOOL ObjectBodyAt(const PdfForm* form, size_t offset, Span* out) {
     if (offset == 0 || offset >= form->len) return FALSE;
 
     const char* at = form->bytes + offset;
@@ -271,6 +305,87 @@ static BOOL ObjectBody(const PdfForm* form, int number, Span* out) {
     return TRUE;
 }
 
+// An object stream, decompressed and kept. Its header is pairs of "number
+// offset", and `/First` says where the objects themselves begin.
+static const DecodedStream* DecodedObjectStream(PdfForm* form, int number) {
+    for (int i = 0; i < form->decodedCount; i++) {
+        if (form->decoded[i].object == number) return &form->decoded[i];
+    }
+    if (form->decodedCount >= MAX_DECODED) return NULL;
+
+    Span body;
+    if (!ObjectBodyAt(form, number < form->objectCount ? form->offsets[number] : 0, &body)) {
+        return NULL;
+    }
+
+    size_t len = 0;
+    BYTE* bytes = DecodeStream(form, body, &len);
+    if (!bytes) return NULL;
+
+    DecodedStream* slot = &form->decoded[form->decodedCount++];
+    slot->object = number;
+    slot->bytes = bytes;
+    slot->len = len;
+    return slot;
+}
+
+// The body of object `number`: everything between "N G obj" and "endobj", or,
+// for an object kept inside an object stream, its part of that stream.
+static BOOL ObjectBody(const PdfForm* form, int number, Span* out) {
+    if (number <= 0 || number >= form->objectCount) return FALSE;
+
+    if (form->compressed && form->compressed[number].stream > 0) {
+        PdfForm* mutableForm = (PdfForm*)form;    // the cache is the only change
+
+        const Compressed* where = &form->compressed[number];
+        const DecodedStream* stream = DecodedObjectStream(mutableForm, where->stream);
+        if (!stream) return FALSE;
+
+        Span container;
+        if (!ObjectBodyAt(form, form->offsets[where->stream], &container)) return FALSE;
+
+        Span field;
+        int count = DictValue(container, "N", &field) ? (int)AsNumber(field) : 0;
+        int first = DictValue(container, "First", &field) ? (int)AsNumber(field) : 0;
+        if (where->index >= count || first <= 0) return FALSE;
+
+        // The header: `count` pairs of numbers, in order.
+        const char* at = (const char*)stream->bytes;
+        const char* end = at + (first < (int)stream->len ? first : (int)stream->len);
+
+        int offsets[2] = { 0, 0 };
+        int seen = 0;
+
+        for (int i = 0; i <= where->index && at < end; i++) {
+            for (int part = 0; part < 2; part++) {
+                while (at < end && IsWhite(*at)) at++;
+
+                int value = 0;
+                while (at < end && *at >= 48 && *at <= 57) {
+                    value = value * 10 + (*at - 48);
+                    at++;
+                }
+
+                if (i == where->index) offsets[part] = value;
+                else if (i == where->index - 1 && part == 1) seen = value;
+            }
+        }
+        (void)seen;
+
+        size_t start = (size_t)first + (size_t)offsets[1];
+        if (start >= stream->len) return FALSE;
+
+        // It runs to the next object's offset, or to the end of the stream.
+        // Reading a little too much is harmless: a dictionary ends where its
+        // brackets say it does.
+        out->at = (const char*)stream->bytes + start;
+        out->len = stream->len - start;
+        return TRUE;
+    }
+
+    return ObjectBodyAt(form, form->offsets[number], out);
+}
+
 // A value that may be given directly or as a reference to an object.
 static BOOL Resolve(const PdfForm* form, Span value, Span* out) {
     int reference = AsReference(value);
@@ -279,6 +394,147 @@ static BOOL Resolve(const PdfForm* form, Span value, Span* out) {
         return TRUE;
     }
     return ObjectBody(form, reference, out);
+}
+
+
+// ---------------------------------------------------------------------------
+// Streams
+//
+// A stream is a dictionary, the word "stream", the bytes, and "endstream".
+// The dictionary says how many bytes and what was done to them; the only
+// filter here is FlateDecode, because that is the one a cross-reference or an
+// object stream uses, and the only predictor is PNG's, which is what every
+// writer that bothers with one picks.
+// ---------------------------------------------------------------------------
+
+// Undo a PNG predictor: each row starts with a tag saying how it was coded
+// against the row above and the bytes to its left.
+static BYTE* Unpredict(BYTE* data, size_t len, int colors, int bpc, int columns,
+                       size_t* outLen) {
+    int sample = (colors * bpc + 7) / 8;
+    if (sample < 1) sample = 1;
+
+    size_t row = (size_t)((size_t)columns * colors * bpc + 7) / 8;
+    if (row == 0) return NULL;
+
+    size_t rows = len / (row + 1);
+    BYTE* out = (BYTE*)calloc(rows ? rows * row : 1, 1);
+    if (!out) return NULL;
+
+    const BYTE* at = data;
+    for (size_t r = 0; r < rows; r++) {
+        int tag = *at++;
+        BYTE* line = out + r * row;
+        const BYTE* above = r ? line - row : NULL;
+
+        for (size_t i = 0; i < row; i++) {
+            int raw = at[i];
+            int left = (i >= (size_t)sample) ? line[i - sample] : 0;
+            int up = above ? above[i] : 0;
+            int upLeft = (above && i >= (size_t)sample) ? above[i - sample] : 0;
+
+            int value = raw;
+            switch (tag) {
+                case 0: break;                                  // none
+                case 1: value = raw + left; break;              // sub
+                case 2: value = raw + up; break;                // up
+                case 3: value = raw + ((left + up) / 2); break; // average
+                case 4: {                                       // Paeth
+                    int p = left + up - upLeft;
+                    int pa = abs(p - left), pb = abs(p - up), pc = abs(p - upLeft);
+                    int best = (pa <= pb && pa <= pc) ? left : (pb <= pc) ? up : upLeft;
+                    value = raw + best;
+                    break;
+                }
+                default: break;
+            }
+            line[i] = (BYTE)(value & 0xFF);
+        }
+        at += row;
+    }
+
+    *outLen = rows * row;
+    return out;
+}
+
+// An object's stream bytes, filters undone. NULL when there is no stream, or
+// when it is behind a filter this does not do.
+static BYTE* DecodeStream(PdfForm* form, Span body, size_t* lenOut) {
+    if (lenOut) *lenOut = 0;
+
+    const char* keyword = FindIn(body.at, body.len, "stream");
+    if (!keyword) return NULL;
+
+    const char* at = keyword + 6;
+    if (at < body.at + body.len && *at == 13) at++;    // CR
+    if (at < body.at + body.len && *at == 10) at++;    // LF
+
+    // How long it is. The length may be an object of its own, which is what a
+    // writer does when it does not know the length until it has finished.
+    size_t length = 0;
+    Span value;
+    if (DictValue(body, "Length", &value)) {
+        int reference = AsReference(value);
+        if (reference > 0) {
+            Span target;
+            if (ObjectBody(form, reference, &target)) length = (size_t)AsNumber(target);
+        } else {
+            length = (size_t)AsNumber(value);
+        }
+    }
+
+    size_t available = (size_t)(body.at + body.len - at);
+    if (length == 0 || length > available) {
+        // A length that cannot be right: take everything up to "endstream".
+        const char* end = FindIn(at, available, "endstream");
+        if (!end) return NULL;
+        length = (size_t)(end - at);
+    }
+
+    BOOL flate = FALSE;
+    if (DictValue(body, "Filter", &value)) {
+        flate = FindIn(value.at, value.len, "FlateDecode") != NULL;
+
+        // A filter this does not do -- anything but Flate -- is not guessed at.
+        if (!flate) return NULL;
+    }
+
+    BYTE* out = NULL;
+    size_t outLen = 0;
+
+    if (flate) {
+        out = Inflate_Zlib((const BYTE*)at, length, &outLen);
+        if (!out) return NULL;
+    } else {
+        out = (BYTE*)malloc(length ? length : 1);
+        if (!out) return NULL;
+        memcpy(out, at, length);
+        outLen = length;
+    }
+
+    // ...and the predictor, when one was used.
+    Span parms;
+    if (DictValue(body, "DecodeParms", &parms) && Resolve(form, parms, &parms)) {
+        Span field;
+        int predictor = DictValue(parms, "Predictor", &field) ? (int)AsNumber(field) : 1;
+
+        if (predictor >= 10) {
+            int colors = DictValue(parms, "Colors", &field) ? (int)AsNumber(field) : 1;
+            int bpc = DictValue(parms, "BitsPerComponent", &field) ? (int)AsNumber(field) : 8;
+            int columns = DictValue(parms, "Columns", &field) ? (int)AsNumber(field) : 1;
+
+            size_t plainLen = 0;
+            BYTE* plain = Unpredict(out, outLen, colors, bpc, columns, &plainLen);
+            free(out);
+
+            if (!plain) return NULL;
+            out = plain;
+            outLen = plainLen;
+        }
+    }
+
+    if (lenOut) *lenOut = outLen;
+    return out;
 }
 
 // ---------------------------------------------------------------------------
@@ -394,8 +650,141 @@ static void WritePdfString(const WCHAR* text, char* out, size_t outBytes) {
 // ---------------------------------------------------------------------------
 
 static BOOL ReadXrefAt(PdfForm* form, size_t offset, int depth);
+static BOOL ReadXrefStream(PdfForm* form, size_t offset, int depth);
 
-static BOOL ReadTrailer(PdfForm* form, Span trailer, int depth) {
+// The table as a stream: `/W` says how wide each of the three fields is, and
+// the rows say, for each object, what kind it is and where it lives. Type 1 is
+// a byte offset like the classic table's; type 2 is "inside object stream N,
+// at index M", which is where a 1.5 file keeps most of its dictionaries.
+static BOOL ReadXrefStream(PdfForm* form, size_t offset, int depth) {
+    Span body;
+    if (!ObjectBodyAt(form, offset, &body)) {
+        Why(L"This PDF's cross-reference table could not be found.");
+        return FALSE;
+    }
+
+    Span type;
+    if (!DictValue(body, "Type", &type) || !SpanIs(type, "/XRef")) {
+        Why(L"This PDF's cross-reference table is in a shape opennote does not read.");
+        return FALSE;
+    }
+
+    Span field;
+    int widths[3] = { 1, 1, 1 };
+    if (DictValue(body, "W", &field)) {
+        const char* at = field.at;
+        const char* end = field.at + field.len;
+
+        for (int i = 0; i < 3 && at < end; i++) {
+            while (at < end && (IsWhite(*at) || *at == '[')) at++;
+
+            Span number = { at, (size_t)(end - at) };
+            widths[i] = (int)AsNumber(number);
+
+            while (at < end && !IsWhite(*at) && *at != ']') at++;
+        }
+    }
+
+    int size = DictValue(body, "Size", &field) ? (int)AsNumber(field) : 0;
+
+    size_t dataLen = 0;
+    BYTE* data = DecodeStream(form, body, &dataLen);
+    if (!data) {
+        Why(L"This PDF's cross-reference table could not be decompressed.");
+        return FALSE;
+    }
+
+    if (!form->compressed) {
+        form->compressed = (Compressed*)calloc(MAX_OBJECTS, sizeof(Compressed));
+        if (!form->compressed) {
+            free(data);
+            return FALSE;
+        }
+    }
+
+    form->xrefIsStream = TRUE;
+
+    int rowLen = widths[0] + widths[1] + widths[2];
+    if (rowLen <= 0) {
+        free(data);
+        return FALSE;
+    }
+
+    // `/Index` gives the object numbers the rows are about, in pairs; with no
+    // index, they start at zero.
+    int index[64];
+    int indexCount = 0;
+
+    if (DictValue(body, "Index", &field)) {
+        const char* at = field.at;
+        const char* end = field.at + field.len;
+
+        while (at < end && indexCount < 64) {
+            while (at < end && (IsWhite(*at) || *at == '[')) at++;
+            if (at >= end || *at == ']') break;
+
+            Span number = { at, (size_t)(end - at) };
+            index[indexCount++] = (int)AsNumber(number);
+
+            while (at < end && !IsWhite(*at) && *at != ']') at++;
+        }
+    }
+
+    if (indexCount < 2) {
+        index[0] = 0;
+        index[1] = size;
+        indexCount = 2;
+    }
+
+    size_t row = 0;
+    for (int section = 0; section + 1 < indexCount; section += 2) {
+        int first = index[section];
+        int count = index[section + 1];
+
+        for (int i = 0; i < count; i++, row++) {
+            if ((row + 1) * (size_t)rowLen > dataLen) break;
+
+            const BYTE* at = data + row * rowLen;
+
+            // A missing first field means type 1, which is the default.
+            long long fields[3] = { 1, 0, 0 };
+            int taken = 0;
+
+            for (int f = 0; f < 3; f++) {
+                if (widths[f] == 0) continue;
+
+                long long value = 0;
+                for (int b = 0; b < widths[f]; b++) value = (value << 8) | at[taken + b];
+
+                fields[f] = value;
+                taken += widths[f];
+            }
+
+            int number = first + i;
+            if (number <= 0 || number >= MAX_OBJECTS) continue;
+            if (number >= form->objectCount) form->objectCount = number + 1;
+
+            // The newest table read wins, as with the classic one.
+            if (form->offsets[number] != 0 || form->compressed[number].stream > 0) continue;
+
+            if (fields[0] == 1) {
+                form->offsets[number] = (size_t)fields[1];
+            } else if (fields[0] == 2) {
+                form->compressed[number].stream = (int)fields[1];
+                form->compressed[number].index = (int)fields[2];
+            }
+        }
+    }
+
+    free(data);
+
+    // The stream's own dictionary is the trailer.
+    return ReadTrailer(form, body, depth);
+}
+
+
+
+static BOOL ReadTrailerImpl(PdfForm* form, Span trailer, int depth) {
     Span value;
 
     if (form->rootObject == 0 && DictValue(trailer, "Root", &value)) {
@@ -411,6 +800,10 @@ static BOOL ReadTrailer(PdfForm* form, Span trailer, int depth) {
     return TRUE;
 }
 
+static BOOL ReadTrailer(PdfForm* form, Span trailer, int depth) {
+    return ReadTrailerImpl(form, trailer, depth);
+}
+
 static BOOL ReadXrefAt(PdfForm* form, size_t offset, int depth) {
     if (depth > 32 || offset >= form->len) return FALSE;
 
@@ -420,11 +813,9 @@ static BOOL ReadXrefAt(PdfForm* form, size_t offset, int depth) {
     while (left > 0 && IsWhite(*at)) { at++; left--; }
 
     if (left < 4 || memcmp(at, "xref", 4) != 0) {
-        // A cross-reference stream: PDF 1.5's compressed spelling, which needs
-        // inflate to read. Refused rather than half-read.
-        Why(L"This PDF keeps its cross-reference table as a compressed stream, "
-            L"which opennote cannot read yet.");
-        return FALSE;
+        // A cross-reference stream: PDF 1.5's spelling, where the table is an
+        // object like any other and usually compressed.
+        return ReadXrefStream(form, offset, depth);
     }
 
     at += 4;
@@ -739,6 +1130,10 @@ extern "C" PdfForm* PdfForm_Open(const WCHAR* path, const WCHAR** whyOut) {
 
 extern "C" void PdfForm_Close(PdfForm* form) {
     if (!form) return;
+
+    for (int i = 0; i < form->decodedCount; i++) free(form->decoded[i].bytes);
+
+    free(form->compressed);
     free(form->bytes);
     free(form->offsets);
     free(form);
@@ -1068,18 +1463,75 @@ extern "C" BOOL PdfForm_Save(PdfForm* form, const WCHAR* path) {
         }
     }
 
-    // The new cross-reference table: one subsection per object, which is
-    // legal and saves sorting them.
+    // The new cross-reference, in whichever shape the file already uses. A
+    // reader that understands only streams would not see a classic table
+    // appended after one, so a 1.5 file gets a stream and a 1.4 file gets a
+    // table -- and neither is told about the other.
     size_t xrefOffset = out.len;
-    OutText(&out, "xref\n");
 
-    for (int i = 0; i < writtenCount; i++) {
-        OutFormat(&out, "%d 1\n%010zu 00000 n \n", written[i].number, written[i].offset);
+    if (form->xrefIsStream) {
+        int xrefObject = nextObject++;
+
+        // One row per object written, plus the table itself. /W [1 4 2]: a
+        // type byte, a four-byte offset, a two-byte generation.
+        int rows = writtenCount + 1;
+        BYTE* data = (BYTE*)malloc((size_t)rows * 7);
+        if (!data) {
+            free(out.bytes);
+            return FALSE;
+        }
+
+        for (int i = 0; i < writtenCount; i++) {
+            BYTE* row = data + (size_t)i * 7;
+            size_t offset = written[i].offset;
+
+            row[0] = 1;
+            row[1] = (BYTE)((offset >> 24) & 0xFF);
+            row[2] = (BYTE)((offset >> 16) & 0xFF);
+            row[3] = (BYTE)((offset >> 8) & 0xFF);
+            row[4] = (BYTE)(offset & 0xFF);
+            row[5] = 0;
+            row[6] = 0;
+        }
+
+        BYTE* last = data + (size_t)writtenCount * 7;
+        last[0] = 1;
+        last[1] = (BYTE)((xrefOffset >> 24) & 0xFF);
+        last[2] = (BYTE)((xrefOffset >> 16) & 0xFF);
+        last[3] = (BYTE)((xrefOffset >> 8) & 0xFF);
+        last[4] = (BYTE)(xrefOffset & 0xFF);
+        last[5] = 0;
+        last[6] = 0;
+
+        // The index names which object each row is about, in pairs. They are
+        // written in the order the objects were, which is why every pair is a
+        // run of one.
+        OutFormat(&out, "%d 0 obj\n<< /Type /XRef /Size %d /W [1 4 2] /Index [",
+                  xrefObject, nextObject);
+
+        for (int i = 0; i < writtenCount; i++) OutFormat(&out, "%d 1 ", written[i].number);
+        OutFormat(&out, "%d 1]", xrefObject);
+
+        OutFormat(&out, " /Root %d 0 R /Prev %zu /Length %d >>\nstream\n",
+                  form->rootObject, form->prevXref, rows * 7);
+
+        OutAdd(&out, (const char*)data, (size_t)rows * 7);
+        free(data);
+
+        OutText(&out, "\nendstream\nendobj\n");
+        OutFormat(&out, "startxref\n%zu\n%%%%EOF\n", xrefOffset);
+    } else {
+        // One subsection per object, which is legal and saves sorting them.
+        OutText(&out, "xref\n");
+
+        for (int i = 0; i < writtenCount; i++) {
+            OutFormat(&out, "%d 1\n%010zu 00000 n \n", written[i].number, written[i].offset);
+        }
+
+        OutFormat(&out,
+            "trailer\n<< /Size %d /Root %d 0 R /Prev %zu >>\nstartxref\n%zu\n%%%%EOF\n",
+            nextObject, form->rootObject, form->prevXref, xrefOffset);
     }
-
-    OutFormat(&out,
-        "trailer\n<< /Size %d /Root %d 0 R /Prev %zu >>\nstartxref\n%zu\n%%%%EOF\n",
-        nextObject, form->rootObject, form->prevXref, xrefOffset);
 
     if (out.failed) {
         free(out.bytes);
@@ -1170,6 +1622,92 @@ static BOOL WriteFormPdf(const WCHAR* path) {
     return ok;
 }
 
+
+// A PDF 1.5 form, byte for byte: its catalogue and its field live inside a
+// compressed object stream, and its cross-reference is a compressed stream
+// with a PNG predictor on it. That is what every writer has produced for
+// twenty years, and none of it can be read without an inflate -- so this is
+// the case that proves the inflate, the predictor, the object stream and the
+// cross-reference stream all work together.
+static const BYTE MODERN_FORM[] = {
+    0x25, 0x50, 0x44, 0x46, 0x2D, 0x31, 0x2E, 0x35, 0x0A, 0x35, 0x20, 0x30,
+    0x20, 0x6F, 0x62, 0x6A, 0x0A, 0x3C, 0x3C, 0x20, 0x2F, 0x4C, 0x65, 0x6E,
+    0x67, 0x74, 0x68, 0x20, 0x34, 0x32, 0x20, 0x3E, 0x3E, 0x0A, 0x73, 0x74,
+    0x72, 0x65, 0x61, 0x6D, 0x0A, 0x42, 0x54, 0x20, 0x2F, 0x48, 0x65, 0x6C,
+    0x76, 0x20, 0x31, 0x32, 0x20, 0x54, 0x66, 0x20, 0x37, 0x32, 0x20, 0x37,
+    0x34, 0x30, 0x20, 0x54, 0x64, 0x20, 0x28, 0x53, 0x75, 0x72, 0x6E, 0x61,
+    0x6D, 0x65, 0x3A, 0x29, 0x20, 0x54, 0x6A, 0x20, 0x45, 0x54, 0x0A, 0x65,
+    0x6E, 0x64, 0x73, 0x74, 0x72, 0x65, 0x61, 0x6D, 0x0A, 0x65, 0x6E, 0x64,
+    0x6F, 0x62, 0x6A, 0x0A, 0x36, 0x20, 0x30, 0x20, 0x6F, 0x62, 0x6A, 0x0A,
+    0x3C, 0x3C, 0x20, 0x2F, 0x54, 0x79, 0x70, 0x65, 0x20, 0x2F, 0x46, 0x6F,
+    0x6E, 0x74, 0x20, 0x2F, 0x53, 0x75, 0x62, 0x74, 0x79, 0x70, 0x65, 0x20,
+    0x2F, 0x54, 0x79, 0x70, 0x65, 0x31, 0x20, 0x2F, 0x42, 0x61, 0x73, 0x65,
+    0x46, 0x6F, 0x6E, 0x74, 0x20, 0x2F, 0x48, 0x65, 0x6C, 0x76, 0x65, 0x74,
+    0x69, 0x63, 0x61, 0x20, 0x2F, 0x45, 0x6E, 0x63, 0x6F, 0x64, 0x69, 0x6E,
+    0x67, 0x20, 0x2F, 0x57, 0x69, 0x6E, 0x41, 0x6E, 0x73, 0x69, 0x45, 0x6E,
+    0x63, 0x6F, 0x64, 0x69, 0x6E, 0x67, 0x20, 0x3E, 0x3E, 0x0A, 0x65, 0x6E,
+    0x64, 0x6F, 0x62, 0x6A, 0x0A, 0x37, 0x20, 0x30, 0x20, 0x6F, 0x62, 0x6A,
+    0x0A, 0x3C, 0x3C, 0x20, 0x2F, 0x54, 0x79, 0x70, 0x65, 0x20, 0x2F, 0x4F,
+    0x62, 0x6A, 0x53, 0x74, 0x6D, 0x20, 0x2F, 0x4E, 0x20, 0x34, 0x20, 0x2F,
+    0x46, 0x69, 0x72, 0x73, 0x74, 0x20, 0x32, 0x32, 0x20, 0x2F, 0x46, 0x69,
+    0x6C, 0x74, 0x65, 0x72, 0x20, 0x2F, 0x46, 0x6C, 0x61, 0x74, 0x65, 0x44,
+    0x65, 0x63, 0x6F, 0x64, 0x65, 0x20, 0x2F, 0x4C, 0x65, 0x6E, 0x67, 0x74,
+    0x68, 0x20, 0x32, 0x35, 0x31, 0x20, 0x3E, 0x3E, 0x0A, 0x73, 0x74, 0x72,
+    0x65, 0x61, 0x6D, 0x0A, 0x78, 0xDA, 0x7D, 0x51, 0x5D, 0x6B, 0x84, 0x30,
+    0x10, 0xFC, 0x2B, 0xF3, 0xE8, 0x3D, 0xE5, 0x43, 0xAB, 0x1C, 0x1C, 0x07,
+    0xF6, 0x8A, 0x14, 0x4A, 0xE1, 0xB0, 0xD2, 0x3E, 0x48, 0x1F, 0x52, 0x4D,
+    0x45, 0xF0, 0x4C, 0x49, 0x62, 0xB9, 0xFE, 0xFB, 0xAE, 0xF1, 0x5A, 0x39,
+    0x0A, 0x85, 0x6C, 0xC8, 0xEE, 0x4E, 0x66, 0x26, 0x1B, 0x01, 0x0E, 0x09,
+    0x21, 0x05, 0x62, 0x88, 0x34, 0x46, 0x02, 0xB9, 0x95, 0xD8, 0xED, 0xC0,
+    0xAA, 0xAF, 0x0F, 0x0D, 0x76, 0x50, 0x5E, 0x0D, 0xA6, 0x03, 0x3B, 0xAA,
+    0x4E, 0x3B, 0x82, 0x72, 0x94, 0x60, 0x79, 0x63, 0x4D, 0x61, 0xEC, 0x29,
+    0x00, 0x8B, 0x5E, 0x0F, 0xAD, 0x43, 0x9D, 0xCC, 0xBD, 0x57, 0xB0, 0xBB,
+    0x1C, 0x11, 0xBB, 0xD7, 0xC3, 0x27, 0xE5, 0xD5, 0x3B, 0x6D, 0xDD, 0x86,
+    0x8A, 0xE5, 0x82, 0x35, 0xA3, 0x0F, 0x87, 0xD0, 0x4F, 0x03, 0xDB, 0x7E,
+    0xBF, 0xAE, 0x55, 0x78, 0xD1, 0x63, 0x0F, 0xFD, 0x4C, 0x1D, 0x5F, 0xA8,
+    0x0F, 0x66, 0xA2, 0xFB, 0xE2, 0x2F, 0x72, 0xDE, 0xAD, 0xA6, 0xDE, 0xC5,
+    0xE0, 0xA3, 0x6E, 0x7B, 0x75, 0x6B, 0xCE, 0xA8, 0x39, 0x15, 0x52, 0x21,
+    0x91, 0x6D, 0x65, 0x20, 0x18, 0x3D, 0xC1, 0x1C, 0x6E, 0x16, 0x5C, 0xA9,
+    0x9D, 0x99, 0x6C, 0x43, 0x4A, 0xFF, 0xBB, 0x63, 0xF9, 0x38, 0x1A, 0xBF,
+    0x3E, 0xF2, 0xCA, 0x40, 0xE8, 0x81, 0x3D, 0x4D, 0x6F, 0x3E, 0xE4, 0x2F,
+    0x7D, 0xDB, 0x69, 0x2A, 0x14, 0x15, 0x21, 0xCE, 0x14, 0x88, 0xDC, 0x64,
+    0x47, 0x75, 0xD2, 0x34, 0x88, 0x67, 0x44, 0x9B, 0x59, 0xB7, 0xF1, 0xA8,
+    0x33, 0xB2, 0xC5, 0x39, 0x12, 0x8A, 0x4C, 0x26, 0x57, 0xA3, 0x23, 0xC7,
+    0xBF, 0xB3, 0x2B, 0xE8, 0x57, 0xD8, 0x11, 0xF1, 0x8F, 0x9F, 0x6F, 0x9D,
+    0x8D, 0x72, 0x59, 0x0A, 0x65, 0x6E, 0x64, 0x73, 0x74, 0x72, 0x65, 0x61,
+    0x6D, 0x0A, 0x65, 0x6E, 0x64, 0x6F, 0x62, 0x6A, 0x0A, 0x38, 0x20, 0x30,
+    0x20, 0x6F, 0x62, 0x6A, 0x0A, 0x3C, 0x3C, 0x20, 0x2F, 0x54, 0x79, 0x70,
+    0x65, 0x20, 0x2F, 0x58, 0x52, 0x65, 0x66, 0x20, 0x2F, 0x53, 0x69, 0x7A,
+    0x65, 0x20, 0x39, 0x20, 0x2F, 0x57, 0x20, 0x5B, 0x31, 0x20, 0x34, 0x20,
+    0x32, 0x5D, 0x20, 0x2F, 0x52, 0x6F, 0x6F, 0x74, 0x20, 0x31, 0x20, 0x30,
+    0x20, 0x52, 0x20, 0x2F, 0x46, 0x69, 0x6C, 0x74, 0x65, 0x72, 0x20, 0x2F,
+    0x46, 0x6C, 0x61, 0x74, 0x65, 0x44, 0x65, 0x63, 0x6F, 0x64, 0x65, 0x20,
+    0x2F, 0x44, 0x65, 0x63, 0x6F, 0x64, 0x65, 0x50, 0x61, 0x72, 0x6D, 0x73,
+    0x20, 0x3C, 0x3C, 0x20, 0x2F, 0x50, 0x72, 0x65, 0x64, 0x69, 0x63, 0x74,
+    0x6F, 0x72, 0x20, 0x31, 0x32, 0x20, 0x2F, 0x43, 0x6F, 0x6C, 0x75, 0x6D,
+    0x6E, 0x73, 0x20, 0x37, 0x20, 0x3E, 0x3E, 0x20, 0x2F, 0x4C, 0x65, 0x6E,
+    0x67, 0x74, 0x68, 0x20, 0x34, 0x32, 0x20, 0x3E, 0x3E, 0x0A, 0x73, 0x74,
+    0x72, 0x65, 0x61, 0x6D, 0x0A, 0x78, 0xDA, 0x63, 0x62, 0x00, 0x83, 0xFF,
+    0x4C, 0x4C, 0x40, 0x92, 0x9D, 0x81, 0x91, 0x09, 0xC2, 0xC7, 0xA4, 0xFF,
+    0x03, 0x49, 0x26, 0x86, 0xBF, 0x60, 0x7E, 0x34, 0x88, 0x09, 0x04, 0x89,
+    0x10, 0x9A, 0x29, 0x81, 0x81, 0x01, 0x00, 0x8A, 0x86, 0x04, 0x3B, 0x0A,
+    0x65, 0x6E, 0x64, 0x73, 0x74, 0x72, 0x65, 0x61, 0x6D, 0x0A, 0x65, 0x6E,
+    0x64, 0x6F, 0x62, 0x6A, 0x0A, 0x73, 0x74, 0x61, 0x72, 0x74, 0x78, 0x72,
+    0x65, 0x66, 0x0A, 0x35, 0x34, 0x39, 0x0A, 0x25, 0x25, 0x45, 0x4F, 0x46,
+    0x0A
+};
+
+static BOOL WriteBytes(const WCHAR* path, const BYTE* bytes, size_t len) {
+    HANDLE file = CreateFileW(path, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS,
+                              FILE_ATTRIBUTE_NORMAL, NULL);
+    if (file == INVALID_HANDLE_VALUE) return FALSE;
+
+    DWORD written = 0;
+    BOOL ok = WriteFile(file, bytes, (DWORD)len, &written, NULL) && written == (DWORD)len;
+    CloseHandle(file);
+    return ok;
+}
+
 extern "C" BOOL PdfForm_SelfTest(char* failure, size_t failureSize) {
     WCHAR temp[MAX_PATH];
     WCHAR path[MAX_PATH];
@@ -1246,6 +1784,38 @@ extern "C" BOOL PdfForm_SelfTest(char* failure, size_t failureSize) {
     int pages = Pdf_PageCount(rendered);
     Pdf_Close(rendered);
     if (pages != 1) FAIL("the filled form did not come back as one page");
+
+    // --- and the same, for a file in the shape everything writes today ---
+    if (!WriteBytes(path, MODERN_FORM, sizeof(MODERN_FORM))) {
+        FAIL("could not write the 1.5 test form");
+    }
+
+    form = PdfForm_Open(path, &why);
+    if (!form) FAIL("a PDF 1.5 form could not be opened");
+
+    if (PdfForm_FieldCount(form) != 1) FAIL("the 1.5 form's field was not found");
+    if (wcscmp(PdfForm_FieldName(form, 0), L"surname") != 0) {
+        FAIL("the 1.5 form's field came back with the wrong name");
+    }
+
+    if (!PdfForm_SetFieldValue(form, 0, L"Lovelace")) FAIL("the 1.5 field would not take a value");
+    if (!PdfForm_Save(form, filled)) FAIL("the filled 1.5 form could not be written");
+
+    PdfForm_Close(form);
+    form = NULL;
+
+    form = PdfForm_Open(filled, &why);
+    if (!form) FAIL("the filled 1.5 form could not be opened again");
+    if (wcscmp(PdfForm_FieldValue(form, 0), L"Lovelace") != 0) {
+        FAIL("the 1.5 form did not keep what was written into it");
+    }
+
+    PdfForm_Close(form);
+    form = NULL;
+
+    rendered = Pdf_Open(filled);
+    if (!rendered) FAIL("Windows would not open the filled 1.5 form");
+    Pdf_Close(rendered);
 
     DeleteFileW(path);
     DeleteFileW(filled);

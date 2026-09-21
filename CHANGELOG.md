@@ -11,6 +11,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **`OPENNOTE_DB`** names the database file, so a copy run from a stick keeps its notes
   beside itself rather than in whichever account it is plugged into — and a test that
   opens documents cannot write to the store somebody is actually using.
+- **The PDFs written this century open too.** A cross-reference stream, a PNG predictor
+  and the object streams a PDF 1.5 keeps its dictionaries in all need DEFLATE undone, so
+  opennote has an inflate of its own now — RFC 1951, about 300 lines, no new dependency.
+  A file in that shape is read, filled and written back the same way, and its update is a
+  cross-reference stream rather than a classic table.
 - **A PDF form can be filled in.** **File → Fill PDF Form…** lists the fields a PDF
   carries, fills them in and writes the result. The file is written as an *incremental
   update* — the original bytes, untouched, with the changed objects and a new

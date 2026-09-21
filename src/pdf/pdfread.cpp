@@ -174,7 +174,7 @@ extern "C" BOOL Pdf_PageSize(PdfFile* pdf, int pageIndex, float* widthPt, float*
     return TRUE;
 }
 
-extern "C" BOOL Pdf_RenderPage(PdfFile* pdf, int pageIndex, int widthPx,
+extern "C" BOOL Pdf_RenderPage(PdfFile* pdf, int pageIndex, int widthDip,
                                BYTE** bytesOut, size_t* lenOut) {
     if (!bytesOut || !lenOut) return FALSE;
     *bytesOut = NULL;
@@ -200,10 +200,14 @@ extern "C" BOOL Pdf_RenderPage(PdfFile* pdf, int pageIndex, int widthPx,
         return FALSE;
     }
 
-    // The width, when one is asked for. Everything else about the render is
-    // left to Windows: the default is the page at 96 dpi, encoded as PNG.
+    // The width, when one is asked for -- in DIPs, not pixels. Windows renders
+    // at the display's scale, so a page asked for at 400 comes back 900 across
+    // on a screen at 225%. That is what is wanted: the bitmap is drawn into a
+    // 400-DIP box and every pixel the screen has goes into it. Everything else
+    // about the render is left alone; the default is the page at 96 to the
+    // inch, encoded as PNG.
     IPdfPageRenderOptions* options = NULL;
-    if (widthPx > 0) {
+    if (widthDip > 0) {
         HSTRING optionsClass = MakeString(RuntimeClass_Windows_Data_Pdf_PdfPageRenderOptions);
         IInspectable* raw = NULL;
         if (optionsClass && SUCCEEDED(RoActivateInstance(optionsClass, &raw)) && raw) {
@@ -211,7 +215,7 @@ extern "C" BOOL Pdf_RenderPage(PdfFile* pdf, int pageIndex, int widthPx,
             raw->Release();
         }
         if (optionsClass) WindowsDeleteString(optionsClass);
-        if (options) options->put_DestinationWidth((UINT32)widthPx);
+        if (options) options->put_DestinationWidth((UINT32)widthDip);
     }
 
     IAsyncAction* action = NULL;
@@ -393,7 +397,12 @@ extern "C" BOOL Pdf_SelfTest(char* failure, size_t failureSize) {
 
     if (!isPng)   FAIL("the rendered page is not a PNG");
     if (!hasInk)  FAIL("the rendered page came out blank");
-    if (renderedWidth != 400) FAIL("the rendered page ignored the width it was given");
+
+    // The width asked for is in DIPs: on a screen at 225% the page comes back
+    // 900 across, which is the point. What has to hold is that the width was
+    // used at all -- a render that ignored it would come back at the page's
+    // own 384.
+    if (renderedWidth < 400) FAIL("the rendered page ignored the width it was given");
 
     DeleteFileW(path);
     failure[0] = '\0';

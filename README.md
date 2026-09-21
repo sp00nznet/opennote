@@ -114,8 +114,9 @@ has shipped the renderer since 8.1, so there is still no PDF library in here. **
 in and send back arrives as a PDF, and the free tools for it are adware or a web upload.
 File → Fill PDF Form lists the fields, takes what you type and writes a filled copy, as an
 incremental update: the original bytes stay, the answers are appended. Nothing here parses
-a PDF except the part that does that, and a file whose cross-reference is compressed is
-refused with a sentence saying so rather than read wrongly.
+a PDF except the part that does that — which now includes the compressed cross-reference
+streams and object streams every writer has produced since 2005, on top of an inflate
+written for the purpose: three hundred lines, no new dependency.
 
 Stamping a signature on one is next.
 

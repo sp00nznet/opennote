@@ -235,9 +235,11 @@ the free tools for it are adware or a web upload.
 - [x] **Fill in a form.** Done for the files this reads: classic cross-reference tables,
       text fields, appearance streams written per field so the value shows everywhere.
       The update is appended, so the original bytes never move.
-- [ ] **Inflate**, and with it the PDFs this cannot open yet: a file whose
-      cross-reference is a compressed stream (PDF 1.5 and later) is refused with a
-      sentence saying so. About 300 lines of deflate, and no new dependency.
+- [x] **Inflate**, and with it the PDFs written this century: a cross-reference stream
+      with a PNG predictor on it, and the object streams that a 1.5 file keeps its
+      dictionaries in. About 300 lines, no new dependency. An update written for such a
+      file is a cross-reference stream too, because a reader that understands only
+      streams would not see a classic table appended after one.
 - [ ] **A visible signature.** An image or an inked scribble placed on the page, stamped
       in as an XObject. This is what most people mean by "sign a PDF", and it is the
       same incremental-update machinery as a filled field.

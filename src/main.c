@@ -3,6 +3,7 @@
 #include "sync/crypto.h"
 #include "sync/oauth.h"
 #include "ui/editor_rich.h"
+#include "core/inflate.h"
 #include "pdf/pdfread.h"
 #include "pdf/pdfform.h"
 
@@ -39,6 +40,7 @@ static int RunSelfTest(void) {
         { "docedit",DocEdit_SelfTest},
         { "docx",   Docx_SelfTest   },
         { "layout", Layout_SelfTest },
+        { "inflate",Inflate_SelfTest},
         { "pdf",    Pdf_SelfTest    },
         { "pdfform",PdfForm_SelfTest},
     };
@@ -204,7 +206,8 @@ static int RunPdfInfo(int argc, WCHAR** argv) {
 
         BYTE* bytes = NULL;
         size_t len = 0;
-        if (Pdf_RenderPage(pdf, index, 1000, &bytes, &len)) {
+        int want = argc >= 6 ? _wtoi(argv[5]) : 1000;
+        if (Pdf_RenderPage(pdf, index, want, &bytes, &len)) {
             FILE* out = NULL;
             if (_wfopen_s(&out, argv[3], L"wb") == 0 && out) {
                 fwrite(bytes, 1, len, out);
