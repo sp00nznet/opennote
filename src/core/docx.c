@@ -29,6 +29,12 @@
 #define REL_OFFICE_DOCUMENT \
     L"http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument"
 
+#define REL_STYLES     L"http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles"
+#define REL_NUMBERING     L"http://schemas.openxmlformats.org/officeDocument/2006/relationships/numbering"
+
+#define CT_STYLES     L"application/vnd.openxmlformats-officedocument.wordprocessingml.styles+xml"
+#define CT_NUMBERING     L"application/vnd.openxmlformats-officedocument.wordprocessingml.numbering+xml"
+
 #define CT_MAIN_DOCUMENT \
     L"application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"
 
@@ -123,53 +129,72 @@ static COLORREF ParseHexColor(const WCHAR* hex, BOOL* ok) {
 // Opening the package and finding the main document part
 // ---------------------------------------------------------------------------
 
-static IStream* OpenMainDocumentPart(const WCHAR* path, IOpcPackage** packageOut) {
-    *packageOut = NULL;
+// ---------------------------------------------------------------------------
+// The package, and the parts hanging off the main document
+//
+// A .docx keeps its styles, its numbering, its images and its headers in
+// separate parts, each reached by a relationship from the document part. The
+// relationship is the authority for where a part lives: /word/styles.xml is
+// only a convention, and editing history moves things.
+// ---------------------------------------------------------------------------
 
-    IOpcFactory* factory = NULL;
+typedef struct {
+    IOpcFactory* factory;
+    IOpcPackage* package;
+    IOpcPartSet* parts;
+    IOpcPart*    docPart;
+    IOpcPartUri* docUri;
+} DocxPkg;
+
+static void ClosePackage(DocxPkg* pkg) {
+    if (pkg->docUri)  IOpcPartUri_Release(pkg->docUri);
+    if (pkg->docPart) IOpcPart_Release(pkg->docPart);
+    if (pkg->parts)   IOpcPartSet_Release(pkg->parts);
+    if (pkg->package) IOpcPackage_Release(pkg->package);
+    if (pkg->factory) IOpcFactory_Release(pkg->factory);
+    memset(pkg, 0, sizeof(*pkg));
+}
+
+static BOOL OpenPackage(const WCHAR* path, DocxPkg* pkg) {
+    memset(pkg, 0, sizeof(*pkg));
+
     HRESULT hr = CoCreateInstance(&CLSID_OpcFactory, NULL, CLSCTX_INPROC_SERVER,
-                                  &IID_IOpcFactory, (void**)&factory);
+                                  &IID_IOpcFactory, (void**)&pkg->factory);
     if (FAILED(hr)) {
         SetError(L"The Windows packaging component could not be created.");
-        return NULL;
+        return FALSE;
     }
 
     IStream* fileStream = NULL;
-    hr = IOpcFactory_CreateStreamOnFile(factory, path, OPC_STREAM_IO_READ,
+    hr = IOpcFactory_CreateStreamOnFile(pkg->factory, path, OPC_STREAM_IO_READ,
                                         NULL, 0, &fileStream);
     if (FAILED(hr)) {
         SetError(L"The file could not be opened.");
-        IOpcFactory_Release(factory);
-        return NULL;
+        ClosePackage(pkg);
+        return FALSE;
     }
 
-    IOpcPackage* package = NULL;
-    hr = IOpcFactory_ReadPackageFromStream(factory, fileStream,
-                                           OPC_CACHE_ON_ACCESS, &package);
+    hr = IOpcFactory_ReadPackageFromStream(pkg->factory, fileStream,
+                                           OPC_CACHE_ON_ACCESS, &pkg->package);
     IStream_Release(fileStream);
 
     if (FAILED(hr)) {
         SetError(L"This is not a valid Office package. A .doc renamed to .docx "
                  L"is a different format -- that one arrives in a later version.");
-        IOpcFactory_Release(factory);
-        return NULL;
+        ClosePackage(pkg);
+        return FALSE;
     }
 
-    IOpcPartSet* parts = NULL;
-    if (FAILED(IOpcPackage_GetPartSet(package, &parts))) {
+    if (FAILED(IOpcPackage_GetPartSet(pkg->package, &pkg->parts))) {
         SetError(L"The package has no parts.");
-        IOpcPackage_Release(package);
-        IOpcFactory_Release(factory);
-        return NULL;
+        ClosePackage(pkg);
+        return FALSE;
     }
-
-    IOpcPartUri* docUri = NULL;
 
     // The main document is whatever the package-level relationship of type
-    // officeDocument points at. It is /word/document.xml in practice, but
-    // editing history can move it, so the relationship is the authority.
+    // officeDocument points at.
     IOpcRelationshipSet* rels = NULL;
-    if (SUCCEEDED(IOpcPackage_GetRelationshipSet(package, &rels))) {
+    if (SUCCEEDED(IOpcPackage_GetRelationshipSet(pkg->package, &rels))) {
         IOpcRelationshipEnumerator* en = NULL;
         if (SUCCEEDED(IOpcRelationshipSet_GetEnumeratorForType(
                 rels, REL_OFFICE_DOCUMENT, &en))) {
@@ -180,8 +205,8 @@ static IStream* OpenMainDocumentPart(const WCHAR* path, IOpcPackage** packageOut
                     IUri* target = NULL;
                     if (SUCCEEDED(IOpcRelationship_GetTargetUri(rel, &target))) {
                         IOpcUri* root = NULL;
-                        if (SUCCEEDED(IOpcFactory_CreatePackageRootUri(factory, &root))) {
-                            IOpcUri_CombinePartUri(root, target, &docUri);
+                        if (SUCCEEDED(IOpcFactory_CreatePackageRootUri(pkg->factory, &root))) {
+                            IOpcUri_CombinePartUri(root, target, &pkg->docUri);
                             IOpcUri_Release(root);
                         }
                         IUri_Release(target);
@@ -196,31 +221,385 @@ static IStream* OpenMainDocumentPart(const WCHAR* path, IOpcPackage** packageOut
 
     // Fall back to the conventional location when the relationship is missing
     // or unreadable, rather than refusing a file every other reader opens.
-    if (!docUri) {
-        IOpcFactory_CreatePartUri(factory, L"/word/document.xml", &docUri);
+    if (!pkg->docUri) {
+        IOpcFactory_CreatePartUri(pkg->factory, L"/word/document.xml", &pkg->docUri);
     }
 
-    IStream* content = NULL;
-    if (docUri) {
-        IOpcPart* part = NULL;
-        if (SUCCEEDED(IOpcPartSet_GetPart(parts, docUri, &part))) {
-            IOpcPart_GetContentStream(part, &content);
-            IOpcPart_Release(part);
-        }
-        IOpcPartUri_Release(docUri);
-    }
-
-    IOpcPartSet_Release(parts);
-    IOpcFactory_Release(factory);
-
-    if (!content) {
+    if (!pkg->docUri ||
+        FAILED(IOpcPartSet_GetPart(pkg->parts, pkg->docUri, &pkg->docPart))) {
         SetError(L"The package contains no main document part.");
-        IOpcPackage_Release(package);
-        return NULL;
+        ClosePackage(pkg);
+        return FALSE;
     }
 
-    *packageOut = package;
-    return content;
+    return TRUE;
+}
+
+// The part a relationship of `relType` from the document points at. NULL when
+// the document has no such relationship, which is the ordinary case -- a
+// document with no lists has no numbering part.
+static IStream* RelatedStream(DocxPkg* pkg, const WCHAR* relType) {
+    IOpcRelationshipSet* rels = NULL;
+    if (FAILED(IOpcPart_GetRelationshipSet(pkg->docPart, &rels))) return NULL;
+
+    IStream* stream = NULL;
+    IOpcRelationshipEnumerator* en = NULL;
+
+    if (SUCCEEDED(IOpcRelationshipSet_GetEnumeratorForType(rels, relType, &en))) {
+        BOOL has = FALSE;
+        if (SUCCEEDED(IOpcRelationshipEnumerator_MoveNext(en, &has)) && has) {
+            IOpcRelationship* rel = NULL;
+            if (SUCCEEDED(IOpcRelationshipEnumerator_GetCurrent(en, &rel))) {
+                IUri* target = NULL;
+                if (SUCCEEDED(IOpcRelationship_GetTargetUri(rel, &target))) {
+                    IOpcPartUri* uri = NULL;
+                    // Relative to the document part, which is what puts
+                    // styles.xml beside document.xml wherever that is.
+                    if (SUCCEEDED(IOpcUri_CombinePartUri((IOpcUri*)pkg->docUri, target, &uri))) {
+                        IOpcPart* part = NULL;
+                        if (SUCCEEDED(IOpcPartSet_GetPart(pkg->parts, uri, &part))) {
+                            IOpcPart_GetContentStream(part, &stream);
+                            IOpcPart_Release(part);
+                        }
+                        IOpcPartUri_Release(uri);
+                    }
+                    IUri_Release(target);
+                }
+                IOpcRelationship_Release(rel);
+            }
+        }
+        IOpcRelationshipEnumerator_Release(en);
+    }
+
+    IOpcRelationshipSet_Release(rels);
+    return stream;
+}
+
+// ---------------------------------------------------------------------------
+// Properties, shared between the document and styles.xml
+//
+// `w:rPr` and `w:pPr` mean the same thing wherever they appear, which is why
+// reading them lives here rather than inside the document parser: a style
+// states its properties in exactly the elements a paragraph does.
+// ---------------------------------------------------------------------------
+
+static BOOL ReadRunProp(IXmlReader* r, const WCHAR* local, UINT len, CharProps* run) {
+    if (NameIs(local, len, L"b")) {
+        run->bold = AttrIsOn(r);
+    } else if (NameIs(local, len, L"i")) {
+        run->italic = AttrIsOn(r);
+    } else if (NameIs(local, len, L"u")) {
+        WCHAR val[32];
+        run->underline = !GetAttr(r, L"val", val, 32) || _wcsicmp(val, L"none") != 0;
+    } else if (NameIs(local, len, L"strike")) {
+        run->strike = AttrIsOn(r);
+    } else if (NameIs(local, len, L"sz")) {
+        int sz = AttrInt(r, L"val", 0);
+        if (sz > 0) run->halfPoints = sz;
+    } else if (NameIs(local, len, L"color")) {
+        WCHAR val[32];
+        if (GetAttr(r, L"val", val, 32)) {
+            BOOL ok = FALSE;
+            COLORREF c = ParseHexColor(val, &ok);
+            if (ok) {
+                run->hasColor = TRUE;
+                run->color = c;
+            }
+        }
+    } else if (NameIs(local, len, L"vertAlign")) {
+        WCHAR val[32];
+        if (GetAttr(r, L"val", val, 32)) {
+            run->superscript = (_wcsicmp(val, L"superscript") == 0);
+            run->subscript   = (_wcsicmp(val, L"subscript") == 0);
+        }
+    } else if (NameIs(local, len, L"rFonts")) {
+        WCHAR val[LF_FACESIZE];
+        if (GetAttr(r, L"ascii", val, LF_FACESIZE) && val[0]) {
+            wcsncpy_s(run->font, LF_FACESIZE, val, _TRUNCATE);
+        }
+    } else {
+        return FALSE;
+    }
+    return TRUE;
+}
+
+static BOOL ReadParaProp(IXmlReader* r, const WCHAR* local, UINT len, ParaProps* pp) {
+    if (NameIs(local, len, L"jc")) {
+        WCHAR val[32];
+        if (GetAttr(r, L"val", val, 32)) {
+            if (_wcsicmp(val, L"center") == 0)       pp->align = ALIGN_CENTER;
+            else if (_wcsicmp(val, L"right") == 0)   pp->align = ALIGN_RIGHT;
+            else if (_wcsicmp(val, L"both") == 0 ||
+                     _wcsicmp(val, L"justify") == 0) pp->align = ALIGN_JUSTIFY;
+            else                                     pp->align = ALIGN_LEFT;
+        }
+    } else if (NameIs(local, len, L"ind")) {
+        int left = AttrInt(r, L"left", -1);
+        if (left < 0) left = AttrInt(r, L"start", -1);
+        if (left > 0) pp->indentLeft = left;
+
+        int first = AttrInt(r, L"firstLine", 0);
+        int hang  = AttrInt(r, L"hanging", 0);
+        if (hang > 0)       pp->indentFirst = -hang;
+        else if (first > 0) pp->indentFirst = first;
+    } else if (NameIs(local, len, L"spacing")) {
+        int before = AttrInt(r, L"before", 0);
+        int after  = AttrInt(r, L"after", 0);
+        if (before > 0) pp->spaceBefore = before;
+        if (after > 0)  pp->spaceAfter = after;
+    } else {
+        return FALSE;
+    }
+    return TRUE;
+}
+
+// ---------------------------------------------------------------------------
+// numbering.xml
+//
+// Two levels of indirection: a paragraph names a `w:numId`, which names an
+// abstract numbering, which holds nine levels -- and a level says whether it
+// counts, how, and what the marker looks like. Reading it is what turns "this
+// paragraph is in a list" into "this paragraph is item (b)".
+// ---------------------------------------------------------------------------
+
+typedef struct {
+    BOOL         stated;
+    DocNumFormat fmt;
+    WCHAR        text[24];
+    int          indentLeft;
+    int          indentHanging;
+} NumLevel;
+
+typedef struct {
+    int      id;
+    NumLevel levels[9];
+} AbstractNum;
+
+typedef struct {
+    AbstractNum* abstracts;
+    int          abstractCount, abstractCap;
+
+    struct { int numId; int abstractId; }* map;
+    int mapCount, mapCap;
+} NumTable;
+
+static void FreeNumTable(NumTable* t) {
+    free(t->abstracts);
+    free(t->map);
+    memset(t, 0, sizeof(*t));
+}
+
+static DocNumFormat ParseNumFmt(const WCHAR* val) {
+    if (_wcsicmp(val, L"bullet") == 0)      return NUMFMT_BULLET;
+    if (_wcsicmp(val, L"lowerLetter") == 0) return NUMFMT_LOWER_LETTER;
+    if (_wcsicmp(val, L"upperLetter") == 0) return NUMFMT_UPPER_LETTER;
+    if (_wcsicmp(val, L"lowerRoman") == 0)  return NUMFMT_LOWER_ROMAN;
+    if (_wcsicmp(val, L"upperRoman") == 0)  return NUMFMT_UPPER_ROMAN;
+    return NUMFMT_DECIMAL;
+}
+
+static AbstractNum* AddAbstract(NumTable* t, int id) {
+    for (int i = 0; i < t->abstractCount; i++) {
+        if (t->abstracts[i].id == id) return &t->abstracts[i];
+    }
+    if (t->abstractCount == t->abstractCap) {
+        int cap = t->abstractCap ? t->abstractCap * 2 : 8;
+        AbstractNum* grown = (AbstractNum*)realloc(t->abstracts, (size_t)cap * sizeof(AbstractNum));
+        if (!grown) return NULL;
+        t->abstracts = grown;
+        t->abstractCap = cap;
+    }
+    AbstractNum* a = &t->abstracts[t->abstractCount++];
+    memset(a, 0, sizeof(*a));
+    a->id = id;
+    return a;
+}
+
+static void ReadNumbering(IStream* stream, NumTable* table) {
+    IXmlReader* reader = NULL;
+    if (FAILED(CreateXmlReader(&IID_IXmlReader, (void**)&reader, NULL))) return;
+    if (FAILED(IXmlReader_SetInput(reader, (IUnknown*)stream))) {
+        IXmlReader_Release(reader);
+        return;
+    }
+
+    AbstractNum* current = NULL;
+    NumLevel* level = NULL;
+    int pendingNumId = -1;
+
+    XmlNodeType nt;
+    while (S_OK == IXmlReader_Read(reader, &nt)) {
+        const WCHAR* local = NULL;
+        UINT len = 0;
+        if (nt != XmlNodeType_Element && nt != XmlNodeType_EndElement) continue;
+        if (FAILED(IXmlReader_GetLocalName(reader, &local, &len))) continue;
+
+        if (nt == XmlNodeType_Element) {
+            if (NameIs(local, len, L"abstractNum")) {
+                current = AddAbstract(table, AttrInt(reader, L"abstractNumId", -1));
+                level = NULL;
+            } else if (NameIs(local, len, L"lvl") && current) {
+                int ilvl = AttrInt(reader, L"ilvl", 0);
+                level = (ilvl >= 0 && ilvl < 9) ? &current->levels[ilvl] : NULL;
+                if (level) {
+                    memset(level, 0, sizeof(*level));
+                    level->stated = TRUE;
+                    level->fmt = NUMFMT_DECIMAL;
+                }
+            } else if (level && NameIs(local, len, L"numFmt")) {
+                WCHAR val[32];
+                if (GetAttr(reader, L"val", val, 32)) level->fmt = ParseNumFmt(val);
+            } else if (level && NameIs(local, len, L"lvlText")) {
+                GetAttr(reader, L"val", level->text, 24);
+            } else if (level && NameIs(local, len, L"ind")) {
+                int left = AttrInt(reader, L"left", -1);
+                if (left < 0) left = AttrInt(reader, L"start", -1);
+                if (left > 0) level->indentLeft = left;
+                int hang = AttrInt(reader, L"hanging", 0);
+                if (hang > 0) level->indentHanging = hang;
+            } else if (NameIs(local, len, L"num")) {
+                pendingNumId = AttrInt(reader, L"numId", -1);
+            } else if (NameIs(local, len, L"abstractNumId") && pendingNumId >= 0) {
+                int absId = AttrInt(reader, L"val", -1);
+                if (absId >= 0) {
+                    if (table->mapCount == table->mapCap) {
+                        int cap = table->mapCap ? table->mapCap * 2 : 8;
+                        void* grown = realloc(table->map, (size_t)cap * sizeof(*table->map));
+                        if (grown) {
+                            table->map = grown;
+                            table->mapCap = cap;
+                        }
+                    }
+                    if (table->mapCount < table->mapCap) {
+                        table->map[table->mapCount].numId = pendingNumId;
+                        table->map[table->mapCount].abstractId = absId;
+                        table->mapCount++;
+                    }
+                }
+                pendingNumId = -1;
+            }
+        } else {
+            if (NameIs(local, len, L"lvl")) level = NULL;
+            else if (NameIs(local, len, L"abstractNum")) current = NULL;
+        }
+    }
+
+    IXmlReader_Release(reader);
+}
+
+// Turn a `w:numId` and a level into what the paragraph actually looks like.
+static void ApplyNumbering(const NumTable* table, int numId, int ilvl, ParaProps* pp) {
+    pp->listId = numId;
+    pp->listLevel = (ilvl >= 0 && ilvl < 9) ? ilvl : 0;
+
+    const NumLevel* level = NULL;
+    for (int i = 0; i < table->mapCount && !level; i++) {
+        if (table->map[i].numId != numId) continue;
+        for (int a = 0; a < table->abstractCount; a++) {
+            if (table->abstracts[a].id != table->map[i].abstractId) continue;
+            const NumLevel* candidate = &table->abstracts[a].levels[pp->listLevel];
+            if (candidate->stated) level = candidate;
+            break;
+        }
+    }
+
+    if (!level) {
+        // A list whose numbering part says nothing about it. Bulleted is what
+        // the reader assumed before any of this existed, and it is still the
+        // safer guess than counting something Word does not count.
+        pp->list = LIST_BULLET;
+        pp->numFormat = NUMFMT_BULLET;
+        return;
+    }
+
+    pp->numFormat = level->fmt;
+    pp->list = (level->fmt == NUMFMT_BULLET) ? LIST_BULLET : LIST_NUMBER;
+    if (level->fmt != NUMFMT_BULLET && level->text[0]) {
+        wcsncpy_s(pp->listText, 24, level->text, _TRUNCATE);
+    }
+
+    // The level's indents, unless the paragraph stated its own.
+    if (level->indentLeft && !pp->indentLeft) pp->indentLeft = level->indentLeft;
+    if (level->indentHanging && !pp->indentFirst) pp->indentFirst = -level->indentHanging;
+}
+
+// ---------------------------------------------------------------------------
+// styles.xml
+// ---------------------------------------------------------------------------
+
+// "heading 1" as a style name, or "Heading1" as an id, is how a document says
+// this paragraph is a heading. Both spellings appear in the wild.
+static int HeadingLevelOf(const WCHAR* text) {
+    if (!text || !text[0]) return 0;
+
+    const WCHAR* rest = NULL;
+    if (_wcsnicmp(text, L"heading", 7) == 0) rest = text + 7;
+    else return 0;
+
+    while (*rest == L' ') rest++;
+    int level = _wtoi(rest);
+    if (level < 1 || level > 6) return 0;
+    return level;
+}
+
+static void ReadStyles(IStream* stream, DocModel* doc) {
+    IXmlReader* reader = NULL;
+    if (FAILED(CreateXmlReader(&IID_IXmlReader, (void**)&reader, NULL))) return;
+    if (FAILED(IXmlReader_SetInput(reader, (IUnknown*)stream))) {
+        IXmlReader_Release(reader);
+        return;
+    }
+
+    DocStyle* style = NULL;
+    BOOL inDefaults = FALSE;
+    BOOL inRunProps = FALSE;
+    BOOL inParaProps = FALSE;
+
+    XmlNodeType nt;
+    while (S_OK == IXmlReader_Read(reader, &nt)) {
+        const WCHAR* local = NULL;
+        UINT len = 0;
+        if (nt != XmlNodeType_Element && nt != XmlNodeType_EndElement) continue;
+        if (FAILED(IXmlReader_GetLocalName(reader, &local, &len))) continue;
+
+        if (nt == XmlNodeType_Element) {
+            if (NameIs(local, len, L"docDefaults")) {
+                inDefaults = TRUE;
+            } else if (NameIs(local, len, L"style")) {
+                WCHAR id[64];
+                if (GetAttr(reader, L"styleId", id, 64)) {
+                    style = Doc_AddStyle(doc, id);
+                    if (style) style->para.headingLevel = HeadingLevelOf(id);
+                }
+            } else if (NameIs(local, len, L"name") && style) {
+                WCHAR val[64];
+                if (GetAttr(reader, L"val", val, 64)) {
+                    wcsncpy_s(style->name, 64, val, _TRUNCATE);
+                    int level = HeadingLevelOf(val);
+                    if (level) style->para.headingLevel = level;
+                }
+            } else if (NameIs(local, len, L"basedOn") && style) {
+                GetAttr(reader, L"val", style->basedOn, 64);
+            } else if (NameIs(local, len, L"rPr")) {
+                inRunProps = TRUE;
+            } else if (NameIs(local, len, L"pPr")) {
+                inParaProps = TRUE;
+            } else if (inRunProps) {
+                CharProps* target = style ? &style->run : (inDefaults ? &doc->defaultRun : NULL);
+                if (target) ReadRunProp(reader, local, len, target);
+            } else if (inParaProps) {
+                ParaProps* target = style ? &style->para : (inDefaults ? &doc->defaultPara : NULL);
+                if (target) ReadParaProp(reader, local, len, target);
+            }
+        } else {
+            if (NameIs(local, len, L"style"))            style = NULL;
+            else if (NameIs(local, len, L"docDefaults")) inDefaults = FALSE;
+            else if (NameIs(local, len, L"rPr"))         inRunProps = FALSE;
+            else if (NameIs(local, len, L"pPr"))         inParaProps = FALSE;
+        }
+    }
+
+    IXmlReader_Release(reader);
 }
 
 // ---------------------------------------------------------------------------
@@ -245,6 +624,12 @@ typedef struct {
     BOOL inTblGrid;
     BOOL inText;
 
+    // A `w:numPr` names a list and a level in two child elements, so both are
+    // collected before either can be resolved.
+    BOOL inNumPr;
+    int  numId;
+    int  ilvl;
+
     int  skipDepth;             // >0 inside content that is not document text
 } Build;
 
@@ -252,7 +637,7 @@ static DocPara* NewParagraph(Build* b) {
     return b->cell ? Doc_AddCellPara(b->cell) : Doc_AddPara(b->doc);
 }
 
-static BOOL BuildModel(IStream* stream, DocModel* doc) {
+static BOOL BuildModel(IStream* stream, DocModel* doc, const NumTable* numbering) {
     IXmlReader* reader = NULL;
     if (FAILED(CreateXmlReader(&IID_IXmlReader, (void**)&reader, NULL))) {
         SetError(L"The XML reader could not be created.");
@@ -291,8 +676,10 @@ static BOOL BuildModel(IStream* stream, DocModel* doc) {
 
             if (NameIs(local, len, L"p")) {
                 b.para = NewParagraph(&b);
-                memset(&b.run, 0, sizeof(b.run));
-                memset(&b.paraDefaultRun, 0, sizeof(b.paraDefaultRun));
+                // What `w:docDefaults` states is where every paragraph starts.
+                if (b.para) b.para->props = doc->defaultPara;
+                b.paraDefaultRun = doc->defaultRun;
+                b.run = b.paraDefaultRun;
             } else if (NameIs(local, len, L"pPr")) {
                 b.inParaProps = TRUE;
             } else if (NameIs(local, len, L"rPr")) {
@@ -302,91 +689,72 @@ static BOOL BuildModel(IStream* stream, DocModel* doc) {
             }
 
             // --- paragraph properties ---
-            else if (b.inParaProps && b.para && NameIs(local, len, L"jc")) {
-                WCHAR val[32];
-                if (GetAttr(reader, L"val", val, 32)) {
-                    if (_wcsicmp(val, L"center") == 0)       b.para->props.align = ALIGN_CENTER;
-                    else if (_wcsicmp(val, L"right") == 0)   b.para->props.align = ALIGN_RIGHT;
-                    else if (_wcsicmp(val, L"both") == 0 ||
-                             _wcsicmp(val, L"justify") == 0) b.para->props.align = ALIGN_JUSTIFY;
-                    else                                     b.para->props.align = ALIGN_LEFT;
+            else if (b.inParaProps && b.para && NameIs(local, len, L"numPr")) {
+                b.inNumPr = TRUE;
+                b.numId = -1;
+                b.ilvl = 0;
+                if (empty) {
+                    // `<w:numPr/>` with nothing in it: a list with no number.
+                    b.para->props.list = LIST_BULLET;
+                    b.para->props.numFormat = NUMFMT_BULLET;
+                    b.inNumPr = FALSE;
                 }
-            } else if (b.inParaProps && b.para && NameIs(local, len, L"ind")) {
-                int left = AttrInt(reader, L"left", -1);
-                if (left < 0) left = AttrInt(reader, L"start", -1);
-                if (left > 0) b.para->props.indentLeft = left;
-                int first = AttrInt(reader, L"firstLine", 0);
-                int hang  = AttrInt(reader, L"hanging", 0);
-                if (hang > 0)       b.para->props.indentFirst = -hang;
-                else if (first > 0) b.para->props.indentFirst = first;
-            } else if (b.inParaProps && b.para && NameIs(local, len, L"spacing")) {
-                int before = AttrInt(reader, L"before", 0);
-                int after  = AttrInt(reader, L"after", 0);
-                if (before > 0) b.para->props.spaceBefore = before;
-                if (after > 0)  b.para->props.spaceAfter = after;
-            } else if (b.inParaProps && b.para && NameIs(local, len, L"numPr")) {
-                // Which marker a list uses lives in numbering.xml behind two
-                // levels of indirection, which v0.9 follows. Bulleted is the
-                // common case and is what is assumed until then.
-                b.para->props.list = LIST_BULLET;
-            } else if (b.inParaProps && b.para && NameIs(local, len, L"ilvl")) {
-                b.para->props.listLevel = AttrInt(reader, L"val", 0);
+            } else if (b.inNumPr && NameIs(local, len, L"numId")) {
+                b.numId = AttrInt(reader, L"val", -1);
+            } else if (b.inNumPr && NameIs(local, len, L"ilvl")) {
+                b.ilvl = AttrInt(reader, L"val", 0);
             } else if (b.inParaProps && b.para && NameIs(local, len, L"pStyle")) {
                 WCHAR val[64];
                 if (GetAttr(reader, L"val", val, 64)) {
-                    // Heading styles carry their weight in styles.xml. Until
-                    // that is resolved (v0.9), headings are given the shape
-                    // readers expect, scaled by level.
-                    if (_wcsnicmp(val, L"Heading", 7) == 0) {
-                        int level = _wtoi(val + 7);
-                        if (level < 1) level = 1;
-                        if (level > 6) level = 6;
-                        b.para->props.headingLevel = level;
-                        b.paraDefaultRun.bold = TRUE;
-                        b.paraDefaultRun.halfPoints = 36 - (level - 1) * 4;
-                        if (b.paraDefaultRun.halfPoints < 22) b.paraDefaultRun.halfPoints = 22;
+                    if (Doc_FindStyle(doc, val)) {
+                        // The style table says what this paragraph looks like.
+                        // Resolving it here rather than at layout time keeps
+                        // the model a description of the document rather than
+                        // a set of references that have to be chased again.
+                        ParaProps resolved = b.para->props;
+                        ParaProps fromStyle;
+                        CharProps runFromStyle;
+                        Doc_ResolveStyle(doc, val, &fromStyle, &runFromStyle);
+
+                        fromStyle.list = resolved.list;
+                        fromStyle.listLevel = resolved.listLevel;
+                        fromStyle.numFormat = resolved.numFormat;
+                        b.para->props = fromStyle;
+
+                        b.paraDefaultRun = runFromStyle;
                         b.run = b.paraDefaultRun;
-                        if (!b.para->props.spaceBefore) b.para->props.spaceBefore = 240;
-                        if (!b.para->props.spaceAfter)  b.para->props.spaceAfter = 120;
+                    } else {
+                        // No styles.xml, or a style it does not define. A
+                        // heading still has to look like one, so the old
+                        // approximation stays as the fallback it always was.
+                        wcsncpy_s(b.para->props.style, 64, val, _TRUNCATE);
+                        int level = HeadingLevelOf(val);
+                        if (level) {
+                            b.para->props.headingLevel = level;
+                            b.paraDefaultRun.bold = TRUE;
+                            b.paraDefaultRun.halfPoints = 36 - (level - 1) * 4;
+                            if (b.paraDefaultRun.halfPoints < 22) b.paraDefaultRun.halfPoints = 22;
+                            b.run = b.paraDefaultRun;
+                            if (!b.para->props.spaceBefore) b.para->props.spaceBefore = 240;
+                            if (!b.para->props.spaceAfter)  b.para->props.spaceAfter = 120;
+                        }
                     }
                 }
+            } else if (b.inParaProps && b.para &&
+                       ReadParaProp(reader, local, len, &b.para->props)) {
+                // jc, ind and spacing, read the same way styles.xml reads them.
             }
 
             // --- run properties ---
-            else if (b.inRunProps && NameIs(local, len, L"b")) {
-                b.run.bold = AttrIsOn(reader);
-            } else if (b.inRunProps && NameIs(local, len, L"i")) {
-                b.run.italic = AttrIsOn(reader);
-            } else if (b.inRunProps && NameIs(local, len, L"u")) {
-                WCHAR val[32];
-                b.run.underline = !GetAttr(reader, L"val", val, 32) ||
-                                  _wcsicmp(val, L"none") != 0;
-            } else if (b.inRunProps && NameIs(local, len, L"strike")) {
-                b.run.strike = AttrIsOn(reader);
-            } else if (b.inRunProps && NameIs(local, len, L"sz")) {
-                int sz = AttrInt(reader, L"val", 0);
-                if (sz > 0) b.run.halfPoints = sz;
-            } else if (b.inRunProps && NameIs(local, len, L"color")) {
-                WCHAR val[32];
-                if (GetAttr(reader, L"val", val, 32)) {
-                    BOOL ok = FALSE;
-                    COLORREF c = ParseHexColor(val, &ok);
-                    if (ok) {
-                        b.run.hasColor = TRUE;
-                        b.run.color = c;
-                    }
+            else if (b.inRunProps && NameIs(local, len, L"rStyle")) {
+                WCHAR val[64];
+                if (GetAttr(reader, L"val", val, 64) && Doc_FindStyle(doc, val)) {
+                    CharProps fromStyle;
+                    Doc_ResolveStyle(doc, val, NULL, &fromStyle);
+                    b.run = fromStyle;
                 }
-            } else if (b.inRunProps && NameIs(local, len, L"vertAlign")) {
-                WCHAR val[32];
-                if (GetAttr(reader, L"val", val, 32)) {
-                    b.run.superscript = (_wcsicmp(val, L"superscript") == 0);
-                    b.run.subscript   = (_wcsicmp(val, L"subscript") == 0);
-                }
-            } else if (b.inRunProps && NameIs(local, len, L"rFonts")) {
-                WCHAR val[LF_FACESIZE];
-                if (GetAttr(reader, L"ascii", val, LF_FACESIZE) && val[0]) {
-                    wcsncpy_s(b.run.font, LF_FACESIZE, val, _TRUNCATE);
-                }
+            } else if (b.inRunProps && ReadRunProp(reader, local, len, &b.run)) {
+                // b, i, u, strike, sz, color, vertAlign, rFonts.
             }
 
             // --- content ---
@@ -454,7 +822,17 @@ static BOOL BuildModel(IStream* stream, DocModel* doc) {
             }
             if (b.skipDepth > 0) continue;
 
-            if (NameIs(local, len, L"t"))            b.inText = FALSE;
+            if (NameIs(local, len, L"numPr")) {
+                if (b.inNumPr && b.para) {
+                    if (b.numId > 0) ApplyNumbering(numbering, b.numId, b.ilvl, &b.para->props);
+                    else {
+                        b.para->props.list = LIST_BULLET;
+                        b.para->props.numFormat = NUMFMT_BULLET;
+                    }
+                }
+                b.inNumPr = FALSE;
+            }
+            else if (NameIs(local, len, L"t"))       b.inText = FALSE;
             else if (NameIs(local, len, L"pPr"))     b.inParaProps = FALSE;
             else if (NameIs(local, len, L"rPr"))     b.inRunProps = FALSE;
             else if (NameIs(local, len, L"tblGrid")) b.inTblGrid = FALSE;
@@ -485,18 +863,43 @@ DocModel* Docx_ReadToModel(const WCHAR* path) {
     HRESULT init = CoInitializeEx(NULL, COINIT_APARTMENTTHREADED);
     BOOL needUninit = SUCCEEDED(init);
 
-    IOpcPackage* package = NULL;
-    IStream* docStream = OpenMainDocumentPart(path, &package);
-    if (!docStream) {
+    DocxPkg pkg;
+    if (!OpenPackage(path, &pkg)) {
         if (needUninit) CoUninitialize();
         return NULL;
     }
 
     DocModel* doc = Doc_New();
-    BOOL ok = doc && BuildModel(docStream, doc);
+    NumTable numbering = {0};
+    BOOL ok = FALSE;
 
-    IStream_Release(docStream);
-    IOpcPackage_Release(package);
+    if (doc) {
+        // Styles and numbering first: the document part refers to both, and a
+        // paragraph cannot be resolved against a style table that has not been
+        // read yet.
+        IStream* styles = RelatedStream(&pkg, REL_STYLES);
+        if (styles) {
+            ReadStyles(styles, doc);
+            IStream_Release(styles);
+        }
+
+        IStream* nums = RelatedStream(&pkg, REL_NUMBERING);
+        if (nums) {
+            ReadNumbering(nums, &numbering);
+            IStream_Release(nums);
+        }
+
+        IStream* docStream = NULL;
+        if (SUCCEEDED(IOpcPart_GetContentStream(pkg.docPart, &docStream)) && docStream) {
+            ok = BuildModel(docStream, doc, &numbering);
+            IStream_Release(docStream);
+        } else {
+            SetError(L"The main document part could not be read.");
+        }
+    }
+
+    FreeNumTable(&numbering);
+    ClosePackage(&pkg);
     if (needUninit) CoUninitialize();
 
     if (!ok) {
@@ -555,38 +958,50 @@ static void EmitRunProps(StrBuf* x, const CharProps* p) {
     SB_Add(x, "</w:rPr>");
 }
 
-static void EmitParaProps(StrBuf* x, const ParaProps* p) {
-    StrBuf inner = {0};
+// The properties themselves. `styleRefs` is off when writing a style, which
+// cannot refer to itself and cannot be in a list.
+static void EmitParaPropsInner(StrBuf* inner, const ParaProps* p, BOOL styleRefs) {
+    if (styleRefs) {
+        if (p->style[0]) {
+            SB_Add(inner, "<w:pStyle w:val=\"");
+            SB_AddXmlText(inner, p->style, -1);
+            SB_Add(inner, "\"/>");
+        } else if (p->headingLevel > 0) {
+            SB_AddF(inner, "<w:pStyle w:val=\"Heading%d\"/>", p->headingLevel);
+        }
 
-    if (p->headingLevel > 0) {
-        SB_AddF(&inner, "<w:pStyle w:val=\"Heading%d\"/>", p->headingLevel);
-    }
-    if (p->list != LIST_NONE) {
-        SB_AddF(&inner, "<w:numPr><w:ilvl w:val=\"%d\"/><w:numId w:val=\"1\"/></w:numPr>",
-                p->listLevel);
+        if (p->list != LIST_NONE) {
+            SB_AddF(inner, "<w:numPr><w:ilvl w:val=\"%d\"/><w:numId w:val=\"%d\"/></w:numPr>",
+                    p->listLevel, p->listId > 0 ? p->listId : 1);
+        }
     }
 
     switch (p->align) {
-        case ALIGN_CENTER:  SB_Add(&inner, "<w:jc w:val=\"center\"/>"); break;
-        case ALIGN_RIGHT:   SB_Add(&inner, "<w:jc w:val=\"right\"/>");  break;
-        case ALIGN_JUSTIFY: SB_Add(&inner, "<w:jc w:val=\"both\"/>");   break;
+        case ALIGN_CENTER:  SB_Add(inner, "<w:jc w:val=\"center\"/>"); break;
+        case ALIGN_RIGHT:   SB_Add(inner, "<w:jc w:val=\"right\"/>");  break;
+        case ALIGN_JUSTIFY: SB_Add(inner, "<w:jc w:val=\"both\"/>");   break;
         default: break;
     }
 
     if (p->indentLeft || p->indentFirst) {
-        SB_Add(&inner, "<w:ind");
-        if (p->indentLeft) SB_AddF(&inner, " w:left=\"%d\"", p->indentLeft);
-        if (p->indentFirst < 0) SB_AddF(&inner, " w:hanging=\"%d\"", -p->indentFirst);
-        else if (p->indentFirst > 0) SB_AddF(&inner, " w:firstLine=\"%d\"", p->indentFirst);
-        SB_Add(&inner, "/>");
+        SB_Add(inner, "<w:ind");
+        if (p->indentLeft) SB_AddF(inner, " w:left=\"%d\"", p->indentLeft);
+        if (p->indentFirst < 0) SB_AddF(inner, " w:hanging=\"%d\"", -p->indentFirst);
+        else if (p->indentFirst > 0) SB_AddF(inner, " w:firstLine=\"%d\"", p->indentFirst);
+        SB_Add(inner, "/>");
     }
 
     if (p->spaceBefore || p->spaceAfter) {
-        SB_Add(&inner, "<w:spacing");
-        if (p->spaceBefore) SB_AddF(&inner, " w:before=\"%d\"", p->spaceBefore);
-        if (p->spaceAfter)  SB_AddF(&inner, " w:after=\"%d\"", p->spaceAfter);
-        SB_Add(&inner, "/>");
+        SB_Add(inner, "<w:spacing");
+        if (p->spaceBefore) SB_AddF(inner, " w:before=\"%d\"", p->spaceBefore);
+        if (p->spaceAfter)  SB_AddF(inner, " w:after=\"%d\"", p->spaceAfter);
+        SB_Add(inner, "/>");
     }
+}
+
+static void EmitParaProps(StrBuf* x, const ParaProps* p) {
+    StrBuf inner = {0};
+    EmitParaPropsInner(&inner, p, TRUE);
 
     if (inner.len) {
         SB_Add(x, "<w:pPr>");
@@ -647,6 +1062,224 @@ static void EmitTable(StrBuf* x, const DocBlock* block) {
     SB_Add(x, "</w:tbl>");
 }
 
+// ---------------------------------------------------------------------------
+// styles.xml and numbering.xml, written back out
+//
+// A document that came in with styles goes out with them: the paragraphs carry
+// resolved properties for laying out, and the style table carries the names.
+// A document that never had a style table still needs one for its headings,
+// which is what the synthesised styles below are for.
+// ---------------------------------------------------------------------------
+
+static void EmitStyleBody(StrBuf* x, const ParaProps* pp, const CharProps* cp) {
+    StrBuf inner = {0};
+    EmitParaPropsInner(&inner, pp, FALSE);
+    if (inner.len) {
+        SB_Add(x, "<w:pPr>");
+        SB_Add(x, inner.buf);
+        SB_Add(x, "</w:pPr>");
+    }
+    SB_Free(&inner);
+
+    EmitRunProps(x, cp);
+}
+
+// Which heading levels the document uses but the style table does not define.
+static void HeadingsInUse(const DocModel* doc, BOOL used[7]) {
+    for (int i = 0; i < 7; i++) used[i] = FALSE;
+
+    for (const DocBlock* b = doc->blocks; b; b = b->next) {
+        const DocPara* paras = (b->kind == BLOCK_PARA) ? b->para : NULL;
+        for (const DocPara* p = paras; p; p = p->next) {
+            int level = p->props.headingLevel;
+            if (level >= 1 && level <= 6) used[level] = TRUE;
+        }
+        if (b->kind != BLOCK_TABLE) continue;
+        for (const DocRow* r = b->table.rows; r; r = r->next) {
+            for (const DocCell* c = r->cells; c; c = c->next) {
+                for (const DocPara* p = c->paras; p; p = p->next) {
+                    int level = p->props.headingLevel;
+                    if (level >= 1 && level <= 6) used[level] = TRUE;
+                }
+            }
+        }
+    }
+}
+
+static BOOL BuildStylesXml(const DocModel* doc, StrBuf* x) {
+    SB_Add(x, "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>\r\n"
+              "<w:styles xmlns:w=\"" WML_NS "\">");
+
+    SB_Add(x, "<w:docDefaults><w:rPrDefault>");
+    EmitRunProps(x, &doc->defaultRun);
+    SB_Add(x, "</w:rPrDefault><w:pPrDefault>");
+    {
+        StrBuf inner = {0};
+        EmitParaPropsInner(&inner, &doc->defaultPara, FALSE);
+        if (inner.len) {
+            SB_Add(x, "<w:pPr>");
+            SB_Add(x, inner.buf);
+            SB_Add(x, "</w:pPr>");
+        }
+        SB_Free(&inner);
+    }
+    SB_Add(x, "</w:pPrDefault></w:docDefaults>");
+
+    BOOL haveNormal = Doc_FindStyle(doc, L"Normal") != NULL;
+    if (!haveNormal) {
+        SB_Add(x, "<w:style w:type=\"paragraph\" w:default=\"1\" w:styleId=\"Normal\">"
+                  "<w:name w:val=\"Normal\"/></w:style>");
+    }
+
+    for (const DocStyle* st = doc->styles; st; st = st->next) {
+        SB_Add(x, "<w:style w:type=\"paragraph\" w:styleId=\"");
+        SB_AddXmlText(x, st->id, -1);
+        SB_Add(x, "\">");
+
+        SB_Add(x, "<w:name w:val=\"");
+        SB_AddXmlText(x, st->name[0] ? st->name : st->id, -1);
+        SB_Add(x, "\"/>");
+
+        if (st->basedOn[0]) {
+            SB_Add(x, "<w:basedOn w:val=\"");
+            SB_AddXmlText(x, st->basedOn, -1);
+            SB_Add(x, "\"/>");
+        }
+
+        EmitStyleBody(x, &st->para, &st->run);
+        SB_Add(x, "</w:style>");
+    }
+
+    // Headings the document uses that the table says nothing about -- a
+    // document captured from the editor, or one that never had a styles part.
+    BOOL used[7];
+    HeadingsInUse(doc, used);
+    for (int level = 1; level <= 6; level++) {
+        WCHAR id[16];
+        swprintf_s(id, 16, L"Heading%d", level);
+        if (!used[level] || Doc_FindStyle(doc, id)) continue;
+
+        SB_AddF(x, "<w:style w:type=\"paragraph\" w:styleId=\"Heading%d\">"
+                   "<w:name w:val=\"heading %d\"/><w:basedOn w:val=\"Normal\"/>"
+                   "<w:pPr><w:outlineLvl w:val=\"%d\"/></w:pPr>"
+                   "<w:rPr><w:b/><w:sz w:val=\"%d\"/></w:rPr></w:style>",
+                level, level, level - 1,
+                36 - (level - 1) * 4 < 22 ? 22 : 36 - (level - 1) * 4);
+    }
+
+    SB_Add(x, "</w:styles>");
+    return !x->failed;
+}
+
+// Every list in the document, with what each of its levels looked like. A
+// document can hold several lists that count separately, which is what the
+// `w:numId` on each paragraph says.
+#define MAX_LISTS 32
+
+typedef struct {
+    int          id;
+    BOOL         levelUsed[9];
+    DocNumFormat levelFmt[9];
+    WCHAR        levelText[9][24];
+} ListOut;
+
+static void CollectList(const DocPara* p, ListOut* lists, int* count) {
+    if (p->props.list == LIST_NONE) return;
+
+    int id = p->props.listId > 0 ? p->props.listId : 1;
+    int level = p->props.listLevel;
+    if (level < 0 || level > 8) level = 0;
+
+    ListOut* entry = NULL;
+    for (int i = 0; i < *count; i++) {
+        if (lists[i].id == id) { entry = &lists[i]; break; }
+    }
+    if (!entry) {
+        if (*count >= MAX_LISTS) return;
+        entry = &lists[(*count)++];
+        memset(entry, 0, sizeof(*entry));
+        entry->id = id;
+    }
+
+    entry->levelUsed[level] = TRUE;
+    entry->levelFmt[level] = p->props.numFormat;
+    if (p->props.listText[0]) {
+        wcsncpy_s(entry->levelText[level], 24, p->props.listText, _TRUNCATE);
+    }
+}
+
+static int CollectLists(const DocModel* doc, ListOut* lists) {
+    int count = 0;
+    for (const DocBlock* b = doc->blocks; b; b = b->next) {
+        if (b->kind == BLOCK_PARA) {
+            for (const DocPara* p = b->para; p; p = p->next) CollectList(p, lists, &count);
+        } else {
+            for (const DocRow* r = b->table.rows; r; r = r->next) {
+                for (const DocCell* c = r->cells; c; c = c->next) {
+                    for (const DocPara* p = c->paras; p; p = p->next) CollectList(p, lists, &count);
+                }
+            }
+        }
+    }
+    return count;
+}
+
+static const char* NumFmtName(DocNumFormat fmt) {
+    switch (fmt) {
+        case NUMFMT_BULLET:       return "bullet";
+        case NUMFMT_LOWER_LETTER: return "lowerLetter";
+        case NUMFMT_UPPER_LETTER: return "upperLetter";
+        case NUMFMT_LOWER_ROMAN:  return "lowerRoman";
+        case NUMFMT_UPPER_ROMAN:  return "upperRoman";
+        default:                  return "decimal";
+    }
+}
+
+static BOOL BuildNumberingXml(const DocModel* doc, StrBuf* x, ListOut* lists, int count) {
+    SB_Add(x, "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>\r\n"
+              "<w:numbering xmlns:w=\"" WML_NS "\">");
+
+    for (int i = 0; i < count; i++) {
+        SB_AddF(x, "<w:abstractNum w:abstractNumId=\"%d\">", lists[i].id);
+
+        for (int level = 0; level < 9; level++) {
+            DocNumFormat fmt = lists[i].levelUsed[level] ? lists[i].levelFmt[level]
+                                                         : NUMFMT_DECIMAL;
+            SB_AddF(x, "<w:lvl w:ilvl=\"%d\"><w:start w:val=\"1\"/>"
+                       "<w:numFmt w:val=\"%s\"/><w:lvlText w:val=\"",
+                    level, NumFmtName(fmt));
+
+            if (fmt == NUMFMT_BULLET) {
+                // U+F0B7 is the bullet Word writes, in the Symbol font.
+                SB_Add(x, "\xEF\x82\xB7");
+            } else if (lists[i].levelUsed[level] && lists[i].levelText[level][0]) {
+                SB_AddXmlText(x, lists[i].levelText[level], -1);
+            } else {
+                SB_AddF(x, "%%%d.", level + 1);
+            }
+
+            SB_AddF(x, "\"/><w:lvlJc w:val=\"left\"/>"
+                       "<w:pPr><w:ind w:left=\"%d\" w:hanging=\"360\"/></w:pPr>",
+                    720 + level * 360);
+
+            if (fmt == NUMFMT_BULLET) {
+                SB_Add(x, "<w:rPr><w:rFonts w:ascii=\"Symbol\" w:hAnsi=\"Symbol\"/></w:rPr>");
+            }
+            SB_Add(x, "</w:lvl>");
+        }
+
+        SB_Add(x, "</w:abstractNum>");
+    }
+
+    for (int i = 0; i < count; i++) {
+        SB_AddF(x, "<w:num w:numId=\"%d\"><w:abstractNumId w:val=\"%d\"/></w:num>",
+                lists[i].id, lists[i].id);
+    }
+
+    SB_Add(x, "</w:numbering>");
+    return !x->failed;
+}
+
 static BOOL BuildDocumentXml(const DocModel* doc, StrBuf* x) {
     SB_Add(x, "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>\r\n"
               "<w:document xmlns:w=\"" WML_NS "\"><w:body>");
@@ -685,6 +1318,41 @@ static BOOL BuildDocumentXml(const DocModel* doc, StrBuf* x) {
         return FALSE;
     }
     return TRUE;
+}
+
+// Add a part to the package and relate the document to it. The relationship is
+// what makes a part findable: a part nothing points at is dead weight that
+// Word ignores.
+static BOOL AddRelatedPart(IOpcFactory* factory, IOpcPartSet* parts,
+                           IOpcRelationshipSet* docRels, const WCHAR* uriText,
+                           const WCHAR* contentType, const WCHAR* relType,
+                           const char* bytes, size_t len) {
+    IOpcPartUri* uri = NULL;
+    if (FAILED(IOpcFactory_CreatePartUri(factory, uriText, &uri))) return FALSE;
+
+    IOpcPart* part = NULL;
+    IStream* content = NULL;
+    IOpcRelationship* rel = NULL;
+    BOOL ok = FALSE;
+
+    if (SUCCEEDED(IOpcPartSet_CreatePart(parts, uri, contentType,
+                                         OPC_COMPRESSION_NORMAL, &part)) &&
+        SUCCEEDED(IOpcPart_GetContentStream(part, &content))) {
+
+        ULONG written = 0;
+        if (SUCCEEDED(content->lpVtbl->Write(content, bytes, (ULONG)len, &written)) &&
+            written == (ULONG)len) {
+            ok = SUCCEEDED(IOpcRelationshipSet_CreateRelationship(
+                docRels, NULL, relType, (IUri*)uri,
+                OPC_URI_TARGET_MODE_INTERNAL, &rel));
+        }
+    }
+
+    if (rel)     IOpcRelationship_Release(rel);
+    if (content) IStream_Release(content);
+    if (part)    IOpcPart_Release(part);
+    IOpcPartUri_Release(uri);
+    return ok;
 }
 
 BOOL Docx_WriteModel(const DocModel* doc, const WCHAR* path) {
@@ -748,6 +1416,47 @@ BOOL Docx_WriteModel(const DocModel* doc, const WCHAR* path) {
             OPC_URI_TARGET_MODE_INTERNAL, &rel))) {
         SetError(L"The package relationship could not be created.");
         goto done;
+    }
+
+    // styles.xml, and numbering.xml when the document holds a list. Both hang
+    // off the document part, which is what makes them its styles rather than
+    // loose XML in the container.
+    {
+        IOpcRelationshipSet* docRels = NULL;
+        if (FAILED(IOpcPart_GetRelationshipSet(part, &docRels))) {
+            SetError(L"The document part could not be given relationships.");
+            goto done;
+        }
+
+        StrBuf styles = {0};
+        BOOL stylesOk = BuildStylesXml(doc, &styles) &&
+                        AddRelatedPart(factory, parts, docRels, L"/word/styles.xml",
+                                       CT_STYLES, REL_STYLES, styles.buf, styles.len);
+        SB_Free(&styles);
+
+        if (!stylesOk) {
+            IOpcRelationshipSet_Release(docRels);
+            SetError(L"The styles part could not be written.");
+            goto done;
+        }
+
+        ListOut lists[MAX_LISTS];
+        int listCount = CollectLists(doc, lists);
+        if (listCount > 0) {
+            StrBuf nums = {0};
+            BOOL numsOk = BuildNumberingXml(doc, &nums, lists, listCount) &&
+                          AddRelatedPart(factory, parts, docRels, L"/word/numbering.xml",
+                                         CT_NUMBERING, REL_NUMBERING, nums.buf, nums.len);
+            SB_Free(&nums);
+
+            if (!numsOk) {
+                IOpcRelationshipSet_Release(docRels);
+                SetError(L"The numbering part could not be written.");
+                goto done;
+            }
+        }
+
+        IOpcRelationshipSet_Release(docRels);
     }
 
     if (FAILED(IOpcFactory_CreateStreamOnFile(factory, path, OPC_STREAM_IO_WRITE,

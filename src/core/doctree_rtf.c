@@ -99,15 +99,36 @@ static void EmitParaProps(StrBuf* sb, const ParaProps* p, BOOL inTable) {
     }
 
     if (p->list != LIST_NONE) {
+        // The order here is the control's own: it writes the numbering group
+        // before the indents, and reads back what it writes. Emitting the same
+        // RTF the other way round is how a numbered list arrived in the view
+        // as a bulleted one.
         int li = p->indentLeft > 0 ? p->indentLeft : 720 + p->listLevel * 360;
-        SB_AddF(sb, "\\fi-360\\li%d", li);
+
         if (p->list == LIST_BULLET) {
             SB_Add(sb, "{\\pntext\\f0 \\'B7\\tab}"
-                       "{\\*\\pn\\pnlvlblt\\pnf0\\pnindent0{\\pntxtb\\'B7}}");
+                       "{\\*\\pn\\pnlvlblt\\pnf0\\pnindent360{\\pntxtb\\'B7}}");
         } else {
-            SB_Add(sb, "{\\pntext\\f0 1.\\tab}"
-                       "{\\*\\pn\\pnlvlbody\\pnf0\\pnindent0\\pnstart1\\pndec{\\pntxta.}}");
+            // ponytail: every numbered list goes to the view as decimal.
+            // RichEdit's RTF reader accepts \pndec and \pnlvlblt and nothing
+            // else -- given \pnlcltr it ignores the numbering entirely and
+            // leaves the marker behind as literal text, which is worse than
+            // counting in the wrong alphabet. The model keeps the real format
+            // and the page view renders it; this lifts when editing moves
+            // there for good.
+            //
+            // What follows the number does survive: "%1." ends in a stop,
+            // "%1)" in a bracket.
+            const char* after = ".";
+            size_t textLen = wcslen(p->listText);
+            if (textLen && p->listText[textLen - 1] == L')') after = ")";
+
+            SB_AddF(sb, "{\\pntext\\f0 1%s\\tab}"
+                        "{\\*\\pn\\pnlvlbody\\pnf0\\pnindent360\\pnstart1\\pndec{\\pntxta%s}}",
+                    after, after);
         }
+
+        SB_AddF(sb, "\\fi-360\\li%d", li);
     } else {
         if (p->indentLeft)  SB_AddF(sb, "\\li%d", p->indentLeft);
         if (p->indentFirst) SB_AddF(sb, "\\fi%d", p->indentFirst);

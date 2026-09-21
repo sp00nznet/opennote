@@ -97,6 +97,36 @@ static void ToCharProps(const CHARFORMAT2W* cf, CharProps* out) {
     if (cf->szFaceName[0]) wcsncpy_s(out->font, LF_FACESIZE, cf->szFaceName, _TRUNCATE);
 }
 
+// Which list a paragraph belongs to.
+//
+// The control has no notion of one list as against another: it knows a
+// paragraph is numbered and how, and nothing else. A run of list paragraphs
+// counting the same way is therefore taken to be one list, and anything that
+// interrupts it -- ordinary text, or a switch from numbers to bullets --
+// starts the next one. That is what numbering.xml needs, because a list is
+// where counting restarts.
+typedef struct {
+    int          nextId;
+    int          currentId;
+    BOOL         inList;
+    DocNumFormat format;
+} ListRun;
+
+static void AssignList(ListRun* run, ParaProps* props) {
+    if (props->list == LIST_NONE) {
+        run->inList = FALSE;
+        return;
+    }
+
+    if (!run->inList || props->numFormat != run->format) {
+        run->currentId = ++run->nextId;
+        run->format = props->numFormat;
+        run->inList = TRUE;
+    }
+
+    props->listId = run->currentId;
+}
+
 static void ToParaProps(const PARAFORMAT2* pf, ParaProps* out) {
     memset(out, 0, sizeof(*out));
 
@@ -110,14 +140,40 @@ static void ToParaProps(const PARAFORMAT2* pf, ParaProps* out) {
     }
     if (pf->dwMask & PFM_STARTINDENT) out->indentLeft = pf->dxStartIndent;
     if (pf->dwMask & PFM_OFFSET)      out->indentFirst = -pf->dxOffset;
+
+    // The control reports where the *first line* starts and how far the rest
+    // hangs from it; the model measures the indent from the margin, which is
+    // the other end of the same two numbers.
+    if (out->indentFirst < 0) out->indentLeft += -out->indentFirst;
     if (pf->dwMask & PFM_SPACEBEFORE) out->spaceBefore = pf->dySpaceBefore;
     if (pf->dwMask & PFM_SPACEAFTER)  out->spaceAfter = pf->dySpaceAfter;
 
+    if (pf->dwMask & PFM_NUMBERING) {
+    }
     if ((pf->dwMask & PFM_NUMBERING) && pf->wNumbering) {
-        out->list = (pf->wNumbering == PFN_BULLET) ? LIST_BULLET : LIST_NUMBER;
+        // The control keeps which way a list counts, which is most of what
+        // numbering.xml said: a lettered list comes back lettered.
+        switch (pf->wNumbering) {
+            case PFN_ARABIC:   out->numFormat = NUMFMT_DECIMAL;      break;
+            case PFN_LCLETTER: out->numFormat = NUMFMT_LOWER_LETTER; break;
+            case PFN_UCLETTER: out->numFormat = NUMFMT_UPPER_LETTER; break;
+            case PFN_LCROMAN:  out->numFormat = NUMFMT_LOWER_ROMAN;  break;
+            case PFN_UCROMAN:  out->numFormat = NUMFMT_UPPER_ROMAN;  break;
+            default:           out->numFormat = NUMFMT_BULLET;       break;
+        }
+        out->list = (out->numFormat == NUMFMT_BULLET) ? LIST_BULLET : LIST_NUMBER;
+
         // A list carries its indent through the hanging indent above; the
         // model keeps the level so the marker can be rebuilt.
         out->listLevel = out->indentLeft > 720 ? (out->indentLeft - 720) / 360 : 0;
+
+        if (out->list == LIST_NUMBER) {
+            // The punctuation lives in the high nibble: PFNS_PERIOD follows the
+            // number with a stop, PFNS_PAREN with a bracket.
+            const WCHAR* after = ((pf->wNumberingStyle & 0x0F00) == PFNS_PAREN)
+                               ? L")" : L".";
+            swprintf_s(out->listText, 24, L"%%%d%s", out->listLevel + 1, after);
+        }
     }
 }
 
@@ -232,6 +288,7 @@ DocModel* DocView_Capture(HWND h) {
 
     DocBlock* table = NULL;
     DocRow*   row = NULL;
+    ListRun   lists = {0};
 
     int pos = 0;
     while (pos <= textLen) {
@@ -281,6 +338,7 @@ DocModel* DocView_Capture(HWND h) {
                     DocPara* cp = Doc_AddCellPara(cell);
                     if (cp) {
                         ToParaProps(&pf, &cp->props);
+                        AssignList(&lists, &cp->props);
                         AddRuns(h, cp, text, cellStart, i);
                     }
                     emitted++;
@@ -294,6 +352,7 @@ DocModel* DocView_Capture(HWND h) {
                     DocPara* cp = Doc_AddCellPara(cell);
                     if (cp) {
                         ToParaProps(&pf, &cp->props);
+                        AssignList(&lists, &cp->props);
                         AddRuns(h, cp, text, cellStart, contentEnd);
                     }
                 }
@@ -311,6 +370,7 @@ DocModel* DocView_Capture(HWND h) {
                 DocPara* para = Doc_AddPara(doc);
                 if (para) {
                     ToParaProps(&pf, &para->props);
+                    AssignList(&lists, &para->props);
                     AddRuns(h, para, text, pos, paraEnd);
                 }
             }

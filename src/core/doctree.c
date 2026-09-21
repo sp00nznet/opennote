@@ -75,6 +75,14 @@ void Doc_Free(DocModel* doc) {
         free(block);
         block = next;
     }
+
+    DocStyle* style = doc->styles;
+    while (style) {
+        DocStyle* next = style->next;
+        free(style);
+        style = next;
+    }
+
     free(doc);
 }
 
@@ -155,6 +163,104 @@ DocRun* Doc_AddRun(DocPara* para, const WCHAR* text, int len, const CharProps* p
 
     APPEND(para->runs, run, DocRun);
     return run;
+}
+
+// ---------------------------------------------------------------------------
+// Named styles
+//
+// A style states some properties and inherits the rest from the style it is
+// based on, which inherits in turn, down to the document defaults. Resolving
+// that chain is the whole of styles.xml as far as this project is concerned:
+// paragraphs carry resolved properties, and the table is kept only so the
+// names survive being written back out.
+//
+// ponytail: "stated" means "not zero". A style cannot therefore turn bold off
+// again once a style it is based on turned it on -- `w:b w:val="0"` reads as
+// silence. Word documents do that rarely; a per-property "was it stated" bit
+// on every property is the fix when one turns up that matters.
+// ---------------------------------------------------------------------------
+
+DocStyle* Doc_AddStyle(DocModel* doc, const WCHAR* id) {
+    if (!doc || !id || !id[0]) return NULL;
+
+    DocStyle* existing = Doc_FindStyle(doc, id);
+    if (existing) return existing;
+
+    DocStyle* style = (DocStyle*)calloc(1, sizeof(DocStyle));
+    if (!style) return NULL;
+
+    wcsncpy_s(style->id, 64, id, _TRUNCATE);
+    APPEND(doc->styles, style, DocStyle);
+    return style;
+}
+
+DocStyle* Doc_FindStyle(const DocModel* doc, const WCHAR* id) {
+    if (!doc || !id || !id[0]) return NULL;
+    for (DocStyle* s = doc->styles; s; s = s->next) {
+        if (_wcsicmp(s->id, id) == 0) return s;
+    }
+    return NULL;
+}
+
+static void MergeCharProps(CharProps* into, const CharProps* from) {
+    if (from->bold)        into->bold = TRUE;
+    if (from->italic)      into->italic = TRUE;
+    if (from->underline)   into->underline = TRUE;
+    if (from->strike)      into->strike = TRUE;
+    if (from->superscript) into->superscript = TRUE;
+    if (from->subscript)   into->subscript = TRUE;
+    if (from->halfPoints)  into->halfPoints = from->halfPoints;
+    if (from->hasColor) {
+        into->hasColor = TRUE;
+        into->color = from->color;
+    }
+    if (from->font[0]) wcsncpy_s(into->font, LF_FACESIZE, from->font, _TRUNCATE);
+}
+
+static void MergeParaProps(ParaProps* into, const ParaProps* from) {
+    if (from->align)        into->align = from->align;
+    if (from->indentLeft)   into->indentLeft = from->indentLeft;
+    if (from->indentFirst)  into->indentFirst = from->indentFirst;
+    if (from->spaceBefore)  into->spaceBefore = from->spaceBefore;
+    if (from->spaceAfter)   into->spaceAfter = from->spaceAfter;
+    if (from->lineSpacing)  into->lineSpacing = from->lineSpacing;
+    if (from->headingLevel) into->headingLevel = from->headingLevel;
+    if (from->list != LIST_NONE) {
+        into->list = from->list;
+        into->listLevel = from->listLevel;
+        into->numFormat = from->numFormat;
+        if (from->listText[0]) wcsncpy_s(into->listText, 24, from->listText, _TRUNCATE);
+    }
+}
+
+// Apply `id` and everything it is based on, root first, over what is already
+// in `paraOut` and `runOut`.
+static void ApplyStyleChain(const DocModel* doc, const WCHAR* id,
+                            ParaProps* paraOut, CharProps* runOut, int depth) {
+    if (depth > 16) return;     // a style based on itself, which Word tolerates
+
+    const DocStyle* style = Doc_FindStyle(doc, id);
+    if (!style) return;
+
+    if (style->basedOn[0]) {
+        ApplyStyleChain(doc, style->basedOn, paraOut, runOut, depth + 1);
+    }
+
+    if (paraOut) MergeParaProps(paraOut, &style->para);
+    if (runOut)  MergeCharProps(runOut, &style->run);
+}
+
+void Doc_ResolveStyle(const DocModel* doc, const WCHAR* id,
+                      ParaProps* paraOut, CharProps* runOut) {
+    if (!doc) return;
+
+    if (paraOut) *paraOut = doc->defaultPara;
+    if (runOut)  *runOut = doc->defaultRun;
+
+    if (id && id[0]) {
+        ApplyStyleChain(doc, id, paraOut, runOut, 0);
+        if (paraOut) wcsncpy_s(paraOut->style, 64, id, _TRUNCATE);
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -328,6 +434,12 @@ static void CompareParaProps(const ParaProps* a, const ParaProps* b, int idx, Do
 
     // Indents and spacing are only asserted where the source set them; a
     // document that said nothing has nothing to lose.
+    if (a->list != LIST_NONE) {
+        CMP(a->numFormat == b->numFormat, "para %d: number format %d -> %d", idx, a->numFormat, b->numFormat);
+        CMP(a->listLevel == b->listLevel, "para %d: list level %d -> %d", idx, a->listLevel, b->listLevel);
+        CMP(wcscmp(a->listText, b->listText) == 0, "para %d: list marker changed", idx);
+    }
+    if (a->style[0]) CMP(_wcsicmp(a->style, b->style) == 0, "para %d: style changed", idx);
     if (a->indentLeft)  CMP(a->indentLeft == b->indentLeft,   "para %d: left indent %d -> %d", idx, a->indentLeft, b->indentLeft);
     if (a->spaceBefore) CMP(a->spaceBefore == b->spaceBefore, "para %d: space before %d -> %d", idx, a->spaceBefore, b->spaceBefore);
     if (a->spaceAfter)  CMP(a->spaceAfter == b->spaceAfter,   "para %d: space after %d -> %d", idx, a->spaceAfter, b->spaceAfter);
@@ -1002,6 +1114,16 @@ DocModel* Doc_Clone(const DocModel* src) {
     DocModel* copy = (DocModel*)calloc(1, sizeof(DocModel));
     if (!copy) return NULL;
     copy->section = src->section;
+    copy->defaultPara = src->defaultPara;
+    copy->defaultRun = src->defaultRun;
+
+    for (const DocStyle* st = src->styles; st; st = st->next) {
+        DocStyle* sc = (DocStyle*)calloc(1, sizeof(DocStyle));
+        if (!sc) { Doc_Free(copy); return NULL; }
+        *sc = *st;
+        sc->next = NULL;
+        APPEND(copy->styles, sc, DocStyle);
+    }
 
     for (const DocBlock* b = src->blocks; b; b = b->next) {
         DocBlock* bc = (DocBlock*)calloc(1, sizeof(DocBlock));

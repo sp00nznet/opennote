@@ -19,7 +19,17 @@ CONTENT_TYPES = """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
   <Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>
   <Default Extension="xml" ContentType="application/xml"/>
   <Override PartName="/{target}" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/>
-</Types>"""
+{extra}</Types>"""
+
+# Parts that hang off the document rather than off the package: a relationship
+# in word/_rels/document.xml.rels is what makes them the document's.
+DOC_RELS = """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+{rels}</Relationships>"""
+
+STYLES_CT = "application/vnd.openxmlformats-officedocument.wordprocessingml.styles+xml"
+NUMBERING_CT = "application/vnd.openxmlformats-officedocument.wordprocessingml.numbering+xml"
+REL_BASE = "http://schemas.openxmlformats.org/officeDocument/2006/relationships/"
 
 RELS = """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
@@ -45,12 +55,33 @@ def document(body):
     )
 
 
-def write(outdir, name, body, expect, target="word/document.xml"):
+def write(outdir, name, body, expect, target="word/document.xml", parts=None):
+    """parts: [(partname, content_type, rel_type, xml)], related to the document."""
+    parts = parts or []
     path = os.path.join(outdir, name + ".docx")
+
+    extra = "".join(
+        '  <Override PartName="/%s" ContentType="%s"/>\n' % (part, ct)
+        for part, ct, _rel, _xml in parts
+    )
+
     with zipfile.ZipFile(path, "w", zipfile.ZIP_DEFLATED) as z:
-        z.writestr("[Content_Types].xml", CONTENT_TYPES.format(target=target))
+        z.writestr("[Content_Types].xml", CONTENT_TYPES.format(target=target, extra=extra))
         z.writestr("_rels/.rels", RELS.format(target=target))
         z.writestr(target, document(body))
+
+        if parts:
+            rels = ""
+            for i, (part, _ct, rel, xml) in enumerate(parts, start=1):
+                z.writestr(part, xml)
+                # Relative to the document part, which is where a reader
+                # resolves it from.
+                relative = part.split("/")[-1]
+                rels += '  <Relationship Id="rIdX%d" Type="%s%s" Target="%s"/>\n' % (
+                    i, REL_BASE, rel, relative)
+
+            folder, filename = target.rsplit("/", 1)
+            z.writestr("%s/_rels/%s.rels" % (folder, filename), DOC_RELS.format(rels=rels))
     with open(os.path.join(outdir, name + ".expect"), "w", encoding="utf-8") as f:
         f.write("\n".join(expect) + "\n")
     return path
@@ -207,6 +238,101 @@ def fixture_relocated(outdir):
                  target="word/document2.xml")
 
 
+# --------------------------------------------------------------------------
+# styles and numbering: the two parts a document keeps its shape in
+# --------------------------------------------------------------------------
+def fixture_styles(outdir):
+    styles = """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<w:styles xmlns:w="%s">
+  <w:docDefaults>
+    <w:rPrDefault><w:rPr><w:rFonts w:ascii="Cambria" w:hAnsi="Cambria"/><w:sz w:val="22"/></w:rPr></w:rPrDefault>
+    <w:pPrDefault><w:pPr><w:spacing w:after="160"/></w:pPr></w:pPrDefault>
+  </w:docDefaults>
+  <w:style w:type="paragraph" w:default="1" w:styleId="Normal"><w:name w:val="Normal"/></w:style>
+  <w:style w:type="paragraph" w:styleId="Heading1">
+    <w:name w:val="heading 1"/><w:basedOn w:val="Normal"/>
+    <w:pPr><w:spacing w:before="240" w:after="120"/></w:pPr>
+    <w:rPr><w:b/><w:sz w:val="36"/></w:rPr>
+  </w:style>
+  <w:style w:type="paragraph" w:styleId="Quote">
+    <w:name w:val="Quote"/><w:basedOn w:val="Normal"/>
+    <w:pPr><w:ind w:left="720"/><w:jc w:val="center"/></w:pPr>
+    <w:rPr><w:i/></w:rPr>
+  </w:style>
+  <w:style w:type="paragraph" w:styleId="QuoteRed">
+    <w:name w:val="Quote Red"/><w:basedOn w:val="Quote"/>
+    <w:rPr><w:color w:val="C00000"/></w:rPr>
+  </w:style>
+  <w:style w:type="character" w:styleId="Strong">
+    <w:name w:val="Strong"/><w:rPr><w:b/></w:rPr>
+  </w:style>
+</w:styles>""" % (W,)
+
+    def lvl(i, fmt, text):
+        return ('<w:lvl w:ilvl="%d"><w:start w:val="1"/><w:numFmt w:val="%s"/>'
+                '<w:lvlText w:val="%s"/>'
+                '<w:pPr><w:ind w:left="%d" w:hanging="360"/></w:pPr></w:lvl>'
+                % (i, fmt, text, 720 + i * 360))
+
+    numbering = """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<w:numbering xmlns:w="%s">
+  <w:abstractNum w:abstractNumId="7">%s</w:abstractNum>
+  <w:abstractNum w:abstractNumId="8">%s</w:abstractNum>
+  <w:num w:numId="1"><w:abstractNumId w:val="7"/></w:num>
+  <w:num w:numId="2"><w:abstractNumId w:val="8"/></w:num>
+</w:numbering>""" % (
+        W,
+        "".join(lvl(i, "bullet", "&#183;") for i in range(3)),
+        lvl(0, "decimal", "%1.") + lvl(1, "lowerLetter", "%2)") + lvl(2, "lowerRoman", "%3."),
+    )
+
+    def item(text, num, level):
+        return p([r(text)],
+                 '<w:pPr><w:numPr><w:ilvl w:val="%d"/><w:numId w:val="%d"/></w:numPr></w:pPr>'
+                 % (level, num))
+
+    body = [
+        p([r("Styled Heading")], '<w:pPr><w:pStyle w:val="Heading1"/></w:pPr>'),
+        p([r("Body text, which takes the document defaults.")]),
+        p([r("A quotation, centred and italic by style.")],
+          '<w:pPr><w:pStyle w:val="Quote"/></w:pPr>'),
+        p([r("A red quotation, which inherits the rest.")],
+          '<w:pPr><w:pStyle w:val="QuoteRed"/></w:pPr>'),
+        p([r("Plain then "), r("strong", '<w:rPr><w:rStyle w:val="Strong"/></w:rPr>'),
+           r(" by character style.")]),
+        item("First numbered", 2, 0),
+        item("Second numbered", 2, 0),
+        item("Nested letter", 2, 1),
+        item("Bulleted one", 1, 0),
+        item("Bulleted two", 1, 0),
+    ]
+
+    expect = [
+        "# a heading resolved from styles.xml rather than guessed from its name",
+        "contains:\\b\\f1\\fs36 Styled Heading",
+        "# document defaults reach a paragraph that states nothing",
+        "contains:Cambria",
+        "# a style based on another inherits what it does not state",
+        "contains:\\qc",
+        "contains:\\li720",
+        "contains:\\i",
+        "contains:\\red192\\green0\\blue0",
+        "# a character style applies to its run",
+        "contains:\\b\\f1\\fs22 strong",
+        "# a numbered list counts; a bulleted one does not",
+        "contains:\\pndec",
+        "contains:pnlvlblt",
+        "contains:First numbered",
+        "contains:Nested letter",
+    ]
+
+    parts = [
+        ("word/styles.xml", STYLES_CT, "styles", styles),
+        ("word/numbering.xml", NUMBERING_CT, "numbering", numbering),
+    ]
+    return write(outdir, "styles", body, expect, parts=parts)
+
+
 def main():
     outdir = sys.argv[1] if len(sys.argv) > 1 else "build/corpus"
     os.makedirs(outdir, exist_ok=True)
@@ -217,6 +343,7 @@ def main():
         fixture_revisions(outdir),
         fixture_escaping(outdir),
         fixture_relocated(outdir),
+        fixture_styles(outdir),
     ]
     for path in made:
         print(f"  {os.path.basename(path)}  {os.path.getsize(path)} bytes")

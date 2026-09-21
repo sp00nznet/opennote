@@ -313,6 +313,122 @@ static BOOL MeasureLines(IDWriteTextLayout* layout, float avail, LineFit* out) {
 }
 
 // ---------------------------------------------------------------------------
+// List markers
+//
+// numbering.xml says how a list counts; the counting itself happens here,
+// because it depends on the order paragraphs are laid out in and on nothing
+// else. A level restarts when a shallower one moves on, which is what makes
+// 1, 1.1, 1.2, 2, 2.1 come out right.
+// ---------------------------------------------------------------------------
+
+struct Numbering {
+    int          listId;        // the list being counted, 0 for none
+    int          counters[9];
+    DocNumFormat formats[9];    // what each level was last seen counting in
+    BOOL         seen[9];
+};
+
+static void NumberToText(int value, DocNumFormat fmt, WCHAR* out, size_t outChars) {
+    if (value < 1) value = 1;
+
+    switch (fmt) {
+        case NUMFMT_LOWER_LETTER:
+        case NUMFMT_UPPER_LETTER: {
+            // a..z, then aa, bb, cc -- which is what Word does, rather than
+            // counting in base 26.
+            WCHAR base = (fmt == NUMFMT_LOWER_LETTER) ? L'a' : L'A';
+            int repeats = ((value - 1) / 26) + 1;
+            WCHAR letter = (WCHAR)(base + ((value - 1) % 26));
+            size_t n = 0;
+            while (n < outChars - 1 && n < (size_t)repeats) out[n++] = letter;
+            out[n] = L'\0';
+            break;
+        }
+
+        case NUMFMT_LOWER_ROMAN:
+        case NUMFMT_UPPER_ROMAN: {
+            static const int values[] = { 1000, 900, 500, 400, 100, 90, 50, 40, 10, 9, 5, 4, 1 };
+            static const WCHAR* upper[] = { L"M", L"CM", L"D", L"CD", L"C", L"XC", L"L",
+                                            L"XL", L"X", L"IX", L"V", L"IV", L"I" };
+            static const WCHAR* lower[] = { L"m", L"cm", L"d", L"cd", L"c", L"xc", L"l",
+                                            L"xl", L"x", L"ix", L"v", L"iv", L"i" };
+            const WCHAR** digits = (fmt == NUMFMT_UPPER_ROMAN) ? upper : lower;
+
+            out[0] = L'\0';
+            int left = value;
+            for (int i = 0; i < 13 && left > 0; i++) {
+                while (left >= values[i]) {
+                    wcscat_s(out, outChars, digits[i]);
+                    left -= values[i];
+                }
+            }
+            break;
+        }
+
+        default:
+            swprintf_s(out, outChars, L"%d", value);
+            break;
+    }
+}
+
+// Advance the counters for a paragraph and write out its marker.
+static void NextMarker(Numbering* n, const ParaProps* props, WCHAR* out, size_t outChars) {
+    int level = props->listLevel;
+    if (level < 0) level = 0;
+    if (level > 8) level = 8;
+
+    int listId = props->listId > 0 ? props->listId : 1;
+    if (listId != n->listId) {
+        memset(n, 0, sizeof(*n));
+        n->listId = listId;
+    }
+
+    n->formats[level] = props->numFormat;
+    n->seen[level] = TRUE;
+
+    // A deeper level starts again every time it is entered.
+    for (int i = level + 1; i < 9; i++) {
+        n->counters[i] = 0;
+        n->seen[i] = FALSE;
+    }
+    n->counters[level]++;
+
+    if (props->numFormat == NUMFMT_BULLET) {
+        // The three bullets Word cycles through by level.
+        static const WCHAR* bullets[] = { L"\x2022", L"\x25E6", L"\x25AA" };
+        wcscpy_s(out, outChars, bullets[level % 3]);
+        return;
+    }
+
+    // "%1.%2)" and the like: each %N is the counter for that level, in that
+    // level's own format.
+    const WCHAR* pattern = props->listText[0] ? props->listText : L"%1.";
+    WCHAR fallback[8];
+    if (!props->listText[0]) {
+        swprintf_s(fallback, 8, L"%%%d.", level + 1);
+        pattern = fallback;
+    }
+
+    size_t at = 0;
+    for (const WCHAR* p = pattern; *p && at < outChars - 1; p++) {
+        if (*p == L'%' && p[1] >= L'1' && p[1] <= L'9') {
+            int which = p[1] - L'1';
+            p++;
+
+            WCHAR number[32];
+            NumberToText(n->counters[which],
+                         n->seen[which] ? n->formats[which] : NUMFMT_DECIMAL,
+                         number, 32);
+
+            for (const WCHAR* q = number; *q && at < outChars - 1; q++) out[at++] = *q;
+        } else {
+            out[at++] = *p;
+        }
+    }
+    out[at] = L'\0';
+}
+
+// ---------------------------------------------------------------------------
 // Flowing
 // ---------------------------------------------------------------------------
 
@@ -323,6 +439,7 @@ struct Flow {
     float         contentWidth;
     float         bottom;         // nothing may be placed beyond this
     Ctx           ctx;
+    Numbering     numbering;
 };
 
 static void NewPage(Flow* f) {
@@ -385,7 +502,9 @@ static void PlacePara(Flow* f, const DocPara* para, float x, float width,
     // A list marker sits in the hanging indent as its own piece of text, which
     // is simpler and more faithful than trying to make one layout do both.
     if (para->props.list != LIST_NONE && !isCellText) {
-        const WCHAR* marker = (para->props.list == LIST_BULLET) ? L"\x2022" : L"1.";
+        WCHAR marker[64];
+        NextMarker(&f->numbering, &para->props, marker, 64);
+
         TextSpan span = {};
         span.start = 0;
         span.len = (UINT32)wcslen(marker);
@@ -394,14 +513,21 @@ static void PlacePara(Flow* f, const DocPara* para, float x, float width,
         ParaProps plain = para->props;
         plain.align = ALIGN_LEFT;
 
-        IDWriteTextLayout* m = MakeLayout(&f->ctx, marker, span.len, &span, 1, 24.0f, &plain);
+        // Where the first line starts, which is where the marker belongs: a
+        // hanging indent exists precisely to leave room for it.
+        float hang = para->props.indentFirst < 0
+                   ? -para->props.indentFirst / TWIPS_PER_DIP
+                   : 24.0f;
+        if (hang < 12.0f) hang = 12.0f;
+
+        IDWriteTextLayout* m = MakeLayout(&f->ctx, marker, span.len, &span, 1, hang, &plain);
         if (m) {
             LaidText* t = AddText(f->page);
             if (t) {
                 t->layout = m;
-                t->x = x - 24.0f;
+                t->x = x - hang;
                 t->y = f->y;
-                t->width = 24.0f;
+                t->width = hang;
                 t->height = LayoutHeight(m);
                 t->para = para;
                 t->isMarker = TRUE;
@@ -1285,6 +1411,69 @@ extern "C" BOOL Layout_SelfTest(char* failure, size_t failureSize) {
 
         Layout_Free(r); r = NULL;
         Doc_Free(doc); doc = NULL;
+    }
+
+    // --- lists count, and count the way the document said ------------------
+    {
+        Numbering n = {};
+        ParaProps item = {};
+        WCHAR marker[64];
+
+        #define MARKER(fmt_, level_, text_) do {                       item.list = LIST_NUMBER;                                    item.listId = 1;                                            item.numFormat = (fmt_);                                    item.listLevel = (level_);                                  wcscpy_s(item.listText, 24, (text_));                       NextMarker(&n, &item, marker, 64);                      } while (0)
+
+        MARKER(NUMFMT_DECIMAL, 0, L"%1.");
+        if (wcscmp(marker, L"1.") != 0) FAIL("the first item of a list is not 1.");
+        MARKER(NUMFMT_DECIMAL, 0, L"%1.");
+        if (wcscmp(marker, L"2.") != 0) FAIL("the second item of a list is not 2.");
+
+        // A deeper level starts again, and its marker can name both levels.
+        MARKER(NUMFMT_LOWER_LETTER, 1, L"%2)");
+        if (wcscmp(marker, L"a)") != 0) FAIL("a nested level did not start at a");
+        MARKER(NUMFMT_LOWER_LETTER, 1, L"%2)");
+        if (wcscmp(marker, L"b)") != 0) FAIL("a nested level did not continue to b");
+
+        // ...and coming back out continues where the outer level left off.
+        MARKER(NUMFMT_DECIMAL, 0, L"%1.");
+        if (wcscmp(marker, L"3.") != 0) FAIL("the outer level did not continue at 3");
+
+        // Re-entering the nested level starts it over rather than continuing.
+        MARKER(NUMFMT_LOWER_LETTER, 1, L"%2)");
+        if (wcscmp(marker, L"a)") != 0) FAIL("a nested level did not restart under a new parent");
+
+        // A marker naming both levels.
+        MARKER(NUMFMT_DECIMAL, 1, L"%1.%2");
+        if (wcscmp(marker, L"3.2") != 0) FAIL("a multi-level marker did not name both levels");
+
+        // A different list counts separately.
+        item.listId = 2;
+        item.numFormat = NUMFMT_UPPER_ROMAN;
+        item.listLevel = 0;
+        wcscpy_s(item.listText, 24, L"%1.");
+        NextMarker(&n, &item, marker, 64);
+        if (wcscmp(marker, L"I.") != 0) FAIL("a second list did not start again at one");
+        NextMarker(&n, &item, marker, 64);
+        if (wcscmp(marker, L"II.") != 0) FAIL("roman numerals did not reach II");
+
+        // Letters run out at z and double, which is what Word does.
+        item.listId = 3;
+        item.numFormat = NUMFMT_LOWER_LETTER;
+        wcscpy_s(item.listText, 24, L"%1.");
+        for (int i = 0; i < 27; i++) NextMarker(&n, &item, marker, 64);
+        if (wcscmp(marker, L"aa.") != 0) FAIL("the 27th lettered item is not aa");
+
+        // A bullet does not count at all, and changes with the level.
+        item.listId = 4;
+        item.list = LIST_BULLET;
+        item.numFormat = NUMFMT_BULLET;
+        item.listLevel = 0;
+        item.listText[0] = 0;
+        NextMarker(&n, &item, marker, 64);
+        if (wcscmp(marker, L"\x2022") != 0) FAIL("a bullet is not a bullet");
+        item.listLevel = 1;
+        NextMarker(&n, &item, marker, 64);
+        if (wcscmp(marker, L"\x25E6") != 0) FAIL("a nested bullet did not change shape");
+
+        #undef MARKER
     }
 
     // --- an empty document still produces a page --------------------------
