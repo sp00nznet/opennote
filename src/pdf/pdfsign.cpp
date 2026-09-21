@@ -239,6 +239,41 @@ extern "C" BOOL PdfSign_VerifyDetachedNamed(const BYTE* signature, size_t signat
 
 const WCHAR* PDFSIGN_DEFAULT_TIMESTAMP = L"http://timestamp.digicert.com";
 
+// The attribute RFC 3161 uses, which the SDK header does not name.
+static const char* const TIMESTAMP_ATTRIBUTE = "1.2.840.113549.1.9.16.2.14";
+
+// What a timestamp is over: the signature value, not the whole message.
+// Getting this wrong makes a token only this program can check -- the
+// signature verifies everywhere and the timestamp verifies nowhere, which is
+// the worst of the three ways this can end.
+static BYTE* SignatureValue(const BYTE* signature, size_t signatureLen, DWORD* lenOut) {
+    *lenOut = 0;
+
+    HCRYPTMSG message = CryptMsgOpenToDecode(X509_ASN_ENCODING | PKCS_7_ASN_ENCODING,
+                                             0, 0, 0, NULL, NULL);
+    if (!message) return NULL;
+
+    BYTE* value = NULL;
+
+    if (CryptMsgUpdate(message, signature, (DWORD)signatureLen, TRUE)) {
+        DWORD len = 0;
+
+        if (CryptMsgGetParam(message, CMSG_ENCRYPTED_DIGEST, 0, NULL, &len) && len > 0) {
+            value = (BYTE*)malloc(len);
+
+            if (value && CryptMsgGetParam(message, CMSG_ENCRYPTED_DIGEST, 0, value, &len)) {
+                *lenOut = len;
+            } else {
+                free(value);
+                value = NULL;
+            }
+        }
+    }
+
+    CryptMsgClose(message);
+    return value;
+}
+
 extern "C" BYTE* PdfSign_DetachedTimestamped(PdfCertificate certificate,
                                              const BYTE* a, size_t aLen,
                                              const BYTE* b, size_t bLen,
@@ -253,20 +288,22 @@ extern "C" BYTE* PdfSign_DetachedTimestamped(PdfCertificate certificate,
     size_t signatureLen = outLen ? *outLen : 0;
     if (signatureLen == 0) return signature;
 
-    // The token is over the signature itself -- what is being timestamped is
-    // "this signature existed", not "this document existed".
+    DWORD valueLen = 0;
+    BYTE* value = SignatureValue(signature, signatureLen, &valueLen);
+    if (!value) return signature;
+
     CRYPT_TIMESTAMP_CONTEXT* token = NULL;
     CRYPT_TIMESTAMP_PARA para = {};
     para.fRequestCerts = TRUE;
 
     // The one thing that can hang here is somebody else's web server, so it
     // is given a few seconds and no more.
-    if (!CryptRetrieveTimeStamp(timestampUrl, TIMESTAMP_NO_AUTH_RETRIEVAL, 8000,
-                                szOID_NIST_sha256, &para,
-                                signature, (DWORD)signatureLen,
-                                &token, NULL, NULL)) {
-        return signature;      // unstamped, and the caller is told
-    }
+    BOOL got = CryptRetrieveTimeStamp(timestampUrl, TIMESTAMP_NO_AUTH_RETRIEVAL, 8000,
+                                      szOID_NIST_sha256, &para, value, valueLen,
+                                      &token, NULL, NULL);
+    free(value);
+
+    if (!got) return signature;      // unstamped, and the caller is told
 
     // Open the signature again so the token can be added to it.
     HCRYPTMSG message = CryptMsgOpenToDecode(X509_ASN_ENCODING | PKCS_7_ASN_ENCODING,
@@ -278,9 +315,7 @@ extern "C" BYTE* PdfSign_DetachedTimestamped(PdfCertificate certificate,
             CRYPT_ATTRIBUTE attribute = {};
             CRYPT_ATTR_BLOB blob = { token->cbEncoded, token->pbEncoded };
 
-            // RFC 3161's signature-time-stamp attribute. The SDK header does
-            // not name it, so it is written out: 1.2.840.113549.1.9.16.2.14.
-            attribute.pszObjId = (LPSTR)"1.2.840.113549.1.9.16.2.14";
+            attribute.pszObjId = (LPSTR)TIMESTAMP_ATTRIBUTE;
             attribute.cValue = 1;
             attribute.rgValue = &blob;
 
@@ -338,6 +373,82 @@ extern "C" BYTE* PdfSign_DetachedTimestamped(PdfCertificate certificate,
     // The token came back and could not be attached: better an untimestamped
     // signature than a broken one.
     return signature;
+}
+
+extern "C" BOOL PdfSign_ReadTimestamp(const BYTE* signature, size_t signatureLen,
+                                      SYSTEMTIME* whenOut, WCHAR* authorityOut,
+                                      size_t authorityChars) {
+    if (authorityOut && authorityChars) authorityOut[0] = L'\0';
+    if (!signature || signatureLen == 0) return FALSE;
+
+    DWORD valueLen = 0;
+    BYTE* value = SignatureValue(signature, signatureLen, &valueLen);
+    if (!value) return FALSE;
+
+    HCRYPTMSG message = CryptMsgOpenToDecode(X509_ASN_ENCODING | PKCS_7_ASN_ENCODING,
+                                             0, 0, 0, NULL, NULL);
+    if (!message) {
+        free(value);
+        return FALSE;
+    }
+
+    BOOL found = FALSE;
+
+    if (CryptMsgUpdate(message, signature, (DWORD)signatureLen, TRUE)) {
+        DWORD attrLen = 0;
+
+        if (CryptMsgGetParam(message, CMSG_SIGNER_UNAUTH_ATTR_PARAM, 0, NULL, &attrLen) &&
+            attrLen > 0) {
+
+            CRYPT_ATTRIBUTES* attributes = (CRYPT_ATTRIBUTES*)malloc(attrLen);
+
+            if (attributes &&
+                CryptMsgGetParam(message, CMSG_SIGNER_UNAUTH_ATTR_PARAM, 0,
+                                 attributes, &attrLen)) {
+
+                for (DWORD i = 0; i < attributes->cAttr && !found; i++) {
+                    CRYPT_ATTRIBUTE* attribute = &attributes->rgAttr[i];
+
+                    if (!attribute->pszObjId ||
+                        strcmp(attribute->pszObjId, TIMESTAMP_ATTRIBUTE) != 0) continue;
+                    if (attribute->cValue == 0) continue;
+
+                    // Checked against the same bytes it was made over. A date
+                    // read out of a token nobody verified is a date anybody
+                    // could have written.
+                    CRYPT_TIMESTAMP_CONTEXT* context = NULL;
+                    PCCERT_CONTEXT authority = NULL;
+
+                    if (!CryptVerifyTimeStampSignature(attribute->rgValue[0].pbData,
+                                                       attribute->rgValue[0].cbData,
+                                                       value, valueLen, NULL,
+                                                       &context, &authority, NULL) ||
+                        !context) {
+                        continue;
+                    }
+
+                    if (whenOut) FileTimeToSystemTime(&context->pTimeStamp->ftTime, whenOut);
+
+                    // Who says so, when the token brought its certificate
+                    // along -- which is why fRequestCerts was asked for.
+                    if (authority && authorityOut && authorityChars) {
+                        CertGetNameStringW(authority, CERT_NAME_SIMPLE_DISPLAY_TYPE,
+                                           0, NULL, authorityOut, (DWORD)authorityChars);
+                    }
+
+                    if (authority) CertFreeCertificateContext(authority);
+                    CryptMemFree(context);
+                    found = TRUE;
+                }
+            }
+
+            free(attributes);
+        }
+    }
+
+    CryptMsgClose(message);
+    free(value);
+    return found;
 }
 
 // ---------------------------------------------------------------------------

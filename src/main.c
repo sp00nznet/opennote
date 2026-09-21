@@ -466,6 +466,16 @@ static int RunPdfVerify(int argc, WCHAR** argv) {
         wprintf(L"  trust:    %s\n", PdfSign_TrustSentence(report.trust));
     }
 
+    if (report.timestamped) {
+        wprintf(L"  signed:   %04d-%02d-%02d %02d:%02d:%02d UTC, according to %s\n",
+                report.signedAt.wYear, report.signedAt.wMonth, report.signedAt.wDay,
+                report.signedAt.wHour, report.signedAt.wMinute, report.signedAt.wSecond,
+                report.timestampAuthority[0] ? report.timestampAuthority
+                                             : L"an unnamed authority");
+    } else {
+        wprintf(L"  signed:   no timestamp -- it proves what, not when\n");
+    }
+
     if (!report.coversWholeFile) {
         wprintf(L"  warning:  something was appended after the signature, "
                 L"and that part is not covered\n");
@@ -517,11 +527,28 @@ static int RunTimestampCheck(int argc, WCHAR** argv) {
                                                         bytes, sizeof(bytes) - 1, NULL, 0);
     wprintf(L"verifies:  %s\n", verifies ? L"yes" : L"NO");
 
+    // And the token has to check out against the bytes it was made over.
+    // Without this the check passes on a token no other reader would accept,
+    // which is the failure worth catching here.
+    SYSTEMTIME when = {0};
+    WCHAR authority[256] = L"";
+    BOOL readable = withToken && PdfSign_ReadTimestamp(withToken, stampedLen,
+                                                       &when, authority, 256);
+
+    if (readable) {
+        wprintf(L"reads as:  %04d-%02d-%02d %02d:%02d:%02d UTC, according to %s\n",
+                when.wYear, when.wMonth, when.wDay,
+                when.wHour, when.wMinute, when.wSecond,
+                authority[0] ? authority : L"an unnamed authority");
+    } else if (stamped) {
+        wprintf(L"reads as:  NO -- the token is attached but does not check out\n");
+    }
+
     free(plain);
     free(withToken);
     PdfSign_DiscardTemporary(certificate);
 
-    return (stamped && verifies) ? 0 : 1;
+    return (stamped && verifies && readable) ? 0 : 1;
 }
 
 // Does `b` contain the same characters as `a`, ignoring whitespace and the

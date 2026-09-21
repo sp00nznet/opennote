@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- **Timestamps covered the wrong bytes.** The token was computed over the whole PKCS#7
+  signature rather than the SignerInfo's encrypted digest, which is what RFC 3161's
+  signature-time-stamp attribute is defined over. Signatures made by earlier builds
+  verify fine; their timestamps do not, in this program or any other. Re-sign anything
+  where the date matters.
+- **The room reserved for a signature** was 8KB, and a timestamped one already uses about
+  7KB of it. An authority with a longer certificate chain would have overflowed and
+  failed the save outright; there is now 16KB.
+
 ### Added
 - **Radio groups** are one question with several buttons, and are read and written as
   one: the answer goes on the field and the state on every button, including the ones
@@ -16,9 +26,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `OPENNOTE_TSA` names. A signature without one stops proving anything the day its
   certificate expires. If the authority cannot be reached the signature is still made,
   and both the status bar and `--pdf-sign` say what is missing.
+- **Signatures say when.** `--pdf-verify` and the status bar now read the timestamp back
+  out of a signed file and show the date beside the signer, along with the authority that
+  vouched for it. The token is verified, not just read: a date nobody checked is a date
+  anybody could have written.
 - **`--timestamp-check`** answers "is timestamping working from this machine?" — it makes
-  a throwaway certificate, signs with it, asks the authority for a token and reports
-  whether the result still verifies. Nothing touches the real certificate store.
+  a throwaway certificate, signs with it, asks the authority for a token, and reports
+  whether the result still verifies *and* whether the token reads back. Nothing touches
+  the real certificate store.
 - **A signature pad.** **File → Sign PDF…** opens a box to sign in with the mouse if
   there is nothing kept yet, and offers what was kept if there is. The drawing is
   rendered with Direct2D, so the diagonals a signature is made of come out smooth, and

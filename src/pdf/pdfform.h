@@ -133,6 +133,14 @@ typedef struct {
     // What the certificate is worth, which is a separate question from
     // whether the bytes match. See PdfTrust.
     PdfTrust trust;
+
+    // When, if the signature carries a timestamp somebody else vouched for.
+    // Without one a signature proves what, not when -- and the day the
+    // certificate expires it stops proving much at all, because there is no
+    // way to tell a signature made while it was valid from one made after.
+    BOOL       timestamped;
+    SYSTEMTIME signedAt;             // UTC, only when timestamped
+    WCHAR      timestampAuthority[256];
 } PdfSignatureReport;
 
 BOOL PdfForm_CheckSignature(const WCHAR* path, PdfSignatureReport* out);

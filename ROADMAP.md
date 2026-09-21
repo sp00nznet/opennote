@@ -271,10 +271,12 @@ the free tools for it are adware or a web upload.
       built-in authority or whichever one `OPENNOTE_TSA` names, with the signature still
       made -- and the missing proof of *when* said out loud -- if the authority cannot be
       reached.
+- [x] **Reading the timestamp back**, so "signed on" sits beside "signed by" -- and over
+      the bytes RFC 3161 says the token covers, which is the signature value and not the
+      whole message. The first version got that wrong: the signature verified everywhere
+      and the timestamp verified nowhere.
 
 ### After v0.11
-
-- [ ] Reading the timestamp back, so "signed on" can be shown beside "signed by".
 - [ ] Forms whose fields are drawn rather than declared -- the scanned kind, with lines
       to write on and no AcroForm at all. Typing on top of those is a different feature
       and a bigger one.

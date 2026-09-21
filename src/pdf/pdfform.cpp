@@ -2112,9 +2112,14 @@ extern "C" BOOL PdfForm_Save(PdfForm* form, const WCHAR* path) {
         byteRangeAt = out.len;
         OutText(&out, "0000000000 0000000000 0000000000] /Contents ");
 
+        // 16KB of room. A plain signature is about 1.2KB and a timestamped
+        // one about 7KB, so this is deliberately more than double what is
+        // needed: an authority with a longer certificate chain that did not
+        // fit would fail the save outright, and 16KB of zeros in the file is
+        // the cheaper end of that trade.
         contentsAt = out.len;
         OutText(&out, "<");
-        for (int i = 0; i < 16384; i++) OutText(&out, "0");
+        for (int i = 0; i < 32768; i++) OutText(&out, "0");
         OutText(&out, ">");
         contentsLen = out.len - contentsAt;
 
@@ -2993,6 +2998,10 @@ extern "C" BOOL PdfForm_CheckSignature(const WCHAR* path, PdfSignatureReport* ou
             bytes, numbers[1],
             bytes + numbers[2], numbers[3],
             out->signer, 256, &out->trust);
+
+        out->timestamped = PdfSign_ReadTimestamp(signature, signatureLen,
+                                                 &out->signedAt,
+                                                 out->timestampAuthority, 256);
     }
 
     free(signature);
@@ -3313,6 +3322,14 @@ extern "C" BOOL PdfForm_SelfTest(char* failure, size_t failureSize) {
 
         // Intact and untrusted at the same time, which is exactly what a
         // self-signed certificate should produce.
+        // The self-check signs without asking an authority, so there should
+        // be no date on it. A date here would mean one was read out of a
+        // signature that never had one.
+        if (report.timestamped) {
+            free(signedBytes);
+            FAIL("a signature made without a timestamp came back with a date");
+        }
+
         if (report.trust == PDFTRUST_TRUSTED) {
             free(signedBytes);
             FAIL("a certificate made for the test was reported as trusted");

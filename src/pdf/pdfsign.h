@@ -99,6 +99,15 @@ BOOL PdfSign_VerifyDetachedNamed(const BYTE* signature, size_t signatureLen,
                                  WCHAR* signerOut, size_t signerChars,
                                  PdfTrust* trustOut);
 
+// When a signature says it was made, if it carries a timestamp.
+//
+// The token is checked as well as read: a date nobody verified is a date
+// anybody could have written. What this does not check is whether the
+// authority that issued the token is one to trust -- the same distinction
+// that applies to the signer, and for the same reason.
+BOOL PdfSign_ReadTimestamp(const BYTE* signature, size_t signatureLen,
+                           SYSTEMTIME* whenOut, WCHAR* authorityOut, size_t authorityChars);
+
 // A certificate made for a self-check: self-signed, in a key container that
 // is deleted with it, and worth nothing to anybody. It exists so that the
 // signing path can be exercised without opening the user's certificate store
