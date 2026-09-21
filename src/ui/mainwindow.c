@@ -938,6 +938,136 @@ static void FlushPageLayout(void) {
     if (tab && tab->hPageView) PageView_Apply(tab->hPageView);
 }
 
+// Which paragraph the user is looking at: the one the page view's caret is in
+// when that is the view, and otherwise the one the text control's selection
+// starts in -- counted the way the capture counts them, by the paragraph marks
+// before it.
+static int ActiveParagraphIndex(Tab* tab) {
+    if (tab->hPageView) {
+        int index = 0;
+        if (PageView_CaretPara(tab->hPageView, &index)) return index;
+    }
+
+    CHARRANGE sel = {0};
+    SendMessageW(tab->hEditor, EM_EXGETSEL, 0, (LPARAM)&sel);
+    if (sel.cpMin <= 0) return 0;
+
+    TEXTRANGEW range;
+    WCHAR* buffer = (WCHAR*)calloc((size_t)sel.cpMin + 1, sizeof(WCHAR));
+    if (!buffer) return 0;
+
+    range.chrg.cpMin = 0;
+    range.chrg.cpMax = sel.cpMin;
+    range.lpstrText = buffer;
+    SendMessageW(tab->hEditor, EM_GETTEXTRANGE, 0, (LPARAM)&range);
+
+    int paragraphs = 0;
+    for (const WCHAR* c = buffer; *c; c++) {
+        if (*c == L'\r' || *c == L'\n') paragraphs++;
+    }
+    free(buffer);
+    return paragraphs;
+}
+
+// A comment on the paragraph the user is in. The document is captured, the
+// comment added to the model and the views put back in step -- the same shape
+// as every other command that changes something the control cannot hold.
+static void NewComment(HWND hwnd) {
+    Tab* tab = App_GetActiveTab();
+    if (!tab || !tab->document || !tab->hEditor) return;
+
+    if (!Editor_IsRich(tab->hEditor)) {
+        MessageBoxW(hwnd, L"A plain text file has nowhere to keep a comment.",
+                    APP_NAME, MB_ICONINFORMATION);
+        return;
+    }
+
+    WCHAR text[512] = L"";
+    if (!Dialogs_InputBox(hwnd, L"New Comment",
+                          L"What do you want to say about this paragraph?",
+                          text, 512)) {
+        return;
+    }
+    if (!text[0]) return;
+
+    int paragraph = ActiveParagraphIndex(tab);
+
+    FlushPageLayout();
+
+    Document* doc = tab->document;
+    DocModel* model = DocView_CaptureWith(tab->hEditor, doc->source);
+    if (!model) return;
+
+    // Who is saying it: the Windows account, which is the only name this
+    // program knows and the one Word would use too.
+    WCHAR author[64] = L"";
+    DWORD size = 64;
+    if (!GetUserNameW(author, &size) || !author[0]) wcscpy_s(author, 64, L"Author");
+
+    WCHAR initials[16] = L"";
+    initials[0] = author[0];
+    initials[1] = L'\0';
+
+    DocComment* comment = Doc_AddComment(model, author, initials, text);
+    DocPara* para = Doc_ParaAt(model, paragraph);
+    if (!comment || !para) {
+        Doc_Free(model);
+        return;
+    }
+    Doc_MarkComment(para, comment->id);
+
+    Doc_Free(doc->source);
+    doc->source = model;
+    doc->modified = TRUE;
+
+    if (tab->hPageView) {
+        TogglePageLayout(hwnd);
+        TogglePageLayout(hwnd);
+    }
+
+    TabControl_UpdateTabTitle(tab->index);
+    MainWindow_UpdateTitle();
+    StatusBar_UpdateModified(TRUE);
+
+    WCHAR message[128];
+    swprintf_s(message, 128, L"Comment added to paragraph %d", paragraph + 1);
+    StatusBar_SetMessage(message);
+}
+
+// The list of them, which is also where one can be taken off.
+static void ShowComments(HWND hwnd) {
+    Tab* tab = App_GetActiveTab();
+    if (!tab || !tab->document || !tab->hEditor) return;
+
+    FlushPageLayout();
+
+    Document* doc = tab->document;
+    DocModel* model = DocView_CaptureWith(tab->hEditor, doc->source);
+    if (!model) return;
+
+    if (Doc_CountComments(model) == 0) {
+        Doc_Free(model);
+        MessageBoxW(hwnd, L"This document has no comments.", APP_NAME, MB_ICONINFORMATION);
+        return;
+    }
+
+    BOOL changed = Dialogs_Comments(hwnd, model);
+
+    Doc_Free(doc->source);
+    doc->source = model;
+
+    if (changed) {
+        doc->modified = TRUE;
+        if (tab->hPageView) {
+            TogglePageLayout(hwnd);
+            TogglePageLayout(hwnd);
+        }
+        TabControl_UpdateTabTitle(tab->index);
+        MainWindow_UpdateTitle();
+        StatusBar_UpdateModified(TRUE);
+    }
+}
+
 // What the Insert menu's field commands have in common: the document is
 // captured, something is added to the model, and the views are put back in
 // step with it.
@@ -1431,6 +1561,14 @@ void MainWindow_OnCommand(HWND hwnd, int id, HWND hwndCtl, UINT codeNotify) {
             break;
 
         // Review menu
+        case IDM_REVIEW_NEW_COMMENT:
+            NewComment(hwnd);
+            break;
+
+        case IDM_REVIEW_COMMENTS:
+            ShowComments(hwnd);
+            break;
+
         case IDM_REVIEW_ACCEPT_ALL:
             ResolveRevisions(hwnd, TRUE);
             break;

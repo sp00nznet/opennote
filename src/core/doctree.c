@@ -132,6 +132,14 @@ void Doc_Free(DocModel* doc) {
         note = next;
     }
 
+    DocComment* comment = doc->comments;
+    while (comment) {
+        DocComment* next = comment->next;
+        FreeParas(comment->paras);
+        free(comment);
+        comment = next;
+    }
+
     DocStyle* style = doc->styles;
     while (style) {
         DocStyle* next = style->next;
@@ -768,6 +776,161 @@ BOOL Doc_HasPageFields(const DocModel* doc) {
 }
 
 
+
+// ---------------------------------------------------------------------------
+// Comments
+//
+// The comment lives in a part of its own and the document holds markers
+// pointing at it, which is the same shape as a footnote: text that belongs to
+// the document without being in it.
+// ---------------------------------------------------------------------------
+
+DocComment* Doc_AddComment(DocModel* doc, const WCHAR* author, const WCHAR* initials,
+                           const WCHAR* text) {
+    if (!doc) return NULL;
+
+    DocComment* c = (DocComment*)calloc(1, sizeof(DocComment));
+    if (!c) return NULL;
+
+    int highest = 0;
+    for (const DocComment* existing = doc->comments; existing; existing = existing->next) {
+        if (existing->id > highest) highest = existing->id;
+    }
+    c->id = highest + 1;
+
+    wcsncpy_s(c->author, 64, author && author[0] ? author : L"Author", _TRUNCATE);
+    wcsncpy_s(c->initials, 16, initials && initials[0] ? initials : L"A", _TRUNCATE);
+
+    SYSTEMTIME now;
+    GetLocalTime(&now);
+    swprintf_s(c->date, 32, L"%04d-%02d-%02dT%02d:%02d:%02dZ",
+               now.wYear, now.wMonth, now.wDay, now.wHour, now.wMinute, now.wSecond);
+
+    c->paras = (DocPara*)calloc(1, sizeof(DocPara));
+    if (c->paras && text && text[0]) {
+        CharProps props = doc->defaultRun;
+        Doc_AddRun(c->paras, text, -1, &props);
+    }
+
+    APPEND(doc->comments, c, DocComment);
+    return c;
+}
+
+DocComment* Doc_FindComment(const DocModel* doc, int id) {
+    for (DocComment* c = doc ? doc->comments : NULL; c; c = c->next) {
+        if (c->id == id) return c;
+    }
+    return NULL;
+}
+
+int Doc_CountComments(const DocModel* doc) {
+    int n = 0;
+    for (const DocComment* c = doc ? doc->comments : NULL; c; c = c->next) n++;
+    return n;
+}
+
+void Doc_MarkComment(DocPara* para, int id) {
+    if (!para || id <= 0) return;
+
+    CharProps props = {0};
+    if (para->runs) props = para->runs->props;
+
+    // The start marker belongs at the front of the paragraph, and a run is
+    // appended, so it is moved there afterwards.
+    DocRun* start = Doc_AddRun(para, L"", 0, &props);
+    if (start) {
+        start->commentMark = COMMENT_MARK_START;
+        start->commentId = id;
+
+        DocRun* prev = NULL;
+        for (DocRun* r = para->runs; r && r != start; r = r->next) prev = r;
+        if (prev) {
+            prev->next = start->next;
+            start->next = para->runs;
+            para->runs = start;
+        }
+    }
+
+    DocRun* end = Doc_AddRun(para, L"", 0, &props);
+    if (end) {
+        end->commentMark = COMMENT_MARK_END;
+        end->commentId = id;
+    }
+
+    DocRun* ref = Doc_AddRun(para, L"", 0, &props);
+    if (ref) {
+        ref->commentMark = COMMENT_MARK_REF;
+        ref->commentId = id;
+    }
+}
+
+static void StripCommentMarks(DocPara* paras, int id) {
+    for (DocPara* p = paras; p; p = p->next) {
+        DocRun* prev = NULL;
+        DocRun* run = p->runs;
+
+        while (run) {
+            DocRun* next = run->next;
+            if (run->commentMark != COMMENT_MARK_NONE && run->commentId == id) {
+                if (prev) prev->next = next;
+                else      p->runs = next;
+                free(run->text);
+                free(run->field);
+                free(run->bookmark);
+                free(run);
+            } else {
+                prev = run;
+            }
+            run = next;
+        }
+    }
+}
+
+void Doc_DeleteComment(DocModel* doc, int id) {
+    if (!doc) return;
+
+    for (DocBlock* b = doc->blocks; b; b = b->next) {
+        if (b->kind == BLOCK_PARA) {
+            StripCommentMarks(b->para, id);
+            continue;
+        }
+        for (DocRow* row = b->table.rows; row; row = row->next) {
+            for (DocCell* c = row->cells; c; c = c->next) StripCommentMarks(c->paras, id);
+        }
+    }
+
+    DocComment* prev = NULL;
+    for (DocComment* c = doc->comments; c; c = c->next) {
+        if (c->id != id) { prev = c; continue; }
+
+        if (prev) prev->next = c->next;
+        else      doc->comments = c->next;
+
+        FreeParas(c->paras);
+        free(c);
+        return;
+    }
+}
+
+WCHAR* Doc_CommentText(const DocComment* comment) {
+    TextAcc acc = {0};
+    AccAdd(&acc, L"", 0);
+
+    for (const DocPara* p = comment ? comment->paras : NULL; p; p = p->next) {
+        if (acc.len) AccAdd(&acc, L" ", 1);
+
+        unsigned len = 0;
+        WCHAR* text = Doc_ParaText(p, &len);
+        if (text) {
+            AccAdd(&acc, text, len);
+            free(text);
+        }
+    }
+
+    if (acc.buf) acc.buf[acc.len] = L'\0';
+    return acc.buf;
+}
+
 // ---------------------------------------------------------------------------
 // Page numbers and a table of contents
 //
@@ -1253,6 +1416,31 @@ static void CollectFn(const DocPara* para, void* ctx) {
     if (list->count < 4096) list->paras[list->count++] = para;
 }
 
+// Comments, which are text the document carries without showing: losing one
+// is losing what somebody said about the document.
+static void CompareComments(const DocModel* a, const DocModel* b, DocDiff* d) {
+    CMP(Doc_CountComments(a) == Doc_CountComments(b),
+        "comments: %d -> %d", Doc_CountComments(a), Doc_CountComments(b));
+
+    for (const DocComment* ca = a->comments; ca; ca = ca->next) {
+        const DocComment* cb = Doc_FindComment(b, ca->id);
+
+        d->compared++;
+        if (!cb) {
+            DiffNote(d, "comment %d was lost", ca->id);
+            continue;
+        }
+
+        CMP(wcscmp(ca->author, cb->author) == 0, "comment %d: author changed", ca->id);
+
+        WCHAR* ta = Doc_CommentText(ca);
+        WCHAR* tb = Doc_CommentText(cb);
+        CMP(ta && tb && wcscmp(ta, tb) == 0, "comment %d: text changed", ca->id);
+        free(ta);
+        free(tb);
+    }
+}
+
 // The page the document is set on. A document that stated its paper size and
 // came back on a different one has lost something that changes every page.
 static void CompareSections(const SectionProps* a, const SectionProps* b, DocDiff* d) {
@@ -1273,6 +1461,7 @@ void Doc_Compare(const DocModel* a, const DocModel* b, DocDiff* d) {
     }
 
     CompareSections(&a->section, &b->section, d);
+    CompareComments(a, b, d);
 
     // A header or a footer that did not come back is a loss like any other.
     {
@@ -1394,7 +1583,9 @@ void Doc_Compare(const DocModel* a, const DocModel* b, DocDiff* d) {
 // round trip without occupying a character -- which is why it is a predicate
 // rather than a test against one field.
 static BOOL RunIsHidden(const DocRun* run) {
-    return run->rev.kind == REV_DELETED || run->bookmark != NULL;
+    return run->rev.kind == REV_DELETED ||
+           run->bookmark != NULL ||
+           run->commentMark != COMMENT_MARK_NONE;
 }
 
 BOOL Doc_RunIsHidden(const DocRun* run) {
@@ -1952,6 +2143,8 @@ static BOOL CloneParas(const DocPara* src, DocPara** dest) {
             rc->noteIsEnd = r->noteIsEnd;
             rc->rev = r->rev;
             rc->bookmarkEnd = r->bookmarkEnd;
+            rc->commentMark = r->commentMark;
+            rc->commentId = r->commentId;
             if (r->field)    rc->field = _wcsdup(r->field);
             if (r->bookmark) rc->bookmark = _wcsdup(r->bookmark);
 
@@ -2020,6 +2213,21 @@ DocModel* Doc_Clone(const DocModel* src) {
             Doc_Free(copy);
             return NULL;
         }
+    }
+
+    for (const DocComment* c = src->comments; c; c = c->next) {
+        DocComment* cc = (DocComment*)calloc(1, sizeof(DocComment));
+        if (!cc) { Doc_Free(copy); return NULL; }
+        *cc = *c;
+        cc->next = NULL;
+        cc->paras = NULL;
+        if (!CloneParas(c->paras, &cc->paras)) {
+            FreeParas(cc->paras);
+            free(cc);
+            Doc_Free(copy);
+            return NULL;
+        }
+        APPEND(copy->comments, cc, DocComment);
     }
 
     for (const DocStyle* st = src->styles; st; st = st->next) {
@@ -2619,6 +2827,53 @@ BOOL Doc_SelfTest(char* failure, size_t failureSize) {
         Doc_InsertPageNumbers(a);
         if (!a->footer) FAIL("page numbers did not reach the footer");
         if (!Doc_HasPageFields(a)) FAIL("the page number is not a field");
+    }
+
+    // --- comments: text about the document that is not in it ---
+    {
+        Doc_Free(a);
+        Doc_Free(b);
+        b = NULL;
+        a = Doc_New();
+        if (!a) FAIL("could not allocate a model");
+
+        CharProps none = {0};
+        DocPara* para = Doc_AddPara(a);
+        Doc_AddRun(para, L"Revenue grew by forty percent.", -1, &none);
+
+        DocComment* c = Doc_AddComment(a, L"A Reviewer", L"AR", L"Is that right?");
+        if (!c || c->id != 1) FAIL("a comment was not given an id");
+        Doc_MarkComment(para, c->id);
+
+        if (Doc_CountComments(a) != 1) FAIL("the comment was not counted");
+
+        // The markers take up no room: the paragraph reads as it did.
+        WCHAR* text = Doc_ParaText(para, NULL);
+        if (!text || wcscmp(text, L"Revenue grew by forty percent.") != 0) {
+            free(text);
+            FAIL("a comment marker showed up in the text");
+        }
+        free(text);
+
+        text = Doc_CommentText(c);
+        if (!text || wcscmp(text, L"Is that right?") != 0) {
+            free(text);
+            FAIL("the comment does not say what it was given");
+        }
+        free(text);
+
+        // A second comment gets the next id, and deleting the first takes its
+        // markers with it.
+        DocComment* second = Doc_AddComment(a, L"Another", L"AN", L"And this?");
+        if (!second || second->id != 2) FAIL("a second comment reused an id");
+
+        Doc_DeleteComment(a, 1);
+        if (Doc_CountComments(a) != 1) FAIL("deleting a comment left it behind");
+        if (Doc_FindComment(a, 1)) FAIL("a deleted comment is still findable");
+
+        for (DocRun* r = para->runs; r; r = r->next) {
+            if (r->commentMark != COMMENT_MARK_NONE) FAIL("a deleted comment left its markers");
+        }
     }
 
     Doc_Free(a);

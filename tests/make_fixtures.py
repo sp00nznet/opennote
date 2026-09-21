@@ -33,6 +33,7 @@ DOC_RELS = """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
 {rels}</Relationships>"""
 
+COMMENTS_CT = "application/vnd.openxmlformats-officedocument.wordprocessingml.comments+xml"
 HEADER_CT = "application/vnd.openxmlformats-officedocument.wordprocessingml.header+xml"
 FOOTER_CT = "application/vnd.openxmlformats-officedocument.wordprocessingml.footer+xml"
 FOOTNOTES_CT = "application/vnd.openxmlformats-officedocument.wordprocessingml.footnotes+xml"
@@ -568,6 +569,49 @@ def fixture_fields(outdir):
 
 
 # --------------------------------------------------------------------------
+# comments: what somebody said about the document, which is not in it
+# --------------------------------------------------------------------------
+def fixture_comments(outdir):
+    comments = (
+        '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n'
+        '<w:comments xmlns:w="%s" xmlns:r="%s">'
+        '<w:comment w:id="1" w:author="A Reviewer" w:initials="AR"'
+        ' w:date="2026-01-02T03:04:05Z"><w:p><w:r>'
+        '<w:t xml:space="preserve">Is this the right figure?</w:t>'
+        '</w:r></w:p></w:comment>'
+        '<w:comment w:id="2" w:author="Another" w:initials="AN">'
+        '<w:p><w:r><w:t>Tighten this paragraph.</w:t></w:r></w:p></w:comment>'
+        '</w:comments>' % (W, R)
+    )
+
+    body = [
+        p([
+            '<w:commentRangeStart w:id="1"/>',
+            r("Revenue grew by forty percent."),
+            '<w:commentRangeEnd w:id="1"/>',
+            '<w:r><w:commentReference w:id="1"/></w:r>',
+        ]),
+        p([
+            '<w:commentRangeStart w:id="2"/>',
+            r("A paragraph somebody thinks is too long."),
+            '<w:commentRangeEnd w:id="2"/>',
+            '<w:r><w:commentReference w:id="2"/></w:r>',
+        ]),
+    ]
+
+    expect = [
+        "# the text reaches the view",
+        "contains:Revenue grew by forty percent.",
+        "# the comments themselves are not in the document text",
+        "absent:Is this the right figure?",
+        "absent:Tighten this paragraph.",
+    ]
+
+    parts = [("word/comments.xml", COMMENTS_CT, "comments", comments)]
+    return write(outdir, "comments", body, expect, parts=parts)
+
+
+# --------------------------------------------------------------------------
 # notes: a footnote belongs to the page its reference is on
 # --------------------------------------------------------------------------
 def fixture_notes(outdir):
@@ -634,6 +678,7 @@ def main():
         fixture_pages(outdir),
         fixture_margins(outdir),
         fixture_fields(outdir),
+        fixture_comments(outdir),
         fixture_notes(outdir),
     ]
     for path in made:

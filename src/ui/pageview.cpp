@@ -1621,6 +1621,16 @@ extern "C" HWND PageView_Create(HWND hParent, HWND hRichEdit, const DocModel* so
     return hwnd;
 }
 
+extern "C" BOOL PageView_CaretPara(HWND hPageView, int* paraIndexOut) {
+    if (!hPageView || !IsWindow(hPageView) || !paraIndexOut) return FALSE;
+
+    PageViewState* st = (PageViewState*)GetWindowLongPtrW(hPageView, GWLP_USERDATA);
+    if (!st) return FALSE;
+
+    *paraIndexOut = st->caretPara;
+    return TRUE;
+}
+
 extern "C" void PageView_Apply(HWND hPageView) {
     if (!hPageView || !IsWindow(hPageView)) return;
 

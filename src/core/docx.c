@@ -32,6 +32,7 @@
 #define REL_STYLES     L"http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles"
 #define REL_NUMBERING     L"http://schemas.openxmlformats.org/officeDocument/2006/relationships/numbering"
 #define REL_IMAGE         L"http://schemas.openxmlformats.org/officeDocument/2006/relationships/image"
+#define REL_COMMENTS      L"http://schemas.openxmlformats.org/officeDocument/2006/relationships/comments"
 #define REL_FOOTNOTES     L"http://schemas.openxmlformats.org/officeDocument/2006/relationships/footnotes"
 #define REL_ENDNOTES      L"http://schemas.openxmlformats.org/officeDocument/2006/relationships/endnotes"
 
@@ -48,6 +49,8 @@
 #define CT_FOOTER \
     L"application/vnd.openxmlformats-officedocument.wordprocessingml.footer+xml"
 
+#define CT_COMMENTS \
+    L"application/vnd.openxmlformats-officedocument.wordprocessingml.comments+xml"
 #define CT_STYLES     L"application/vnd.openxmlformats-officedocument.wordprocessingml.styles+xml"
 #define CT_NUMBERING     L"application/vnd.openxmlformats-officedocument.wordprocessingml.numbering+xml"
 
@@ -818,12 +821,96 @@ typedef struct {
     int   bookmarkCount;
 } Build;
 
+// comments.xml: one `w:comment` per comment, each holding paragraphs, exactly
+// like a footnote. Read it into a model of its own and take the paragraphs,
+// which is how the header and the notes are read too.
+static void ReadComments(IStream* stream, DocModel* doc,
+                         const NumTable* numbering, DocxPkg* pkg) {
+    IXmlReader* reader = NULL;
+    if (FAILED(CreateXmlReader(&IID_IXmlReader, (void**)&reader, NULL))) return;
+    if (FAILED(IXmlReader_SetInput(reader, (IUnknown*)stream))) {
+        IXmlReader_Release(reader);
+        return;
+    }
+    IXmlReader_SetProperty(reader, XmlReaderProperty_MaxElementDepth, 0);
+
+    DocComment* current = NULL;
+    DocPara* para = NULL;
+    BOOL inText = FALSE;
+    CharProps props = doc->defaultRun;
+
+    XmlNodeType nt;
+    while (S_OK == IXmlReader_Read(reader, &nt)) {
+        const WCHAR* local = NULL;
+        UINT len = 0;
+
+        if (nt == XmlNodeType_Element || nt == XmlNodeType_EndElement) {
+            if (FAILED(IXmlReader_GetLocalName(reader, &local, &len))) continue;
+        }
+
+        if (nt == XmlNodeType_Element) {
+            if (NameIs(local, len, L"comment")) {
+                current = (DocComment*)calloc(1, sizeof(DocComment));
+                if (!current) continue;
+
+                current->id = AttrInt(reader, L"id", 0);
+                GetAttr(reader, L"author", current->author, 64);
+                GetAttr(reader, L"initials", current->initials, 16);
+                GetAttr(reader, L"date", current->date, 32);
+                para = NULL;
+
+                DocComment* tailC = doc->comments;
+                if (!tailC) {
+                    doc->comments = current;
+                } else {
+                    while (tailC->next) tailC = tailC->next;
+                    tailC->next = current;
+                }
+            } else if (current && NameIs(local, len, L"p")) {
+                para = (DocPara*)calloc(1, sizeof(DocPara));
+                if (para) {
+                    DocPara* tailP = current->paras;
+                    if (!tailP) {
+                        current->paras = para;
+                    } else {
+                        while (tailP->next) tailP = tailP->next;
+                        tailP->next = para;
+                    }
+                }
+            } else if (NameIs(local, len, L"t")) {
+                inText = TRUE;
+            } else if (para && NameIs(local, len, L"tab")) {
+                DocRun* r = Doc_AddRun(para, L"", 0, &props);
+                if (r) r->tab = TRUE;
+            }
+        } else if (nt == XmlNodeType_Text || nt == XmlNodeType_Whitespace) {
+            if (!inText || !para) continue;
+
+            const WCHAR* val = NULL;
+            UINT vlen = 0;
+            if (SUCCEEDED(IXmlReader_GetValue(reader, &val, &vlen)) && vlen) {
+                Doc_AddRun(para, val, (int)vlen, &props);
+            }
+        } else if (nt == XmlNodeType_EndElement) {
+            if (NameIs(local, len, L"t"))            inText = FALSE;
+            else if (NameIs(local, len, L"p"))       para = NULL;
+            else if (NameIs(local, len, L"comment")) current = NULL;
+        }
+    }
+
+    (void)numbering;
+    (void)pkg;
+    IXmlReader_Release(reader);
+}
+
 static DocPara* NewParagraph(Build* b) {
     return b->cell ? Doc_AddCellPara(b->cell) : Doc_AddPara(b->doc);
 }
 
 static void ReadNotes(IStream* stream, DocModel* doc, BOOL endnote,
                       const NumTable* numbering, DocxPkg* pkg);
+static void ReadComments(IStream* stream, DocModel* doc,
+                         const NumTable* numbering, DocxPkg* pkg);
 
 static BOOL BuildModel(IStream* stream, DocModel* doc, const NumTable* numbering,
                        DocxPkg* pkg) {
@@ -1140,6 +1227,21 @@ static BOOL BuildModel(IStream* stream, DocModel* doc, const NumTable* numbering
                         }
                     }
                 }
+            } else if (NameIs(local, len, L"commentRangeStart") ||
+                       NameIs(local, len, L"commentRangeEnd") ||
+                       NameIs(local, len, L"commentReference")) {
+                int id = AttrInt(reader, L"id", -1);
+                if (id >= 0 && b.para) {
+                    CharProps plain = b.run;
+                    DocRun* marker = Doc_AddRun(b.para, L"", 0, &plain);
+                    if (marker) {
+                        marker->commentId = id;
+                        marker->commentMark =
+                            NameIs(local, len, L"commentRangeStart") ? COMMENT_MARK_START :
+                            NameIs(local, len, L"commentRangeEnd")   ? COMMENT_MARK_END :
+                                                                       COMMENT_MARK_REF;
+                    }
+                }
             } else if (NameIs(local, len, L"bookmarkEnd")) {
                 int id = AttrInt(reader, L"id", -1);
                 for (int i = 0; i < b.bookmarkCount && b.para; i++) {
@@ -1297,6 +1399,16 @@ static BOOL BuildModel(IStream* stream, DocModel* doc, const NumTable* numbering
             if (!part) continue;
 
             ReadNotes(part, doc, noteParts[i].endnote, numbering, pkg);
+            IStream_Release(part);
+        }
+    }
+
+    // Comments are a part of their own too, and read the same way: each
+    // `w:comment` is a wrapper round ordinary paragraphs.
+    {
+        IStream* part = RelatedStream(pkg, REL_COMMENTS);
+        if (part) {
+            ReadComments(part, doc, numbering, pkg);
             IStream_Release(part);
         }
     }
@@ -1700,6 +1812,20 @@ static void EmitPara(StrBuf* x, const DocPara* para, ImagePlan* plan) {
             OpenMark(x, &open, &g_revId);
         }
 
+        // A comment's markers, which are elements between runs like a
+        // bookmark's. The reference is the one that has to be inside a run,
+        // because that is where the bubble hangs.
+        if (r->commentMark != COMMENT_MARK_NONE) {
+            if (r->commentMark == COMMENT_MARK_START) {
+                SB_AddF(x, "<w:commentRangeStart w:id=\"%d\"/>", r->commentId);
+            } else if (r->commentMark == COMMENT_MARK_END) {
+                SB_AddF(x, "<w:commentRangeEnd w:id=\"%d\"/>", r->commentId);
+            } else {
+                SB_AddF(x, "<w:r><w:commentReference w:id=\"%d\"/></w:r>", r->commentId);
+            }
+            continue;
+        }
+
         // A bookmark is a marker between runs rather than a run of its own.
         // The id only has to pair a start with its end.
         if (r->bookmark) {
@@ -2051,6 +2177,35 @@ static BOOL BuildNotesXml(const DocModel* doc, BOOL endnote, StrBuf* x, ImagePla
     return !x->failed;
 }
 
+// comments.xml: every comment in one part, each with who wrote it and when.
+static BOOL BuildCommentsXml(const DocModel* doc, StrBuf* x, ImagePlan* plan) {
+    SB_Add(x, "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>\r\n"
+              "<w:comments xmlns:w=\"" WML_NS "\" xmlns:r=\"" REL_NS "\""
+              " xmlns:wp=\"" WP_NS "\">");
+
+    for (const DocComment* c = doc->comments; c; c = c->next) {
+        SB_AddF(x, "<w:comment w:id=\"%d\" w:author=\"", c->id);
+        SB_AddXmlText(x, c->author[0] ? c->author : L"Author", -1);
+        SB_Add(x, "\" w:initials=\"");
+        SB_AddXmlText(x, c->initials[0] ? c->initials : L"A", -1);
+        SB_Add(x, "\"");
+        if (c->date[0]) {
+            SB_Add(x, " w:date=\"");
+            SB_AddXmlText(x, c->date, -1);
+            SB_Add(x, "\"");
+        }
+        SB_Add(x, ">");
+
+        if (!c->paras) SB_Add(x, "<w:p/>");
+        for (const DocPara* p = c->paras; p; p = p->next) EmitPara(x, p, plan);
+
+        SB_Add(x, "</w:comment>");
+    }
+
+    SB_Add(x, "</w:comments>");
+    return !x->failed;
+}
+
 static BOOL BuildDocumentXml(const DocModel* doc, StrBuf* x, ImagePlan* plan) {
     // The drawing namespaces are declared on the root whether or not the
     // document holds a picture; a namespace nothing uses costs a line.
@@ -2338,6 +2493,21 @@ BOOL Docx_WriteModel(const DocModel* doc, const WCHAR* path) {
                     SetError(L"The notes part could not be written.");
                     goto done;
                 }
+            }
+        }
+
+        // The comments, when there are any.
+        if (doc->comments) {
+            StrBuf part = {0};
+            BOOL partOk = BuildCommentsXml(doc, &part, &plan) &&
+                          AddRelatedPart(factory, parts, docRels, L"/word/comments.xml",
+                                         CT_COMMENTS, REL_COMMENTS, part.buf, part.len);
+            SB_Free(&part);
+
+            if (!partOk) {
+                IOpcRelationshipSet_Release(docRels);
+                SetError(L"The comments part could not be written.");
+                goto done;
             }
         }
 

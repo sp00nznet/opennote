@@ -212,14 +212,24 @@
 
 // Review: what a document carries besides its text -- tracked changes, and
 // (from below) comments.
-#define IDM_REVIEW_ACCEPT_ALL    7340
-#define IDM_REVIEW_REJECT_ALL    7341
+// 7400 and up: the control ids below start at 7340, and a menu command that
+// collides with a control id is a command that never runs -- the control's
+// notification is handled first and the switch never reaches it.
+#define IDM_REVIEW_NEW_COMMENT   7402
+#define IDM_REVIEW_COMMENTS      7403
+#define IDM_REVIEW_ACCEPT_ALL    7400
+#define IDM_REVIEW_REJECT_ALL    7401
+
+// The comments dialog
+#define IDD_COMMENTS             1160
+#define IDC_COMMENTS_LIST        1161
+#define IDC_COMMENTS_DELETE      1162
 
 // Insert: things the document works out for itself -- page numbers, a table
 // of contents, a date that stays current.
-#define IDM_INSERT_PAGE_NUMBERS  7350
-#define IDM_INSERT_TOC           7351
-#define IDM_INSERT_DATE_FIELD    7352
+#define IDM_INSERT_PAGE_NUMBERS  7410
+#define IDM_INSERT_TOC           7411
+#define IDM_INSERT_DATE_FIELD    7412
 
 // Toolbar child controls
 #define IDC_TOOLBAR              7340

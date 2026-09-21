@@ -25,6 +25,10 @@ BOOL Dialogs_SaveFile(HWND hParent, WCHAR* pathBuffer, int bufferSize, const WCH
 int Dialogs_SaveChanges(HWND hParent, const WCHAR* filename);  // Returns IDYES, IDNO, or IDCANCEL
 
 // Input dialog
+// The document's comments: who said what, and a way to remove one. Returns
+// TRUE when something was deleted, which is when the document has changed.
+BOOL Dialogs_Comments(HWND hParent, DocModel* doc);
+
 BOOL Dialogs_InputBox(HWND hParent, const WCHAR* title, const WCHAR* prompt, WCHAR* buffer, int bufferSize);
 
 // Markdown preview

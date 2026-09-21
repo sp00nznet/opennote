@@ -16,6 +16,11 @@
 HWND PageView_Create(HWND hParent, HWND hRichEdit, const DocModel* source,
                      const WCHAR* docTitle);
 
+// Which paragraph the caret is in, as an index into the document. Used by the
+// commands that attach something to a paragraph -- a comment, for one -- so
+// that they mean the paragraph the user is looking at.
+BOOL PageView_CaretPara(HWND hPageView, int* paraIndexOut);
+
 // Push whatever has been edited back into the text control it came from.
 // Called before saving or printing, and when the view goes away.
 void PageView_Apply(HWND hPageView);

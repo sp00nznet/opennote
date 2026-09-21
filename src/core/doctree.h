@@ -139,6 +139,16 @@ typedef enum {
     FIELD_TOC
 } DocFieldKind;
 
+// A comment's markers. A comment is not in the text: it is a range of text it
+// is about, a little reference where the bubble hangs, and the comment itself
+// in a part of its own.
+typedef enum {
+    COMMENT_MARK_NONE,
+    COMMENT_MARK_START,
+    COMMENT_MARK_END,
+    COMMENT_MARK_REF
+} DocCommentMark;
+
 typedef struct DocRun {
     struct DocRun* next;
     CharProps      props;
@@ -164,6 +174,11 @@ typedef struct DocRun {
     // is a place in the text rather than anything in it.
     WCHAR*         bookmark;
     BOOL           bookmarkEnd;
+
+    // A comment's marker, and which comment it belongs to. Worth no
+    // characters either, for the same reason.
+    DocCommentMark commentMark;
+    int            commentId;
 } DocRun;
 
 typedef struct DocPara {
@@ -214,6 +229,17 @@ typedef struct DocNote {
     DocPara*        paras;
 } DocNote;
 
+// A comment: who wrote it, when, and what it says. The text it is about is
+// marked in the document by a pair of markers carrying this id.
+typedef struct DocComment {
+    struct DocComment* next;
+    int       id;
+    WCHAR     author[64];
+    WCHAR     initials[16];
+    WCHAR     date[32];        // ISO 8601
+    DocPara*  paras;
+} DocComment;
+
 // A named style out of styles.xml. Paragraphs carry their resolved properties,
 // so nothing here is needed to lay a document out -- it is kept so that a
 // document written back out says "Heading 1" where it said "Heading 1", rather
@@ -243,6 +269,9 @@ typedef struct DocModel {
     DocPara*     footer;
     int          headerFromTop;     // twips from the paper edge
     int          footerFromBottom;
+
+    // Comments, by id, each marked in the text by a pair of markers.
+    DocComment*  comments;
 
     // Footnotes and endnotes, by id. A footnote is laid out at the bottom of
     // whichever page its reference landed on; an endnote at the end.
@@ -344,6 +373,28 @@ void Doc_InsertPageNumbers(DocModel* doc);
 // Returns how many entries there were; zero means the document has no
 // headings to build one from, and nothing was inserted.
 int Doc_InsertTableOfContents(DocModel* doc);
+
+// ---------------------------------------------------------------------------
+// Comments
+// ---------------------------------------------------------------------------
+
+// A comment with `text` as its body. The id is the next one free, and it is
+// the caller's job to mark the text the comment is about.
+DocComment* Doc_AddComment(DocModel* doc, const WCHAR* author, const WCHAR* initials,
+                           const WCHAR* text);
+
+DocComment* Doc_FindComment(const DocModel* doc, int id);
+int         Doc_CountComments(const DocModel* doc);
+
+// Mark a paragraph as the text a comment is about: a start marker at the
+// front, an end and a reference at the back.
+void Doc_MarkComment(DocPara* para, int id);
+
+// Remove a comment and every marker pointing at it.
+void Doc_DeleteComment(DocModel* doc, int id);
+
+// The comment's text, paragraphs joined by spaces, for showing in a list.
+WCHAR* Doc_CommentText(const DocComment* comment);   // caller frees
 
 // ---------------------------------------------------------------------------
 // Tracked changes

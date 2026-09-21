@@ -443,7 +443,8 @@ static void ReattachImages(DocModel* captured, const DocModel* source) {
 // happens, and losing a bold is better than losing the history.
 static BOOL ParaHasModelOnlyState(const DocPara* para) {
     for (const DocRun* r = para->runs; r; r = r->next) {
-        if (r->rev.kind != REV_NONE || r->field || r->bookmark) return TRUE;
+        if (r->rev.kind != REV_NONE || r->field || r->bookmark ||
+            r->commentMark != COMMENT_MARK_NONE) return TRUE;
     }
     return FALSE;
 }
@@ -554,6 +555,16 @@ DocModel* DocView_CaptureWith(HWND h, const DocModel* source) {
         for (const DocNote* n = source->notes; n; n = n->next) {
             DocNote* copy = Doc_AddNote(doc, n->id, n->endnote);
             if (copy) copy->paras = Doc_CloneParas(n->paras);
+        }
+
+        // Comments the same: the control shows nothing of them at all.
+        for (const DocComment* c = source->comments; c; c = c->next) {
+            DocComment* copy = Doc_AddComment(doc, c->author, c->initials, NULL);
+            if (!copy) continue;
+            copy->id = c->id;
+            wcsncpy_s(copy->date, 32, c->date, _TRUNCATE);
+            Doc_FreeParas(copy->paras);
+            copy->paras = Doc_CloneParas(c->paras);
         }
     }
 

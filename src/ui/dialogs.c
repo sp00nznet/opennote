@@ -1240,6 +1240,101 @@ static INT_PTR CALLBACK InputBoxProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM 
 }
 
 // Simple input box dialog
+// ---------------------------------------------------------------------------
+// Comments
+//
+// A comment is not in the document's text, so there is nowhere on the page to
+// show it yet -- this is the list of them, with what each one is about, and
+// the way to take one off. The bubble in the margin arrives with the review
+// pane; the round trip through the file is what mattered first.
+// ---------------------------------------------------------------------------
+
+typedef struct {
+    DocModel* doc;
+    BOOL      changed;
+} CommentsData;
+
+static void CommentsFill(HWND hwnd, CommentsData* data) {
+    HWND list = GetDlgItem(hwnd, IDC_COMMENTS_LIST);
+    SendMessageW(list, LB_RESETCONTENT, 0, 0);
+
+    for (const DocComment* c = data->doc->comments; c; c = c->next) {
+        WCHAR* text = Doc_CommentText(c);
+
+        // The date as the file states it is ISO 8601; the day is enough here.
+        WCHAR day[16] = L"";
+        wcsncpy_s(day, 16, c->date, 10);
+
+        WCHAR line[512];
+        swprintf_s(line, 512, L"%s%s%s\t%s",
+                   c->author[0] ? c->author : L"Author",
+                   day[0] ? L", " : L"", day,
+                   text ? text : L"");
+        free(text);
+
+        int at = (int)SendMessageW(list, LB_ADDSTRING, 0, (LPARAM)line);
+        SendMessageW(list, LB_SETITEMDATA, at, (LPARAM)c->id);
+    }
+
+    EnableWindow(GetDlgItem(hwnd, IDC_COMMENTS_DELETE),
+                 data->doc->comments != NULL);
+}
+
+static INT_PTR CALLBACK CommentsProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
+    CommentsData* data = (CommentsData*)GetWindowLongPtrW(hwnd, GWLP_USERDATA);
+
+    switch (msg) {
+        case WM_INITDIALOG: {
+            data = (CommentsData*)lParam;
+            SetWindowLongPtrW(hwnd, GWLP_USERDATA, (LONG_PTR)data);
+
+            // One tab stop, so the author column lines up and the comment
+            // itself starts where the eye expects it.
+            int tabs[1] = { 90 };
+            SendDlgItemMessageW(hwnd, IDC_COMMENTS_LIST, LB_SETTABSTOPS, 1, (LPARAM)tabs);
+
+            CommentsFill(hwnd, data);
+            return TRUE;
+        }
+
+        case WM_COMMAND:
+            switch (LOWORD(wParam)) {
+                case IDC_COMMENTS_DELETE: {
+                    HWND list = GetDlgItem(hwnd, IDC_COMMENTS_LIST);
+                    int sel = (int)SendMessageW(list, LB_GETCURSEL, 0, 0);
+                    if (sel == LB_ERR) return TRUE;
+
+                    int id = (int)SendMessageW(list, LB_GETITEMDATA, sel, 0);
+                    Doc_DeleteComment(data->doc, id);
+                    data->changed = TRUE;
+                    CommentsFill(hwnd, data);
+                    return TRUE;
+                }
+
+                case IDCANCEL:
+                case IDOK:
+                    EndDialog(hwnd, data->changed);
+                    return TRUE;
+            }
+            break;
+
+        case WM_CLOSE:
+            EndDialog(hwnd, data ? data->changed : FALSE);
+            return TRUE;
+    }
+
+    return FALSE;
+}
+
+BOOL Dialogs_Comments(HWND hParent, DocModel* doc) {
+    if (!doc) return FALSE;
+
+    CommentsData data = { doc, FALSE };
+    DialogBoxParamW(g_app->hInstance, MAKEINTRESOURCEW(IDD_COMMENTS),
+                    hParent, CommentsProc, (LPARAM)&data);
+    return data.changed;
+}
+
 BOOL Dialogs_InputBox(HWND hParent, const WCHAR* title, const WCHAR* prompt, WCHAR* buffer, int bufferSize) {
     InputBoxData data = {
         .title = title,
