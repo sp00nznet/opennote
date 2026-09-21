@@ -2069,9 +2069,11 @@ void Dialogs_MarkdownPreview(HWND hParent, HWND hEditor) {
     WCHAR tempPath[MAX_PATH];
     GetTempPathW(MAX_PATH, tempPath);
 
-    // Create temp HTML file with unique name
+    // One file, overwritten each time, rather than a new one per preview: the
+    // old name carried a tick count, so every preview ever taken was still
+    // sitting in the temp directory.
     WCHAR tempFile[MAX_PATH];
-    swprintf_s(tempFile, MAX_PATH, L"%sOpenNote_Preview_%u.html", tempPath, GetTickCount());
+    swprintf_s(tempFile, MAX_PATH, L"%sopennote-preview.html", tempPath);
 
     // Write HTML to file (UTF-8 with BOM for browser compatibility)
     HANDLE hFile = CreateFileW(tempFile, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);

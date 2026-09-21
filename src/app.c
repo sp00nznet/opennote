@@ -35,8 +35,21 @@ BOOL App_Initialize(HINSTANCE hInstance) {
         swprintf_s(g_app->dbPath, MAX_PATH, L"%s\\OpenNote", appData);
         CreateDirectoryW(g_app->dbPath, NULL);
         wcscat_s(g_app->dbPath, MAX_PATH, L"\\opennote.db");
+    } else if (SUCCEEDED(SHGetFolderPathW(NULL, CSIDL_LOCAL_APPDATA, NULL, 0, appData))) {
+        swprintf_s(g_app->dbPath, MAX_PATH, L"%s\\OpenNote", appData);
+        CreateDirectoryW(g_app->dbPath, NULL);
+        wcscat_s(g_app->dbPath, MAX_PATH, L"\\opennote.db");
     } else {
-        wcscpy_s(g_app->dbPath, MAX_PATH, L"opennote.db");
+        // Last resort: the temp directory. The old fallback was a relative
+        // path, which means the working directory -- for an installed copy
+        // that is Program Files, where the write fails or is quietly
+        // redirected into a virtual store nothing else looks in.
+        WCHAR temp[MAX_PATH];
+        if (GetTempPathW(MAX_PATH, temp)) {
+            swprintf_s(g_app->dbPath, MAX_PATH, L"%sopennote.db", temp);
+        } else {
+            wcscpy_s(g_app->dbPath, MAX_PATH, L"opennote.db");
+        }
     }
 
     // Open database

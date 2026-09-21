@@ -28,11 +28,11 @@ OpenNote uses [Inno Setup](https://jrsoftware.org/isinfo.php) to create the Wind
 
 ## Installer Features
 
-- Installs to `C:\Program Files\OpenNote` by default
+- Installs to `C:\Program Files\opennote` by default
 - Optional desktop shortcut
 - Optional Quick Launch shortcut
 - Start Menu shortcuts
-- "Open with OpenNote" context menu entry
+- "Open with opennote" context menu entry
 - Clean uninstaller
 
 ## Notes
